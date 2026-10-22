@@ -65,6 +65,7 @@ final class WatchPartySession {
     var onChange: (@MainActor () -> Void)?
     private(set) var sharedStream: WatchPartyStream?
     private(set) var isSharingStream = false
+    private(set) var activeHostStream: WatchPartyStream?
     /// A received candidate is inert. The future UI must explicitly select it before resolution/playback.
     var onStream: (@MainActor (WatchPartyStream?) -> Void)?
 
@@ -93,6 +94,7 @@ final class WatchPartySession {
     private var localPresence: WatchPartyPresence?
     private var changeObservers: [UUID: @MainActor () -> Void] = [:]
     private var noticeObservers: [UUID: @MainActor (WatchPartyNotice) -> Void] = [:]
+    private var chatObservers: [UUID: @MainActor (WatchPartyChatMessage) -> Void] = [:]
     private var streamConsentNonce: UUID?
     private var sharedStreamRevision = UUID()
     // Android-compatible manual state_request; not durable room storage.
@@ -139,6 +141,20 @@ final class WatchPartySession {
     }
 
     func removeNoticeObserver(_ id: UUID) { noticeObservers.removeValue(forKey: id) }
+
+    @discardableResult
+    func observeChat(_ callback: @escaping @MainActor (WatchPartyChatMessage) -> Void) -> UUID {
+        let id = UUID()
+        chatObservers[id] = callback
+        return id
+    }
+
+    func removeChatObserver(_ id: UUID) { chatObservers.removeValue(forKey: id) }
+
+    private func notifyChatMessage(_ message: WatchPartyChatMessage) {
+        let callbacks = chatObservers
+        for (id, callback) in callbacks where chatObservers[id] != nil { callback(message) }
+    }
 
     private func notifyNotice(_ message: String, member: WatchPartyMember? = nil) {
         let initials = member.flatMap {
@@ -427,6 +443,7 @@ final class WatchPartySession {
         do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: stream), epoch: epoch) }
         catch { lost(epoch: epoch, attempt: attempt); throw error }
         isSharingStream = true
+        activeHostStream = stream
         notifyChange()
     }
 
@@ -436,6 +453,7 @@ final class WatchPartySession {
         try requireReady(generation)
         guard let memberID, party?.hostMemberID == memberID else { throw WatchPartyStreamError.notHost }
         isSharingStream = false
+        activeHostStream = nil
         notifyChange()
         let epoch = generation, attempt = connectionID
         do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: nil), epoch: epoch) }
@@ -488,6 +506,7 @@ final class WatchPartySession {
         streamConsentNonce = nil
         sharedStreamRevision = UUID()
         isSharingStream = false
+        activeHostStream = nil
         if sharedStream != nil { sharedStream = nil; onStream?(nil) }
     }
 
@@ -566,6 +585,9 @@ final class WatchPartySession {
         connection = .ready; failure = nil; notifyChange()
         try await send("status", own, epoch: epoch)
         try await send("state_request", MemberPayload(memberID: memberID), epoch: epoch)
+        if isSharingStream, let stream = activeHostStream, party.hostMemberID == memberID, stream.mediaKey == party.media.key {
+            try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: stream), epoch: epoch)
+        }
         startConnectionTasks(epoch: epoch, attempt: attempt)
     }
 
@@ -602,7 +624,12 @@ final class WatchPartySession {
         cancelPersistence()
         channel?.close(); channel = nil
         connection = .recovering
-        clearSharedStream()
+        if party?.hostMemberID != memberID {
+            clearSharedStream()
+        } else {
+            sharedStream = nil
+            sharedStreamRevision = UUID()
+        }
         presence = presence.filter { $0.key == memberID }
         notifyChange()
     }
@@ -895,6 +922,10 @@ final class WatchPartySession {
                     do {
                         if let own = self.localPresence { try await self.send("status", own, epoch: epoch) }
                         if let playback = self.playback { try await self.send("state", playback, epoch: epoch) }
+                        if self.isSharingStream, let stream = self.activeHostStream,
+                           self.party?.hostMemberID == self.memberID, stream.mediaKey == self.party?.media.key {
+                            try await self.send("stream", WatchPartyStreamMessage(memberID: self.memberID ?? "", stream: stream), epoch: epoch)
+                        }
                     } catch { self.lost(epoch: epoch, attempt: attempt) }
                 }
             case "ended":
@@ -931,6 +962,12 @@ final class WatchPartySession {
                     sharedStreamRevision = UUID()
                     onStream?(sharedStream); notifyChange()
                 }
+            case "chat":
+                guard let message = try? JSONDecoder().decode(WatchPartyChatMessage.self, from: data) else { return }
+                guard message.memberID != memberID else { return }
+                let cleanBody = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanBody.isEmpty else { return }
+                notifyChatMessage(message)
             default: break
             }
         }

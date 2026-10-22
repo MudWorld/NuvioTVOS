@@ -227,6 +227,96 @@ final class WatchPartyCoordinationTests: XCTestCase {
         XCTAssertEqual(channel.stateRequestMemberIDs, ["me"])
     }
 
+    func testHostResendsActiveStreamOnGuestStateRequest() async throws {
+        let remote = Remote(), channel = Channel()
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        let source = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://example.test/host_stream.mp4")
+        let consent = try session.approveStreamSharing(source, origin: .directHTTP)
+        try await session.shareStream(source, consent: consent)
+
+        XCTAssertTrue(session.isSharingStream)
+        XCTAssertEqual(session.activeHostStream, source)
+        XCTAssertEqual(channel.streamMessages.count, 1)
+        XCTAssertEqual(channel.streamMessages[0].memberID, "me")
+        XCTAssertEqual(channel.streamMessages[0].stream?.url, source.url)
+
+        let resendExpectation = expectation(description: "Host resends stream on state_request")
+        channel.onStreamMessage = { msg in
+            if msg.stream?.url == source.url { resendExpectation.fulfill() }
+        }
+
+        // Simulate guest sending state_request
+        let payload = try JSONEncoder().encode(["member_id": "other"])
+        channel.receive?(.message(name: "state_request", payload: payload))
+
+        await fulfillment(of: [resendExpectation], timeout: 1)
+        XCTAssertEqual(channel.streamMessages.count, 2)
+        XCTAssertEqual(channel.streamMessages[1].memberID, "me")
+        XCTAssertEqual(channel.streamMessages[1].stream, source)
+    }
+
+    func testHostDoesNotResendStreamAfterStopSharing() async throws {
+        let remote = Remote(), channel = Channel()
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        let source = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://example.test/host_stream.mp4")
+        let consent = try session.approveStreamSharing(source, origin: .directHTTP)
+        try await session.shareStream(source, consent: consent)
+        XCTAssertEqual(channel.streamMessages.count, 1)
+
+        try await session.stopSharingStream()
+        XCTAssertFalse(session.isSharingStream)
+        XCTAssertNil(session.activeHostStream)
+        XCTAssertEqual(channel.streamMessages.count, 2)
+        XCTAssertNil(channel.streamMessages[1].stream)
+
+        let payload = try JSONEncoder().encode(["member_id": "other"])
+        channel.receive?(.message(name: "state_request", payload: payload))
+
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(channel.streamMessages.count, 2, "No stream message should be sent after stopSharingStream")
+    }
+
+    func testIncomingChatMessageNotifiesObservers() async throws {
+        let remote = Remote(), channel = Channel()
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+
+        var receivedMessage: WatchPartyChatMessage?
+        let observerID = session.observeChat { msg in
+            receivedMessage = msg
+        }
+        defer { session.removeChatObserver(observerID) }
+
+        // 1. Message from another member with valid body should notify observer
+        let chatMsg = WatchPartyChatMessage(id: 101, memberID: "other", name: "Alice", avatarURL: nil, avatarColor: "#FF0000", body: "Hello room!")
+        let chatPayload = try JSONEncoder().encode(chatMsg)
+        channel.receive?(.message(name: "chat", payload: chatPayload))
+        XCTAssertEqual(receivedMessage?.body, "Hello room!")
+        XCTAssertEqual(receivedMessage?.name, "Alice")
+        XCTAssertEqual(receivedMessage?.memberID, "other")
+
+        // 2. Message from self should be ignored
+        receivedMessage = nil
+        let ownMsg = WatchPartyChatMessage(id: 102, memberID: "me", name: "Me", body: "My own message")
+        let ownPayload = try JSONEncoder().encode(ownMsg)
+        channel.receive?(.message(name: "chat", payload: ownPayload))
+        XCTAssertNil(receivedMessage)
+
+        // 3. Blank message should be ignored
+        let blankMsg = WatchPartyChatMessage(id: 103, memberID: "other", body: "   ")
+        let blankPayload = try JSONEncoder().encode(blankMsg)
+        channel.receive?(.message(name: "chat", payload: blankPayload))
+        XCTAssertNil(receivedMessage)
+    }
+
     func testGuestAcceptsOnlyCurrentHostStreamAndRevocationInvalidatesSelection() async throws {
         let remote = Remote(), channel = Channel()
         remote.hostMemberID = "other"
@@ -756,6 +846,8 @@ final class WatchPartyCoordinationTests: XCTestCase {
         var states: [WatchPartyPlayback] = []
         var stateRequestMemberIDs: [String] = []
         var failStateRequest = false
+        var streamMessages: [WatchPartyStreamMessage] = []
+        var onStreamMessage: ((WatchPartyStreamMessage) -> Void)?
         func open(partyID: String, memberID: String, receive: @escaping @MainActor (WatchPartyChannelEvent) -> Void) async throws {
             isConnected = true; self.receive = receive
         }
@@ -768,6 +860,11 @@ final class WatchPartyCoordinationTests: XCTestCase {
             if event == "state" {
                 let state = try JSONDecoder().decode(WatchPartyPlayback.self, from: payload)
                 states.append(state); onState?(state)
+            }
+            if event == "stream" {
+                let msg = try JSONDecoder().decode(WatchPartyStreamMessage.self, from: payload)
+                streamMessages.append(msg)
+                onStreamMessage?(msg)
             }
         }
         func track(_ presence: WatchPartyPresence) async throws {}

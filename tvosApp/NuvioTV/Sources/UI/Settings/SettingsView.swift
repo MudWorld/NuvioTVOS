@@ -107,6 +107,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
 }
 
 enum SettingsKey {
+    static let partyChatToastsEnabled = "nuvio.tv.party.chatToastsEnabled"
     static let profileName = "nuvio.tv.settings.profile.name"
     static let profilePinEnabled = "nuvio.tv.settings.profile.pinEnabled"
     static let profileAutoSelectLast = "nuvio.tv.settings.profile.autoSelectLast"

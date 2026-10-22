@@ -135,12 +135,20 @@ struct PlayerToastItem: Equatable, Sendable, ExpressibleByStringLiteral {
     var avatarURL: String? = nil
     var avatarColor: String? = nil
     var initials: String? = nil
+    var senderName: String? = nil
 
-    init(message: String, avatarURL: String? = nil, avatarColor: String? = nil, initials: String? = nil) {
+    init(
+        message: String,
+        avatarURL: String? = nil,
+        avatarColor: String? = nil,
+        initials: String? = nil,
+        senderName: String? = nil
+    ) {
         self.message = message
         self.avatarURL = avatarURL
         self.avatarColor = avatarColor
         self.initials = initials
+        self.senderName = senderName
     }
 
     init(stringLiteral value: String) {
@@ -2638,13 +2646,21 @@ class PlayerViewModel: ObservableObject {
         _ message: String,
         avatarURL: String? = nil,
         avatarColor: String? = nil,
-        initials: String? = nil
+        initials: String? = nil,
+        senderName: String? = nil,
+        durationSeconds: Double = 2.8
     ) {
-        let item = PlayerToastItem(message: message, avatarURL: avatarURL, avatarColor: avatarColor, initials: initials)
+        let item = PlayerToastItem(
+            message: message,
+            avatarURL: avatarURL,
+            avatarColor: avatarColor,
+            initials: initials,
+            senderName: senderName
+        )
         playerToast = item
         toastClearTask?.cancel()
         toastClearTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 2_800_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(durationSeconds * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
             if self.playerToast == item {
                 self.playerToast = nil
@@ -2658,6 +2674,24 @@ class PlayerViewModel: ObservableObject {
             avatarURL: notice.avatarURL,
             avatarColor: notice.avatarColor,
             initials: notice.initials
+        )
+    }
+
+    func handleWatchPartyChatMessage(_ message: WatchPartyChatMessage) {
+        let isEnabled = ProfileSettings.current.object(forKey: SettingsKey.partyChatToastsEnabled) as? Bool ?? true
+        guard isEnabled else { return }
+
+        let rawName = message.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sender = rawName.isEmpty ? "Friend" : rawName
+        let initials = String(sender.prefix(1)).uppercased()
+
+        showPlayerToast(
+            message.body,
+            avatarURL: message.avatarURL,
+            avatarColor: message.avatarColor,
+            initials: initials,
+            senderName: sender,
+            durationSeconds: 4.5
         )
     }
 
@@ -3828,6 +3862,9 @@ class PlayerViewModel: ObservableObject {
         }
         binding.onNotice = { [weak self] notice in
             self?.showPlayerToast(notice)
+        }
+        binding.onChatMessage = { [weak self] message in
+            self?.handleWatchPartyChatMessage(message)
         }
         watchPartyControls = WatchPartyControlRouter(isCurrent: isCurrent,
             currentStamp: { [weak self] in self?.watchPartyPlayerStamp() },

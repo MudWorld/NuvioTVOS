@@ -21,6 +21,7 @@ struct PlayerWatchPartyPanel: View {
     @State private var showingMemberRemovalConfirmation = false
     @State private var memberToRemove: WatchPartyMember?
     @State private var roomCodeQR: UIImage?
+    @State private var chatToastsEnabled = ProfileSettings.current.object(forKey: SettingsKey.partyChatToastsEnabled) as? Bool ?? true
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -340,7 +341,7 @@ struct PlayerWatchPartyPanel: View {
                             title: "Share my stream · BETA",
                             subtitle: "Share this playback link with guests (may expose Debrid tokens)",
                             symbol: "antenna.radiowaves.left.and.right",
-                            value: hasSharedStream ? "Sent" : "Off",
+                            value: (room.isSharingStream || hasSharedStream) ? "Sharing" : "Off",
                             isFocused: shareFocused
                         )
                     }
@@ -351,7 +352,7 @@ struct PlayerWatchPartyPanel: View {
                     .disabled(service.busy || operation != nil || room.connection != .ready
                         || owner.presentation?.mount.isCurrent != true
                         || (focusContext.entryLocked && "party.shareStream" != effectiveEntryFocusTarget))
-                    if hasSharedStream {
+                    if room.isSharingStream || hasSharedStream {
                         Button {
                             run {
                                 try await room.stopSharingStream()
@@ -384,6 +385,24 @@ struct PlayerWatchPartyPanel: View {
                     PlayerPanelRow(title: "Choose a source in the Watch Party lobby to start playback.")
                     openLobbyButton(isTopRow: !isHost)
                 }
+
+                let chatToastsFocused = focusedControlID == "party.chatToasts"
+                Button {
+                    chatToastsEnabled.toggle()
+                    ProfileSettings.current.set(chatToastsEnabled, forKey: SettingsKey.partyChatToastsEnabled)
+                } label: {
+                    actionLabel(
+                        title: "Chat message toasts",
+                        subtitle: chatToastsEnabled ? "Message bubbles appear during playback" : "Muted during playback",
+                        symbol: chatToastsEnabled ? "bubble.left.fill" : "bubble.left",
+                        value: chatToastsEnabled ? "On" : "Off",
+                        isFocused: chatToastsFocused
+                    )
+                }
+                .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
+                .focused($focusedControlID, equals: "party.chatToasts")
+                .onMoveCommand(perform: handleFocusMove)
 
                 let leaveFocused = focusedControlID == "party.leave"
                 Button {

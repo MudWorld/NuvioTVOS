@@ -6,6 +6,7 @@ struct WatchPartyLobbyView: View {
     @ObservedObject var owner: WatchPartyAppOwner
     @ObservedObject var service: WatchPartyService
     var onChooseSharedSource: (WatchPartyStream) -> Void = { _ in }
+    var onReturnToPlayer: () -> Void = {}
     let canUseAccount: Bool
     let isChoosing: Bool
     let onCreate: () -> Void
@@ -1103,6 +1104,21 @@ struct WatchPartyLobbyView: View {
     @ViewBuilder
     private func primaryRoomAction(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         if owner.presentation?.mount.isCurrent == true {
+            Button {
+                onReturnToPlayer()
+            } label: {
+                roomActionLabel(
+                    symbol: "play.rectangle.fill",
+                    title: "Return to player",
+                    subtitle: "Resume fullscreen playback",
+                    isFocused: focusedAction == "return-to-player"
+                )
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
+            .focused($focusedAction, equals: "return-to-player")
+            .disabled(service.busy || operation != nil || room.membershipExit != nil)
+
             Button {
                 guard let presentation = owner.presentation, presentation.mount.isCurrent else { return }
                 presentation.mount.viewModel.catchUpWithWatchParty()

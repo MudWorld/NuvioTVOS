@@ -37,7 +37,7 @@ final class WatchPartyFoundationTests: XCTestCase {
         }
         XCTAssertEqual(target(false, false, false, false), "room-code")
         XCTAssertEqual(target(true, false, true, false), "choose-source")
-        XCTAssertEqual(target(true, false, true, true), "catch-up")
+        XCTAssertEqual(target(true, false, true, true), "return-to-player")
         XCTAssertEqual(target(true, false, true, false, false, true), "review-room")
         XCTAssertEqual(target(true, false, false, false, false, true), "reconnect")
         XCTAssertEqual(target(true, true, true, false, false, true), "leave")

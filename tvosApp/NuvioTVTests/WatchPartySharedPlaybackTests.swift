@@ -63,21 +63,55 @@ final class WatchPartySharedPlaybackTests: XCTestCase {
         ))
     }
 
-    func testUnsupportedResponseHeadersFailBeforeMetadataLoading() async {
+    func testResponseHeadersWithCookiesAreAdaptedIntoRequestHeadersAndCookieStorage() async throws {
         var source = stream()
-        source.responseHeaders = ["Content-Type": "application/vnd.apple.mpegurl"]
-        do {
-            _ = try await WatchPartySharedPlaybackResolver.resolve(
-                stream: source, room: movie, isCurrent: { true },
-                loadMetadata: { _, _ in
-                    XCTFail("Unsupported response semantics must fail before metadata loading")
-                    return NuvioMeta(id: "tt42", name: "Movie", type: "movie")
-                }
-            )
-            XCTFail("Response headers must not be discarded or merged into requests")
-        } catch {
-            XCTAssertEqual(error as? WatchPartySharedPlaybackError, .unsupportedResponseHeaders)
-        }
+        source.responseHeaders = [
+            "set-cookie": "session_id=secret123; Path=/; Domain=media.example.test",
+            "Content-Type": "application/vnd.apple.mpegurl"
+        ]
+        let target = try await WatchPartySharedPlaybackResolver.resolve(
+            stream: source, room: movie, isCurrent: { true },
+            loadMetadata: { _, _ in
+                NuvioMeta(id: "tmdb:42", name: "Movie", imdbId: "tt42", type: "movie")
+            }
+        )
+        // Verify Cookie request header synthesized
+        XCTAssertEqual(target.stream.headers["Cookie"], "session_id=secret123")
+        // Verify original request headers preserved
+        XCTAssertEqual(target.stream.headers["Referer"], "https://provider.example.test")
+        // Verify responseHeaders cleared on adapted stream
+        XCTAssertTrue(target.stream.responseHeaders.isEmpty)
+        // Verify cookie storage populated for target URL
+        let storageCookies = HTTPCookieStorage.shared.cookies(for: target.url) ?? []
+        XCTAssertTrue(storageCookies.contains(where: { $0.name == "session_id" && $0.value == "secret123" }))
+    }
+
+    func testResponseHeadersWithoutCookiesAreSafelyAbsorbed() async throws {
+        var source = stream()
+        source.responseHeaders = [
+            "Content-Type": "application/vnd.apple.mpegurl",
+            "Access-Control-Allow-Origin": "*"
+        ]
+        let target = try await WatchPartySharedPlaybackResolver.resolve(
+            stream: source, room: movie, isCurrent: { true },
+            loadMetadata: { _, _ in
+                NuvioMeta(id: "tmdb:42", name: "Movie", imdbId: "tt42", type: "movie")
+            }
+        )
+        XCTAssertEqual(target.stream.headers["Referer"], "https://provider.example.test")
+        XCTAssertNil(target.stream.headers["Cookie"])
+        XCTAssertTrue(target.stream.responseHeaders.isEmpty)
+    }
+
+    func testResponseHeadersAdapterWithExistingCookieHeaderAppends() throws {
+        var source = stream()
+        source.headers = ["Cookie": "device_id=456", "Referer": "https://provider.example.test"]
+        source.responseHeaders = ["Set-Cookie": "auth=abc; Path=/; Domain=media.example.test"]
+        let url = try XCTUnwrap(URL(string: source.url))
+        let adapted = WatchPartyResponseHeadersAdapter.adapt(stream: source, targetURL: url)
+        XCTAssertEqual(adapted.headers["Cookie"], "device_id=456; auth=abc")
+        XCTAssertEqual(adapted.headers["Referer"], "https://provider.example.test")
+        XCTAssertTrue(adapted.responseHeaders.isEmpty)
     }
 
     func testStaleSourceBeforeLoadingDoesNotResolveMetadata() async {

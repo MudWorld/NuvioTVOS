@@ -95,7 +95,7 @@ enum WatchPartyRoomFocusPolicy {
         if membershipEnded { return "leave" }
         if !connectionReady { return "reconnect" }
         if needsMediaReview { return "review-room" }
-        return playerAttached ? "catch-up" : "choose-source"
+        return playerAttached ? "return-to-player" : "choose-source"
     }
 }
 

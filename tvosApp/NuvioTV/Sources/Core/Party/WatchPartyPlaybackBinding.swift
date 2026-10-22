@@ -20,6 +20,8 @@ protocol WatchPartyPlaybackRoom: AnyObject {
     func removeChangeObserver(_ id: UUID)
     func observeNotices(_ callback: @escaping @MainActor (WatchPartyNotice) -> Void) -> UUID
     func removeNoticeObserver(_ id: UUID)
+    func observeChat(_ callback: @escaping @MainActor (WatchPartyChatMessage) -> Void) -> UUID
+    func removeChatObserver(_ id: UUID)
     func publish(paused: Bool, positionMs: Int64, rate: Float, waiting: Bool) async throws
     func setPresence(status: WatchPartyMemberStatus, mediaKey: String?, behindMs: Int64?) async throws
 }
@@ -27,6 +29,8 @@ protocol WatchPartyPlaybackRoom: AnyObject {
 extension WatchPartyPlaybackRoom {
     func observeNotices(_ callback: @escaping @MainActor (WatchPartyNotice) -> Void) -> UUID { UUID() }
     func removeNoticeObserver(_ id: UUID) {}
+    func observeChat(_ callback: @escaping @MainActor (WatchPartyChatMessage) -> Void) -> UUID { UUID() }
+    func removeChatObserver(_ id: UUID) {}
 }
 
 extension WatchPartySession: WatchPartyPlaybackRoom {
@@ -51,6 +55,7 @@ final class WatchPartyPlaybackBinding {
     var onError: (@MainActor (Error) -> Void)?
     var onNeedsMedia: (@MainActor (String) -> Void)?
     var onNotice: (@MainActor (WatchPartyNotice) -> Void)?
+    var onChatMessage: (@MainActor (WatchPartyChatMessage) -> Void)?
     private(set) var isBehind = false
     private(set) var behindMs: Int64?
 
@@ -64,6 +69,7 @@ final class WatchPartyPlaybackBinding {
     private var state: WatchPartyBindingRoomState
     private var observerID: UUID?
     private var noticeObserverID: UUID?
+    private var chatObserverID: UUID?
     private var stopped = false
     private var suspended = false
     private var revision = UUID()
@@ -115,6 +121,7 @@ final class WatchPartyPlaybackBinding {
         roomID = state.roomID; memberID = state.memberID; mediaKey = state.mediaKey
         observerID = room.observeChanges { [weak self] in self?.roomChanged() }
         noticeObserverID = room.observeNotices { [weak self] in self?.onNotice?($0) }
+        chatObserverID = room.observeChat { [weak self] in self?.onChatMessage?($0) }
         bridge.onSample = { [weak self] in self?.observed($0) }
         if let sample = bridge.sample { observed(sample) }
     }
@@ -135,6 +142,8 @@ final class WatchPartyPlaybackBinding {
         observerID = nil
         if let noticeObserverID { room.removeNoticeObserver(noticeObserverID) }
         noticeObserverID = nil
+        if let chatObserverID { room.removeChatObserver(chatObserverID) }
+        chatObserverID = nil
         worker?.cancel(); worker = nil
         presenceWorker?.cancel(); presenceWorker = nil
         bridge.stop()

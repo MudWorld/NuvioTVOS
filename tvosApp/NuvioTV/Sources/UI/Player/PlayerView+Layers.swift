@@ -278,9 +278,19 @@ extension PlayerView {
                     if hasAvatar {
                         toastAvatar(toast)
                     }
-                    Text(toast.message)
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(.white)
+                    if let sender = toast.senderName, !sender.isEmpty {
+                        Text("\(sender):")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(toastAvatarColor(toast.avatarColor))
+                        Text(toast.message)
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.white)
+                            .lineLimit(2)
+                    } else {
+                        Text(toast.message)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
                 }
                 .padding(.leading, hasAvatar ? 12 : 28)
                 .padding(.trailing, 28)

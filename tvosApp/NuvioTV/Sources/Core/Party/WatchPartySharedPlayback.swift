@@ -11,6 +11,55 @@ struct WatchPartySharedPlaybackTarget {
     let stream: WatchPartyStream
 }
 
+/// Adapts server response headers (e.g. Set-Cookie) into client cookies and request headers.
+enum WatchPartyResponseHeadersAdapter {
+    /// Adapts stream response headers into effective client request headers and populates
+    /// `HTTPCookieStorage.shared` for AVPlayer playback.
+    ///
+    /// - Parameters:
+    ///   - stream: The incoming shared stream with headers and responseHeaders.
+    ///   - targetURL: The validated playback destination URL.
+    /// - Returns: An adapted `WatchPartyStream` with cookies injected into `headers`
+    ///   and `responseHeaders` safely handled.
+    static func adapt(stream: WatchPartyStream, targetURL: URL) -> WatchPartyStream {
+        guard !stream.responseHeaders.isEmpty else { return stream }
+        var adaptedStream = stream
+        var effectiveHeaders = stream.headers
+
+        // Normalize response header keys to ensure case-insensitive matching for Set-Cookie
+        var normalizedResponseHeaders: [String: String] = [:]
+        for (key, value) in stream.responseHeaders {
+            if key.caseInsensitiveCompare("Set-Cookie") == .orderedSame {
+                normalizedResponseHeaders["Set-Cookie"] = value
+            } else {
+                normalizedResponseHeaders[key] = value
+            }
+        }
+
+        // Extract and register cookies
+        let cookies = HTTPCookie.cookies(withResponseHeaderFields: normalizedResponseHeaders, for: targetURL)
+        if !cookies.isEmpty {
+            for cookie in cookies {
+                HTTPCookieStorage.shared.setCookie(cookie)
+            }
+            let cookieRequestHeaders = HTTPCookie.requestHeaderFields(with: cookies)
+            for (headerName, headerValue) in cookieRequestHeaders {
+                if let existing = effectiveHeaders[headerName], !existing.isEmpty {
+                    effectiveHeaders[headerName] = "\(existing); \(headerValue)"
+                } else {
+                    effectiveHeaders[headerName] = headerValue
+                }
+            }
+        }
+
+        adaptedStream.headers = effectiveHeaders
+        // Response headers have been safely adapted; clear them on the playable candidate
+        // so downstream components do not attempt to forward them as raw request headers.
+        adaptedStream.responseHeaders = [:]
+        return adaptedStream
+    }
+}
+
 /// Resolves catalog identity only. Never probes, logs or persists the private source URL.
 enum WatchPartySharedPlaybackResolver {
     @MainActor
@@ -24,11 +73,7 @@ enum WatchPartySharedPlaybackResolver {
         try WatchPartyLaunchPolicy.validate(room)
         try WatchPartyStreamPolicy.validate(stream)
         guard stream.mediaKey == room.key else { throw WatchPartySharedPlaybackError.differentMedia }
-        // The existing player entry point supports request headers only. Do not silently drop
-        // response semantics or send response headers to the origin as request headers.
-        guard stream.responseHeaders.isEmpty else {
-            throw WatchPartySharedPlaybackError.unsupportedResponseHeaders
-        }
+        guard URL(string: stream.url) != nil else { throw WatchPartyStreamError.invalidURL }
         let meta = try await loadMetadata(room.metaID, room.metaType)
         try Task.checkCancellation()
         guard isCurrent() else { throw WatchPartySharedPlaybackError.staleSelection }
@@ -39,9 +84,6 @@ enum WatchPartySharedPlaybackResolver {
                        room: WatchPartyMedia) throws -> WatchPartySharedPlaybackTarget {
         try WatchPartyLaunchPolicy.validate(room)
         try WatchPartyStreamPolicy.validate(stream)
-        guard stream.responseHeaders.isEmpty else {
-            throw WatchPartySharedPlaybackError.unsupportedResponseHeaders
-        }
         let supportedType = meta.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "movie"
             || NuvioMeta.isSeriesType(meta.type)
         guard stream.mediaKey == room.key, supportedType else {
@@ -58,6 +100,7 @@ enum WatchPartySharedPlaybackResolver {
         let selected = try WatchPartyLaunchPolicy.mediaForPlayback(meta, episode: episode, room: room)
         try WatchPartyLaunchPolicy.validateSelection(selected, room: room)
         guard let url = URL(string: stream.url) else { throw WatchPartyStreamError.invalidURL }
-        return WatchPartySharedPlaybackTarget(meta: meta, episode: episode, url: url, stream: stream)
+        let adapted = WatchPartyResponseHeadersAdapter.adapt(stream: stream, targetURL: url)
+        return WatchPartySharedPlaybackTarget(meta: meta, episode: episode, url: url, stream: adapted)
     }
 }

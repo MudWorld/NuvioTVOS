@@ -2775,6 +2775,52 @@ final class ExternalPlayerTests: XCTestCase {
         // Audio delay should have reset to 0!
         XCTAssertEqual(model.audioDelayMs, 0)
     }
+
+    @MainActor
+    func testWatchPartyChatToastRespectsUserPreference() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let model = PlayerViewModel(
+            sessionCoordinator: coordinator,
+            scrubThumbnailProvider: nil
+        )
+
+        let chatMessage = WatchPartyChatMessage(
+            id: 42,
+            memberID: "friend-1",
+            name: "Bob",
+            avatarURL: "https://example.com/avatar.jpg",
+            avatarColor: "#00FF00",
+            body: "Great movie!"
+        )
+
+        // 1. By default (no setting stored), toasts are enabled
+        ProfileSettings.current.removeObject(forKey: SettingsKey.partyChatToastsEnabled)
+        defer {
+            ProfileSettings.current.removeObject(forKey: SettingsKey.partyChatToastsEnabled)
+        }
+
+        model.handleWatchPartyChatMessage(chatMessage)
+        XCTAssertNotNil(model.playerToast)
+        XCTAssertEqual(model.playerToast?.message, "Great movie!")
+        XCTAssertEqual(model.playerToast?.senderName, "Bob")
+        XCTAssertEqual(model.playerToast?.avatarColor, "#00FF00")
+        XCTAssertEqual(model.playerToast?.initials, "B")
+
+        // 2. When disabled in settings, chat messages do not trigger toast
+        model.playerToast = nil
+        ProfileSettings.current.set(false, forKey: SettingsKey.partyChatToastsEnabled)
+
+        model.handleWatchPartyChatMessage(chatMessage)
+        XCTAssertNil(model.playerToast)
+
+        // 3. When explicitly re-enabled, toast triggers again
+        ProfileSettings.current.set(true, forKey: SettingsKey.partyChatToastsEnabled)
+
+        model.handleWatchPartyChatMessage(chatMessage)
+        XCTAssertNotNil(model.playerToast)
+        XCTAssertEqual(model.playerToast?.message, "Great movie!")
+        XCTAssertEqual(model.playerToast?.senderName, "Bob")
+    }
 }
 
 

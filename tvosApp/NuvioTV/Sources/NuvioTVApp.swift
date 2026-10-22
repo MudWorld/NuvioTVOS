@@ -4175,6 +4175,7 @@ private struct TVMainTabView: View {
         if let service = watchPartyOwner.service {
             WatchPartyLobbyView(owner: watchPartyOwner, service: service,
                 onChooseSharedSource: onChoosePartySharedSource,
+                onReturnToPlayer: { PictureInPictureManager.shared.restoreFullscreenFromApp() },
                 canUseAccount: isAuthenticated && !sessionNeedsReauthentication && activeProfile != nil,
                 isChoosing: partyIsChoosing, onCreate: onCreateParty,
                 onChooseSource: onChoosePartySource, onCancelSelection: onCancelPartySelection,
