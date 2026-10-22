@@ -6742,6 +6742,7 @@ enum WatchedStore {
     private static var cachedSnapshot: WatchedSnapshot?
     private static var cachedSource: TraktWatchProgressSource?
     private static var cachedTraktHistoryVisibility = false
+    private static var cachedAdditionalSources: Set<TraktWatchProgressSource> = []
     private static var cacheGeneration = 0
 
     private enum PersistenceError: LocalizedError {
@@ -6787,6 +6788,7 @@ enum WatchedStore {
         cachedSnapshot = nil
         cachedSource = nil
         cachedTraktHistoryVisibility = false
+        cachedAdditionalSources = []
     }
 
     /// Pre-warms the in-memory cache in the background off the main actor.
@@ -6999,11 +7001,21 @@ enum WatchedStore {
         let currentSource = TraktSettingsStore.watchProgressSource(in: ProfileSettings.current)
         let shouldShowConnectedTraktHistory = currentSource != .trakt
             && RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: ProfileSettings.current)
+        var additionalSources: Set<TraktWatchProgressSource> = []
+        if shouldShowConnectedTraktHistory {
+            additionalSources.insert(.trakt)
+        }
+        for source in TraktWatchProgressSource.allCases where source != currentSource && source != .nuvioSync {
+            if RemoteTrackingState.isScrobbleEnabled(for: source, in: ProfileSettings.current) {
+                additionalSources.insert(source)
+            }
+        }
 
         if cachedKey == key,
            let snapshot = cachedSnapshot,
            cachedSource == currentSource,
-           cachedTraktHistoryVisibility == shouldShowConnectedTraktHistory {
+           cachedTraktHistoryVisibility == shouldShowConnectedTraktHistory,
+           cachedAdditionalSources == additionalSources {
             return snapshot
         }
 
@@ -7011,11 +7023,12 @@ enum WatchedStore {
         let snapshot = WatchedSnapshot(
             items: allItems,
             source: currentSource,
-            additionalVisibleSources: shouldShowConnectedTraktHistory ? [.trakt] : []
+            additionalVisibleSources: additionalSources
         )
         cachedSnapshot = snapshot
         cachedSource = currentSource
         cachedTraktHistoryVisibility = shouldShowConnectedTraktHistory
+        cachedAdditionalSources = additionalSources
         return snapshot
     }
 
@@ -7314,7 +7327,8 @@ enum WatchedStore {
                     )
                 }
             }
-            if TraktSettingsStore.watchProgressSource(in: store) == .wetrakr {
+            if TraktSettingsStore.watchProgressSource(in: store) == .wetrakr
+                || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: store) {
                 for episode in episodes {
                     _ = enqueueSelectedWeTrakrMutation(
                         meta: meta,
@@ -7424,8 +7438,7 @@ enum WatchedStore {
             }
             schedulePendingProviderFlush(.trakt, store: traktStore, profileId: profileId)
         }
-        if source == .simkl,
-           RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: traktStore) {
+        if RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: traktStore) {
             Task {
                 _ = await SimklHistoryService.setWatched(
                     meta,
@@ -7436,8 +7449,7 @@ enum WatchedStore {
                 )
             }
         }
-        if source == .mdblist,
-           RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
+        if RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
             Task { @MainActor in
                 _ = await MdbListProgressService.setWatched(
                     meta,
@@ -7449,7 +7461,8 @@ enum WatchedStore {
                 )
             }
         }
-        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr {
+        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr
+            || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: traktStore) {
             for episode in episodeNumbers.sorted() {
                 _ = enqueueSelectedWeTrakrMutation(
                     meta: meta,
@@ -7709,26 +7722,38 @@ enum WatchedStore {
             return true
         }
 
-        var countsBySource = existing?.watchCountsBySource ?? [:]
-        let priorCount: Int
-        if let storedCount = countsBySource.first(where: {
-            $0.key.caseInsensitiveCompare(sourceKey) == .orderedSame
-        })?.value {
-            priorCount = max(1, storedCount)
-        } else if existing?.pendingPlaybackCompletions.isEmpty == false {
-            priorCount = 0
-        } else if (existing?.sources.isEmpty == true && existing?.watchCountsBySource.isEmpty == true)
-            || existing?.sources.contains(where: {
-                $0.caseInsensitiveCompare(sourceKey) == .orderedSame
-            }) == true {
-            priorCount = 1
-        } else {
-            priorCount = 0
+        var targetSourceKeys: Set<String> = [sourceKey]
+        for activeSource in RemoteTrackingState.activeScrobbleSources(in: settings) {
+            targetSourceKeys.insert(activeSource.rawValue)
         }
-        countsBySource[sourceKey] = priorCount + 1
+        for target in completionTargets {
+            targetSourceKeys.insert(target.provider.rawValue)
+        }
+
+        var countsBySource = existing?.watchCountsBySource ?? [:]
+        for key in targetSourceKeys {
+            let priorCount: Int
+            if let storedCount = countsBySource.first(where: {
+                $0.key.caseInsensitiveCompare(key) == .orderedSame
+            })?.value {
+                priorCount = max(1, storedCount)
+            } else if existing?.pendingPlaybackCompletions.isEmpty == false {
+                priorCount = 0
+            } else if (existing?.sources.isEmpty == true && existing?.watchCountsBySource.isEmpty == true)
+                || existing?.sources.contains(where: {
+                    $0.caseInsensitiveCompare(key) == .orderedSame
+                }) == true {
+                priorCount = 1
+            } else {
+                priorCount = 0
+            }
+            countsBySource[key] = priorCount + 1
+        }
 
         var lastIDsBySource = existing?.lastCountedPlaybackIDsBySource ?? [:]
-        lastIDsBySource[sourceKey] = completionID
+        for key in targetSourceKeys {
+            lastIDsBySource[key] = completionID
+        }
         let watchedAt = Date()
         var pendingCompletions = existing?.pendingPlaybackCompletions ?? []
         for target in completionTargets {
@@ -7749,7 +7774,7 @@ enum WatchedStore {
             watchedAt: watchedAt,
             season: season,
             episode: episode,
-            sources: (existing?.sources ?? []).union([sourceKey]),
+            sources: (existing?.sources ?? []).union(targetSourceKeys),
             watchCountsBySource: countsBySource,
             lastCountedPlaybackIDsBySource: lastIDsBySource,
             pendingPlaybackCompletions: pendingCompletions
@@ -7778,30 +7803,39 @@ enum WatchedStore {
             return value
         }
 
+        func appendTarget(provider: TraktWatchProgressSource, accountID: String?) {
+            guard !targets.contains(where: { $0.provider == provider }) else { return }
+            targets.append((provider, accountID))
+        }
+
         if let capturedAccounts {
             switch selectedSource {
             case .trakt:
-                targets.append((.trakt, capturedAccount(.trakt)))
+                appendTarget(provider: .trakt, accountID: capturedAccount(.trakt))
             case .wetrakr:
-                targets.append((.wetrakr, capturedAccount(.wetrakr)))
+                appendTarget(provider: .wetrakr, accountID: capturedAccount(.wetrakr))
             default:
                 break
             }
-            if selectedSource != .trakt,
-               capturedAccounts.keys.contains(where: {
-                   $0.caseInsensitiveCompare(TraktWatchProgressSource.trakt.rawValue) == .orderedSame
-               }) {
-                targets.append((.trakt, capturedAccount(.trakt)))
+            if capturedAccounts.keys.contains(where: {
+                $0.caseInsensitiveCompare(TraktWatchProgressSource.trakt.rawValue) == .orderedSame
+            }) {
+                appendTarget(provider: .trakt, accountID: capturedAccount(.trakt))
+            }
+            if capturedAccounts.keys.contains(where: {
+                $0.caseInsensitiveCompare(TraktWatchProgressSource.wetrakr.rawValue) == .orderedSame
+            }) {
+                appendTarget(provider: .wetrakr, accountID: capturedAccount(.wetrakr))
             }
         } else {
-            if selectedSource == .trakt {
-                targets.append((.trakt, TraktHistoryService.completionAccountID(in: settings, profileId: profileId)))
-            } else if selectedSource == .wetrakr {
-                targets.append((.wetrakr, currentWeTrakrCompletionAccountID(in: settings, profileId: profileId)))
+            if selectedSource == .trakt
+                || RemoteTrackingState.isScrobbleEnabled(for: .trakt, in: settings)
+                || RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: settings) {
+                appendTarget(provider: .trakt, accountID: TraktHistoryService.completionAccountID(in: settings, profileId: profileId))
             }
-            if selectedSource != .trakt,
-               RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: settings) {
-                targets.append((.trakt, TraktHistoryService.completionAccountID(in: settings, profileId: profileId)))
+            if selectedSource == .wetrakr
+                || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: settings) {
+                appendTarget(provider: .wetrakr, accountID: currentWeTrakrCompletionAccountID(in: settings, profileId: profileId))
             }
         }
         return targets
@@ -7860,6 +7894,17 @@ enum WatchedStore {
            }) {
             Task {
                 _ = await TraktHistoryService.flushPendingPlaybackCompletions(
+                    store: traktStore,
+                    profileId: profileId
+                )
+            }
+        }
+        if source != .trakt && source != .wetrakr,
+           item.pendingPlaybackCompletions.contains(where: {
+               $0.provider == TraktWatchProgressSource.wetrakr.rawValue && $0.accountID != nil
+           }) {
+            Task { @MainActor in
+                _ = await WeTrakrProgressService.flushPendingPlaybackCompletions(
                     store: traktStore,
                     profileId: profileId
                 )
@@ -7971,7 +8016,8 @@ enum WatchedStore {
                 )
             }
         }
-        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr {
+        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr
+            || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: traktStore) {
             _ = enqueueSelectedWeTrakrMutation(
                 meta: meta,
                 season: season,
@@ -8009,21 +8055,24 @@ enum WatchedStore {
     ) -> Set<PlaybackProviderAccountBinding> {
         let selectedSource = TraktSettingsStore.watchProgressSource(in: settings)
         var bindings: Set<PlaybackProviderAccountBinding> = []
-        if selectedSource == .trakt || selectedSource == .wetrakr {
-            let accountID = selectedSource == .trakt
-                ? TraktHistoryService.completionAccountID(in: settings, profileId: profileId)
-                : currentWeTrakrCompletionAccountID(in: settings, profileId: profileId)
-            if let accountID {
-                bindings.insert(PlaybackProviderAccountBinding(provider: selectedSource.rawValue, accountID: accountID))
+        if selectedSource == .trakt
+            || RemoteTrackingState.isScrobbleEnabled(for: .trakt, in: settings)
+            || RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: settings) {
+            if let accountID = TraktHistoryService.completionAccountID(in: settings, profileId: profileId) {
+                bindings.insert(PlaybackProviderAccountBinding(
+                    provider: TraktWatchProgressSource.trakt.rawValue,
+                    accountID: accountID
+                ))
             }
         }
-        if selectedSource != .trakt,
-           RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: settings),
-           let accountID = TraktHistoryService.completionAccountID(in: settings, profileId: profileId) {
-            bindings.insert(PlaybackProviderAccountBinding(
-                provider: TraktWatchProgressSource.trakt.rawValue,
-                accountID: accountID
-            ))
+        if selectedSource == .wetrakr
+            || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: settings) {
+            if let accountID = currentWeTrakrCompletionAccountID(in: settings, profileId: profileId) {
+                bindings.insert(PlaybackProviderAccountBinding(
+                    provider: TraktWatchProgressSource.wetrakr.rawValue,
+                    accountID: accountID
+                ))
+            }
         }
         return bindings
     }
@@ -8207,7 +8256,8 @@ enum WatchedStore {
                 )
             }
         }
-        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr,
+        if (TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr
+            || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: traktStore)),
            enqueueSelectedWeTrakrMutation(
                meta: meta,
                season: season,
@@ -8229,7 +8279,8 @@ enum WatchedStore {
         store: UserDefaults,
         profileId: String?
     ) -> Bool {
-        guard TraktSettingsStore.watchProgressSource(in: store) == .wetrakr,
+        guard TraktSettingsStore.watchProgressSource(in: store) == .wetrakr
+            || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: store),
               !(meta.isSeries && season == nil && episode == nil && !isWatched) else { return false }
         let accountID = currentWeTrakrCompletionAccountID(in: store, profileId: profileId)
         return enqueuePendingProviderMutation(

@@ -506,7 +506,10 @@ enum RemoteTrackingState {
 
     static func isProgressSourceAuthenticated(
         _ source: TraktWatchProgressSource,
-        in store: UserDefaults
+        in store: UserDefaults,
+        simklTokenStorage: SimklTokenStorage? = nil,
+        mdbListTokenStorage: MdbListTokenStorage? = nil,
+        profileScope: String? = nil
     ) -> Bool {
         switch source {
         case .nuvioSync:
@@ -515,14 +518,88 @@ enum RemoteTrackingState {
             return ProfileSettings.isActiveStore(store)
                 && TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
-            return ProfileSettings.isActiveStore(store)
-                && SimklRuntimeSession.authenticatedState(store: store) != nil
+            guard ProfileSettings.isActiveStore(store) else { return false }
+            if let simklTokenStorage {
+                return SimklRuntimeSession.authenticatedState(
+                    store: store,
+                    tokenStorage: simklTokenStorage,
+                    profileScope: profileScope
+                ) != nil
+            }
+            return SimklRuntimeSession.authenticatedState(store: store, profileScope: profileScope) != nil
         case .mdblist:
-            return ProfileSettings.isActiveStore(store)
-                && MdbListRuntimeSession.isAuthenticated(in: store)
+            guard ProfileSettings.isActiveStore(store) else { return false }
+            if let mdbListTokenStorage {
+                return MdbListRuntimeSession.isAuthenticated(
+                    in: store,
+                    tokenStorage: mdbListTokenStorage,
+                    profileScope: profileScope
+                )
+            }
+            return MdbListRuntimeSession.isAuthenticated(in: store, profileScope: profileScope)
         case .wetrakr:
             return ProfileSettings.isActiveStore(store)
-                && WeTrakrRuntimeSession.authenticatedState(store: store) != nil
+                && WeTrakrRuntimeSession.authenticatedState(store: store, profileScope: profileScope) != nil
+        }
+    }
+
+    static func isScrobbleEnabled(
+        for source: TraktWatchProgressSource,
+        in store: UserDefaults = ProfileSettings.current,
+        simklTokenStorage: SimklTokenStorage? = nil,
+        mdbListTokenStorage: MdbListTokenStorage? = nil,
+        profileScope: String? = nil
+    ) -> Bool {
+        guard source != .nuvioSync,
+              isProgressSourceAuthenticated(
+                source,
+                in: store,
+                simklTokenStorage: simklTokenStorage,
+                mdbListTokenStorage: mdbListTokenStorage,
+                profileScope: profileScope
+              ) else {
+            return false
+        }
+        let key: String
+        switch source {
+        case .trakt: key = SettingsKey.traktScrobbleEnabled
+        case .simkl: key = SettingsKey.simklScrobbleEnabled
+        case .mdblist: key = SettingsKey.mdbListScrobbleEnabled
+        case .wetrakr: key = SettingsKey.wetrakrScrobbleEnabled
+        case .nuvioSync: return false
+        }
+        return store.bool(forKey: key)
+    }
+
+    static func setScrobbleEnabled(
+        _ enabled: Bool,
+        for source: TraktWatchProgressSource,
+        in store: UserDefaults = ProfileSettings.current
+    ) {
+        let key: String
+        switch source {
+        case .trakt: key = SettingsKey.traktScrobbleEnabled
+        case .simkl: key = SettingsKey.simklScrobbleEnabled
+        case .mdblist: key = SettingsKey.mdbListScrobbleEnabled
+        case .wetrakr: key = SettingsKey.wetrakrScrobbleEnabled
+        case .nuvioSync: return
+        }
+        store.set(enabled, forKey: key)
+        NotificationCenter.default.post(
+            name: TraktSettingsStore.continueWatchingChangedNotification,
+            object: nil
+        )
+        NotificationCenter.default.post(
+            name: WatchedStore.changedNotification,
+            object: nil
+        )
+    }
+
+    static func activeScrobbleSources(
+        in store: UserDefaults = ProfileSettings.current
+    ) -> [TraktWatchProgressSource] {
+        TraktWatchProgressSource.allCases.filter { source in
+            isScrobbleEnabled(for: source, in: store)
         }
     }
 
@@ -628,9 +705,10 @@ enum RemoteTrackingState {
 
     static func routesWatchedHistory(
         to target: TraktWatchProgressSource,
-        selectedSource: TraktWatchProgressSource
+        selectedSource: TraktWatchProgressSource,
+        in store: UserDefaults = ProfileSettings.current
     ) -> Bool {
-        target != .nuvioSync && target == selectedSource
+        target != .nuvioSync && (target == selectedSource || isScrobbleEnabled(for: target, in: store))
     }
 
     static func shouldSyncWatchedHistory(
@@ -638,25 +716,10 @@ enum RemoteTrackingState {
         in store: UserDefaults = ProfileSettings.current
     ) -> Bool {
         let selectedSource = TraktSettingsStore.watchProgressSource(in: store)
-        guard routesWatchedHistory(to: target, selectedSource: selectedSource) else {
+        guard routesWatchedHistory(to: target, selectedSource: selectedSource, in: store) else {
             return false
         }
-        switch target {
-        case .nuvioSync:
-            return false
-        case .trakt:
-            return ProfileSettings.isActiveStore(store)
-                && TraktAuthStore.isAuthenticated(in: store)
-        case .simkl:
-            return ProfileSettings.isActiveStore(store)
-                && SimklRuntimeSession.authenticatedState(store: store) != nil
-        case .mdblist:
-            return ProfileSettings.isActiveStore(store)
-                && MdbListRuntimeSession.isAuthenticated(in: store)
-        case .wetrakr:
-            return ProfileSettings.isActiveStore(store)
-                && WeTrakrRuntimeSession.authenticatedState(store: store) != nil
-        }
+        return isProgressSourceAuthenticated(target, in: store)
     }
 
     /// Trakt watched history is an account-level mirror, not the resume source.
@@ -1842,9 +1905,9 @@ struct TraktProgressService {
         return true
     }
 
-    /// Writes the current player position to the same Trakt playback feed that
-    /// Home reads when Watch Progress is set to Trakt. The local Nuvio Sync
-    /// store intentionally stays untouched in this mode.
+    /// Writes the current player position to the connected scrobble providers.
+    /// Broadcasts concurrently to all active scrobble targets unless a specific
+    /// sourceOverride is provided.
     static func reportPlayback(
         meta: NuvioMeta,
         position: Double,
@@ -1857,11 +1920,76 @@ struct TraktProgressService {
         expectedAccountID: String? = nil,
         playbackID: String? = nil,
         profileId: String? = nil,
+        isPeriodicHeartbeat: Bool = false,
         session: URLSession = .shared
     ) async -> Bool {
-        let source = sourceOverride ?? TraktSettingsStore.watchProgressSource(in: store)
-        print("[TraktProgressService] reportPlayback: action=\(action.rawValue), source=\(source.rawValue), meta=\(meta.id), pos=\(position)/\(duration)")
-        if source == .simkl {
+        if let source = sourceOverride {
+            return await reportPlaybackSingleSource(
+                source: source,
+                meta: meta,
+                position: position,
+                duration: duration,
+                season: season,
+                episode: episode,
+                action: action,
+                store: store,
+                expectedAccountID: expectedAccountID,
+                playbackID: playbackID,
+                profileId: profileId,
+                session: session
+            )
+        }
+
+        var targets = RemoteTrackingState.activeScrobbleSources(in: store)
+        if isPeriodicHeartbeat {
+            targets.removeAll { $0 == .simkl }
+        }
+        guard !targets.isEmpty else { return false }
+
+        return await withTaskGroup(of: Bool.self) { group in
+            for target in targets {
+                group.addTask {
+                    await reportPlaybackSingleSource(
+                        source: target,
+                        meta: meta,
+                        position: position,
+                        duration: duration,
+                        season: season,
+                        episode: episode,
+                        action: action,
+                        store: store,
+                        expectedAccountID: target == .trakt ? expectedAccountID : nil,
+                        playbackID: playbackID,
+                        profileId: profileId,
+                        session: session
+                    )
+                }
+            }
+            var anySucceeded = false
+            for await success in group {
+                if success { anySucceeded = true }
+            }
+            return anySucceeded
+        }
+    }
+
+    private static func reportPlaybackSingleSource(
+        source: TraktWatchProgressSource,
+        meta: NuvioMeta,
+        position: Double,
+        duration: Double,
+        season: Int?,
+        episode: Int?,
+        action: TraktScrobbleAction,
+        store: UserDefaults,
+        expectedAccountID: String?,
+        playbackID: String?,
+        profileId: String?,
+        session: URLSession
+    ) async -> Bool {
+        print("[TraktProgressService] reportPlaybackSingleSource: action=\(action.rawValue), source=\(source.rawValue), meta=\(meta.id), pos=\(position)/\(duration)")
+        switch source {
+        case .simkl:
             return await SimklProgressService.reportPlayback(
                 meta: meta,
                 position: position,
@@ -1871,8 +1999,7 @@ struct TraktProgressService {
                 action: action,
                 store: store
             )
-        }
-        if source == .mdblist {
+        case .mdblist:
             return await MdbListProgressService.reportPlayback(
                 meta: meta,
                 position: position,
@@ -1882,24 +2009,54 @@ struct TraktProgressService {
                 action: action,
                 store: store
             )
-        }
-        if source == .wetrakr {
+        case .wetrakr:
+            let wetrakrAction: TraktScrobbleAction = (action == .stop) ? .pause : action
             return await WeTrakrProgressService.reportPlayback(
                 meta: meta,
                 position: position,
                 duration: duration,
                 season: season,
                 episode: episode,
-                action: action,
+                action: wetrakrAction,
                 expectedAccountID: expectedAccountID,
                 playbackID: playbackID,
                 profileId: profileId,
                 store: store
             )
+        case .trakt:
+            let traktAction: TraktScrobbleAction = (action == .stop) ? .pause : action
+            return await reportTraktPlaybackItem(
+                meta: meta,
+                position: position,
+                duration: duration,
+                season: season,
+                episode: episode,
+                action: traktAction,
+                store: store,
+                expectedAccountID: expectedAccountID,
+                playbackID: playbackID,
+                profileId: profileId,
+                session: session
+            )
+        case .nuvioSync:
+            return false
         }
+    }
 
-        guard source == .trakt,
-              ProfileSettings.isActiveStore(store),
+    private static func reportTraktPlaybackItem(
+        meta: NuvioMeta,
+        position: Double,
+        duration: Double,
+        season: Int?,
+        episode: Int?,
+        action: TraktScrobbleAction,
+        store: UserDefaults,
+        expectedAccountID: String?,
+        playbackID: String?,
+        profileId: String?,
+        session: URLSession
+    ) async -> Bool {
+        guard ProfileSettings.isActiveStore(store),
               TraktAuthStore.isAuthenticated(in: store),
               position.isFinite,
               duration.isFinite,
@@ -1988,10 +2145,9 @@ struct TraktProgressService {
         return TraktScrobbleMedia(ids: TraktScrobbleIDs(imdb: imdb, tmdb: tmdb))
     }
 
-    /// Routes a locally accepted completion to exactly one provider history
-    /// owner. Trakt and WeTrakr use their completion outboxes; Simkl/MDBList
-    /// retain their prior stop behavior, and a Nuvio Sync completion may drain
-    /// its captured Trakt mirror event without sending a scrobble.
+    /// Routes a locally accepted completion to all active scrobble history owners.
+    /// Trakt and WeTrakr use their completion outboxes; Simkl/MDBList receive
+    /// stop actions and watched marks, and Nuvio Sync drains any captured mirror.
     static func finishPlaybackForHistory(
         meta: NuvioMeta,
         position: Double,
@@ -2010,54 +2166,53 @@ struct TraktProgressService {
               WatchedStore.activeProfileId == profileId,
               !completionID.isEmpty else { return false }
 
-        switch source {
-        case .trakt:
-            guard let expectedAccountID else { return false }
-            return await TraktHistoryService.finishTraktPlaybackForHistory(
-                meta: meta,
-                position: position,
-                duration: duration,
-                season: season,
-                episode: episode,
-                store: store,
-                profileId: profileId,
-                completionID: completionID,
-                expectedAccountID: expectedAccountID
-            )
-        case .wetrakr:
-            guard let expectedAccountID else { return false }
-            let weResult = await WeTrakrProgressService.finishPlaybackForHistory(
-                meta: meta,
-                position: position,
-                duration: duration,
-                season: season,
-                episode: episode,
-                store: store,
-                profileId: profileId,
-                completionID: completionID,
-                accountID: expectedAccountID
-            )
-            guard ProfileSettings.isActiveStore(store),
-                  ProfileSettings.activeProfileID == profileId,
-                  WatchedStore.activeProfileId == profileId else { return false }
-            if let traktMirrorAccountID {
-                let mirrorResult = await TraktHistoryService.flushPendingPlaybackHistory(
+        var results: [Bool] = []
+
+        // Finalize Trakt if active
+        if RemoteTrackingState.isScrobbleEnabled(for: .trakt, in: store) || source == .trakt {
+            let accountID = (source == .trakt ? expectedAccountID : nil)
+                ?? traktMirrorAccountID
+                ?? TraktHistoryService.completionAccountID(in: store, profileId: profileId)
+            if let accountID {
+                let traktResult = await TraktHistoryService.finishTraktPlaybackForHistory(
+                    meta: meta,
+                    position: position,
+                    duration: duration,
+                    season: season,
+                    episode: episode,
                     store: store,
                     profileId: profileId,
-                    expectedAccountID: traktMirrorAccountID
+                    completionID: completionID,
+                    expectedAccountID: accountID
                 )
-                return weResult && mirrorResult
+                results.append(traktResult)
             }
-            return weResult
-        case .nuvioSync:
-            guard let traktMirrorAccountID else { return true }
-            return await TraktHistoryService.flushPendingPlaybackHistory(
-                store: store,
-                profileId: profileId,
-                expectedAccountID: traktMirrorAccountID
-            )
-        case .simkl, .mdblist:
-            return await reportPlayback(
+        }
+
+        // Finalize WeTrakr if active
+        if RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: store) || source == .wetrakr {
+            let accountID = (source == .wetrakr ? expectedAccountID : nil)
+                ?? WeTrakrProgressService.completionAccountID(in: store, profileId: profileId)
+            if let accountID {
+                let wetrakrResult = await WeTrakrProgressService.finishPlaybackForHistory(
+                    meta: meta,
+                    position: position,
+                    duration: duration,
+                    season: season,
+                    episode: episode,
+                    store: store,
+                    profileId: profileId,
+                    completionID: completionID,
+                    accountID: accountID
+                )
+                results.append(wetrakrResult)
+            }
+        }
+
+        // Finalize Simkl if active
+        if RemoteTrackingState.isScrobbleEnabled(for: .simkl, in: store) || source == .simkl {
+            let simklResult = await reportPlaybackSingleSource(
+                source: .simkl,
                 meta: meta,
                 position: position,
                 duration: duration,
@@ -2065,9 +2220,34 @@ struct TraktProgressService {
                 episode: episode,
                 action: .stop,
                 store: store,
-                sourceOverride: source
+                expectedAccountID: nil,
+                playbackID: completionID,
+                profileId: profileId,
+                session: .shared
             )
+            results.append(simklResult)
         }
+
+        // Finalize MDBList if active
+        if RemoteTrackingState.isScrobbleEnabled(for: .mdblist, in: store) || source == .mdblist {
+            let mdblistResult = await reportPlaybackSingleSource(
+                source: .mdblist,
+                meta: meta,
+                position: position,
+                duration: duration,
+                season: season,
+                episode: episode,
+                action: .stop,
+                store: store,
+                expectedAccountID: nil,
+                playbackID: completionID,
+                profileId: profileId,
+                session: .shared
+            )
+            results.append(mdblistResult)
+        }
+
+        return results.contains(true) || results.isEmpty
     }
 
     private static func playbackSeed(from item: TraktPlaybackDTO, type: String) -> TraktProgressSeed? {

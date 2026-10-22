@@ -35,7 +35,12 @@ enum MdbListProgressService {
         profileScope: String? = nil
     ) async -> Bool {
         guard ProfileSettings.isActiveStore(store),
-              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+              RemoteTrackingState.isScrobbleEnabled(
+                for: .mdblist,
+                in: store,
+                mdbListTokenStorage: tokenStorage,
+                profileScope: profileScope
+              ),
               position.isFinite,
               duration.isFinite,
               position > 0,
@@ -206,7 +211,13 @@ enum MdbListProgressService {
     ) async -> Bool {
         let scope = profileScope ?? MdbListRuntimeSession.profileScope()
         guard ProfileSettings.isActiveStore(store),
-              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+              (TraktSettingsStore.watchProgressSource(in: store) == .mdblist
+                || RemoteTrackingState.isScrobbleEnabled(
+                    for: .mdblist,
+                    in: store,
+                    mdbListTokenStorage: tokenStorage,
+                    profileScope: scope
+                )),
               let body = scrobbleBody(
                 meta: item.meta,
                 progress: min(max(item.progress * 100, 0), 100),
@@ -253,7 +264,13 @@ enum MdbListProgressService {
         let scope = profileScope ?? MdbListRuntimeSession.profileScope()
         let startingProfile = (ProfileSettings.activeProfileID, WatchedStore.activeProfileId)
         guard ProfileSettings.isActiveStore(store),
-              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+              (TraktSettingsStore.watchProgressSource(in: store) == .mdblist
+                || RemoteTrackingState.isScrobbleEnabled(
+                    for: .mdblist,
+                    in: store,
+                    mdbListTokenStorage: tokenStorage,
+                    profileScope: scope
+                )),
               isAvailable(in: store, tokenStorage: tokenStorage, profileScope: scope) else {
             return false
         }
@@ -395,7 +412,13 @@ enum MdbListProgressService {
     ) async -> Bool {
         let scope = profileScope ?? MdbListRuntimeSession.profileScope()
         guard ProfileSettings.isActiveStore(store),
-              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+              (TraktSettingsStore.watchProgressSource(in: store) == .mdblist
+                || RemoteTrackingState.isScrobbleEnabled(
+                    for: .mdblist,
+                    in: store,
+                    mdbListTokenStorage: tokenStorage,
+                    profileScope: scope
+                )),
               let body = historyBody(
                 meta: meta,
                 season: season,

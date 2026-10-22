@@ -6863,7 +6863,7 @@ class PlayerViewModel: ObservableObject {
         // Start a Trakt scrobble promptly so its remote Continue Watching feed
         // has an entry before the user leaves the player. Subsequent saves keep
         // the normal cadence (and Trakt's separate 30-second report cadence).
-        let interval: TimeInterval = usesTraktProgress && !didStartTraktScrobble ? 1 : 5
+        let interval: TimeInterval = (usesTraktProgress || hasActiveScrobbleServices) && !didStartTraktScrobble ? 1 : 5
         guard Date().timeIntervalSince(lastProgressSave) >= interval else { return }
         saveProgress(force: false, isPeriodicHeartbeat: true)
     }
@@ -6900,7 +6900,7 @@ class PlayerViewModel: ObservableObject {
         // Nuvio Sync retains the 10-second accidental-playback safeguard. A
         // Trakt start scrobble is the source of its Continue Watching row, so
         // send it once playback has genuinely begun instead of waiting 10+ s.
-        let minimumProgressSeconds: Double = usesTraktProgress ? 1 : WatchProgressLedger.minimumTrackableSeconds
+        let minimumProgressSeconds: Double = (usesTraktProgress || hasActiveScrobbleServices) ? 1 : WatchProgressLedger.minimumTrackableSeconds
         guard let activeMeta,
               let activeStreamURL,
               progressTime.current.isFinite,
@@ -7029,6 +7029,16 @@ class PlayerViewModel: ObservableObject {
                 episode: episode,
                 episodeId: currentEpisodeVideo?.id
             )
+            if hasActiveScrobbleServices {
+                print("[ContinueWatching][Player] routing background scrobble to active services (NuvioSync resume)")
+                reportTraktProgress(
+                    meta: activeMeta,
+                    playbackTime: progressTime,
+                    action: eventAction,
+                    force: force,
+                    isPeriodicHeartbeat: isPeriodicHeartbeat
+                )
+            }
         }
         lastSavedProgressPosition = progressTime.current
         lastProgressSave = Date()
@@ -7047,7 +7057,12 @@ class PlayerViewModel: ObservableObject {
         let store = ProfileSettings.current
         let source = sessionCoordinator.playbackCompletionTracker?.source
             ?? TraktSettingsStore.watchProgressSource(in: store)
-        return RemoteTrackingState.isProgressSourceAuthenticated(source, in: store)
+        return source != .nuvioSync && RemoteTrackingState.isProgressSourceAuthenticated(source, in: store)
+    }
+
+    private var hasActiveScrobbleServices: Bool {
+        let store = ProfileSettings.current
+        return !RemoteTrackingState.activeScrobbleSources(in: store).isEmpty
     }
 
     static func shouldReportPlaybackProgress(
@@ -7093,40 +7108,38 @@ class PlayerViewModel: ObservableObject {
 
         let store = ProfileSettings.current
         let tracker = sessionCoordinator.playbackCompletionTracker
-        let source = tracker?.source ?? TraktSettingsStore.watchProgressSource(in: store)
+        let primarySource = tracker?.source ?? TraktSettingsStore.watchProgressSource(in: store)
         let profileID = tracker?.profileID ?? WatchedStore.activeProfileId
         guard ProfileSettings.isActiveStore(store),
-              Self.isCurrentPlaybackProfile(profileID),
-              RemoteTrackingState.isProgressSourceAuthenticated(source, in: store) else { return }
+              Self.isCurrentPlaybackProfile(profileID) else { return }
+
+        let activeSources = RemoteTrackingState.activeScrobbleSources(in: store)
+        guard !activeSources.isEmpty else { return }
+
         guard Self.shouldReportPlaybackProgress(
             afterCompletionWasRecorded: tracker?.wasRecorded == true,
-            source: source
+            source: primarySource
         ) else { return }
-        let expectedAccountID = tracker?.completionAccounts?[source.rawValue]
-        if tracker?.completionAccounts != nil,
-           (source == .trakt || source == .wetrakr),
-           expectedAccountID == nil {
-            return
-        }
+
         let playbackID = tracker?.completionID
         let episodeNumbers = resolvedEpisodeNumbers
-        if source == .simkl,
+
+        if activeSources == [.simkl],
            didStartTraktScrobble,
            action == nil,
            isPeriodicHeartbeat,
            !force {
-            // Simkl extrapolates between real player events and explicitly
-            // warns against periodic heartbeat scrobbles. Keep the optimistic
-            // local resume point current without making another API request.
-            TraktProgressService.recordLocalPlayback(
-                meta: meta,
-                position: playbackTime.current,
-                duration: playbackTime.duration,
-                season: episodeNumbers?.season,
-                episode: episodeNumbers?.episode,
-                source: source,
-                notify: false
-            )
+            if primarySource != .nuvioSync {
+                TraktProgressService.recordLocalPlayback(
+                    meta: meta,
+                    position: playbackTime.current,
+                    duration: playbackTime.duration,
+                    season: episodeNumbers?.season,
+                    episode: episodeNumbers?.episode,
+                    source: primarySource,
+                    notify: false
+                )
+            }
             return
         }
 
@@ -7135,11 +7148,8 @@ class PlayerViewModel: ObservableObject {
             return
         }
 
-        // A non-completion stop is a progress checkpoint for Trakt/WeTrakr.
-        // Their completion finalizers own the only history write; Simkl and
-        // MDBList keep their existing action semantics.
         let scrobbleAction: TraktScrobbleAction
-        if (source == .trakt || source == .wetrakr), action == .stop {
+        if (primarySource == .trakt || primarySource == .wetrakr), action == .stop {
             scrobbleAction = .pause
         } else {
             scrobbleAction = action ?? (didStartTraktScrobble ? .pause : .start)
@@ -7147,15 +7157,20 @@ class PlayerViewModel: ObservableObject {
         didStartTraktScrobble = true
         lastTraktProgressReport = now
 
-        TraktProgressService.recordLocalPlayback(
-            meta: meta,
-            position: playbackTime.current,
-            duration: playbackTime.duration,
-            season: episodeNumbers?.season,
-            episode: episodeNumbers?.episode,
-            source: source,
-            notify: force
-        )
+        if primarySource != .nuvioSync {
+            TraktProgressService.recordLocalPlayback(
+                meta: meta,
+                position: playbackTime.current,
+                duration: playbackTime.duration,
+                season: episodeNumbers?.season,
+                episode: episodeNumbers?.episode,
+                source: primarySource,
+                notify: force
+            )
+        }
+
+        let expectedAccountID = tracker?.completionAccounts?[TraktWatchProgressSource.trakt.rawValue]
+            ?? tracker?.completionAccounts?[primarySource.rawValue]
 
         let previousTask = traktProgressTask
         traktProgressTask = Task {
@@ -7171,10 +7186,11 @@ class PlayerViewModel: ObservableObject {
                 episode: episodeNumbers?.episode,
                 action: scrobbleAction,
                 store: store,
-                sourceOverride: source,
+                sourceOverride: nil,
                 expectedAccountID: expectedAccountID,
                 playbackID: playbackID,
-                profileId: profileID
+                profileId: profileID,
+                isPeriodicHeartbeat: isPeriodicHeartbeat
             )
         }
     }
@@ -7267,11 +7283,11 @@ class PlayerViewModel: ObservableObject {
         let source = TraktSettingsStore.watchProgressSource(in: store)
         var accountIDs: [String: String] = [:]
 
-        if source == .trakt || RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: store),
+        if source == .trakt || RemoteTrackingState.isScrobbleEnabled(for: .trakt, in: store) || RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: store),
            let accountID = TraktHistoryService.completionAccountID(in: store, profileId: profileID) {
             accountIDs[TraktWatchProgressSource.trakt.rawValue] = accountID
         }
-        if source == .wetrakr,
+        if source == .wetrakr || RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: store),
            let accountID = WeTrakrProgressService.completionAccountID(in: store, profileId: profileID) {
             accountIDs[TraktWatchProgressSource.wetrakr.rawValue] = accountID
         }

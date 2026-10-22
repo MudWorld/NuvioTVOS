@@ -931,13 +931,14 @@ struct WeTrakrProgressService {
         }
 
         return await withAccountLane(accountID) {
+            let isScrobble = RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: store, profileScope: profileID)
             guard let context = requestContext(
                 in: store,
                 profileId: profileID,
                 expectedAccountID: expectedAccountID ?? accountID,
-                requiresWeTrakrSource: true
+                requiresWeTrakrSource: !isScrobble
             ),
-                  contextIsCurrent(context, in: store, profileId: profileID, requiresWeTrakrSource: true) else {
+                  contextIsCurrent(context, in: store, profileId: profileID, requiresWeTrakrSource: !isScrobble) else {
                 return false
             }
             return await reportPlaybackUnlocked(

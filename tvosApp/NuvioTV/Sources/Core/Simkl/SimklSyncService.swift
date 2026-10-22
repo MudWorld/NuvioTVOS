@@ -2511,9 +2511,13 @@ struct SimklProgressService {
             scrobbleDiagnostic = "skipped: inactive profile store"
             return false
         }
-        guard TraktSettingsStore.watchProgressSource(in: store) == .simkl else {
-            scrobbleDiagnostic = "skipped: watch progress source is "
-                + "\(TraktSettingsStore.watchProgressSource(in: store).rawValue), not simkl"
+        guard RemoteTrackingState.isScrobbleEnabled(
+            for: .simkl,
+            in: store,
+            simklTokenStorage: tokenStorage,
+            profileScope: profileScope
+        ) else {
+            scrobbleDiagnostic = "skipped: Simkl scrobble is not enabled or authenticated"
             return false
         }
         guard let service = SimklAuthorizedClient(
@@ -2564,11 +2568,11 @@ struct SimklProgressService {
             if isLockCollision(status: response.status, data: response.data) {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
-                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+                  RemoteTrackingState.isScrobbleEnabled(for: .simkl, in: store, simklTokenStorage: tokenStorage, profileScope: profileScope) else { return false }
                 response = try await service.postReturningBody(path: path, body: body)
             }
             guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
-                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+                  RemoteTrackingState.isScrobbleEnabled(for: .simkl, in: store, simklTokenStorage: tokenStorage, profileScope: profileScope) else { return false }
             let status = response.status
             // Simkl documents 409 stop as idempotent success for a recently
             // completed session.
@@ -2610,9 +2614,10 @@ struct SimklProgressService {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
-        guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
-              TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
         let ownerScope = profileScope ?? ProfileSettings.activeProfileScope
+        guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+              (TraktSettingsStore.watchProgressSource(in: store) == .simkl
+                || RemoteTrackingState.isScrobbleEnabled(for: .simkl, in: store, simklTokenStorage: tokenStorage, profileScope: ownerScope)) else { return false }
         guard ownerScope == ProfileSettings.activeProfileScope else { return false }
         guard let service = SimklAuthorizedClient(
             store: store,
@@ -2637,7 +2642,8 @@ struct SimklProgressService {
 
         guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
               ownerScope == ProfileSettings.activeProfileScope,
-              TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+              (TraktSettingsStore.watchProgressSource(in: store) == .simkl
+                || RemoteTrackingState.isScrobbleEnabled(for: .simkl, in: store, simklTokenStorage: tokenStorage, profileScope: ownerScope)) else { return false }
 
         let targets = playbacks.filter { playbackMatches($0, card: item) }
         guard !targets.isEmpty else { return false }
@@ -2646,12 +2652,14 @@ struct SimklProgressService {
         for id in targets.compactMap(\.id) {
             guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
                   ownerScope == ProfileSettings.activeProfileScope,
-                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+                  (TraktSettingsStore.watchProgressSource(in: store) == .simkl
+                    || RemoteTrackingState.isScrobbleEnabled(for: .simkl, in: store, simklTokenStorage: tokenStorage, profileScope: ownerScope)) else { return false }
             guard let status = try? await service.delete(path: "sync/playback/\(id)"),
                   (200..<300).contains(status) else { continue }
             guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
                   ownerScope == ProfileSettings.activeProfileScope,
-                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+                  (TraktSettingsStore.watchProgressSource(in: store) == .simkl
+                    || RemoteTrackingState.isScrobbleEnabled(for: .simkl, in: store, simklTokenStorage: tokenStorage, profileScope: ownerScope)) else { return false }
             removedAny = true
         }
         guard removedAny else { return false }

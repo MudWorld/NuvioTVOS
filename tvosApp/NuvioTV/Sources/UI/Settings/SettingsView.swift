@@ -191,6 +191,10 @@ enum SettingsKey {
     static let traktContinueWatchingDaysCap = "nuvio.tv.settings.integrations.traktContinueWatchingDaysCap"
     static let traktShowMetaComments = "nuvio.tv.settings.integrations.traktShowMetaComments"
     static let traktWatchProgressSource = "nuvio.tv.settings.integrations.traktWatchProgressSource"
+    static let traktScrobbleEnabled = "nuvio.tv.settings.integrations.traktScrobbleEnabled"
+    static let simklScrobbleEnabled = "nuvio.tv.settings.integrations.simklScrobbleEnabled"
+    static let mdbListScrobbleEnabled = "nuvio.tv.settings.integrations.mdbListScrobbleEnabled"
+    static let wetrakrScrobbleEnabled = "nuvio.tv.settings.integrations.wetrakrScrobbleEnabled"
     /// Set once the user picks a watch progress source by hand. Until then,
     /// connecting a tracker is allowed to select itself.
     static let watchProgressSourceChosenByUser = "nuvio.tv.settings.integrations.watchProgressSourceChosenByUser"
@@ -355,6 +359,7 @@ enum SettingsKey {
         traktConnected, traktClientID, traktClientSecret,
         traktContinueWatchingDaysCap, traktShowMetaComments,
         traktWatchProgressSource, watchProgressSourceChosenByUser,
+        traktScrobbleEnabled, simklScrobbleEnabled, mdbListScrobbleEnabled, wetrakrScrobbleEnabled,
         traktLibrarySourceMode, traktMoreLikeThisSource,
         simklClientID, simklAccessToken, simklRefreshToken, simklPlanToWatchHomeCatalogs,
         wetrakrClientID, wetrakrClientSecret, wetrakrAccessToken, wetrakrRefreshToken, wetrakrConnected,
@@ -3950,22 +3955,70 @@ private struct IntegrationSettingsView: View {
             }
 
             SettingsGroup(
-                title: L10n.string("tvos_settings_watch_progress_title", fallback: "Watch Progress"),
+                title: L10n.string("tvos_settings_watch_progress_title", fallback: "Continue Watching & Scrobbling"),
                 subtitle: L10n.string(
                     "tvos_settings_watch_progress_subtitle",
-                    fallback: "Choose the single service that owns Resume, Continue Watching, and watched updates"
+                    fallback: "Choose which service drives Continue Watching on Home, and manage multi-service scrobbling"
                 )
             ) {
                 SettingsChoiceRow(
-                    title: L10n.string("trakt_watch_progress_dialog_title", fallback: "Watch Progress"),
+                    title: L10n.string("trakt_continue_watching_source_title", fallback: "Continue Watching Source"),
                     subtitle: L10n.string(
                         "tvos_settings_choose_the_source_for_resume_and_continu_53af657c",
-                        fallback: "Choose the source for Resume, Continue Watching, and watched updates"
+                        fallback: "Choose the service for Resume and Continue Watching on Home"
                     ),
                     selection: globalWatchProgressSelection,
                     options: RemoteTrackingState.availableProgressSources().map(\.label),
                     accentColor: accentColor
                 )
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.trakt, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_trakt_scrobble", fallback: "Trakt Scrobble"),
+                        subtitle: L10n.string("tvos_settings_trakt_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to Trakt"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .trakt) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .trakt) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.simkl, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_simkl_scrobble", fallback: "Simkl Scrobble"),
+                        subtitle: L10n.string("tvos_settings_simkl_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to Simkl"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .simkl) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .simkl) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_mdblist_scrobble", fallback: "MDBList Scrobble"),
+                        subtitle: L10n.string("tvos_settings_mdblist_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to MDBList"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .mdblist) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .mdblist) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.wetrakr, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_wetrakr_scrobble", fallback: "WeTrakr Scrobble"),
+                        subtitle: L10n.string("tvos_settings_wetrakr_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to WeTrakr"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .wetrakr) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .wetrakr) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
             }
 
             SettingsGroup(
@@ -5653,6 +5706,19 @@ private struct TraktConnectedSettingsSheet: View {
                             title: L10n.string("tvos_settings_trakt_features", fallback: "Trakt Features"),
                             subtitle: L10n.string("tvos_settings_trakt_features_subtitle", fallback: "Choose how Trakt is used throughout Nuvio")
                         ) {
+                            SettingsToggleRow(
+                                title: L10n.string("tvos_settings_trakt_scrobble", fallback: "Scrobble Playback"),
+                                subtitle: L10n.string(
+                                    "tvos_settings_trakt_scrobble_sheet_subtitle",
+                                    fallback: "Send playback progress and watched updates to your Trakt account"
+                                ),
+                                isOn: Binding(
+                                    get: { RemoteTrackingState.isScrobbleEnabled(for: .trakt) },
+                                    set: { RemoteTrackingState.setScrobbleEnabled($0, for: .trakt) }
+                                ),
+                                accentColor: accentColor
+                            )
+
                             SettingsChoiceRow(
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
                                 subtitle: L10n.string("tvos_settings_trakt_library_source_subtitle", fallback: "Choose which library to use for saving and viewing your collection"),
@@ -6365,6 +6431,19 @@ private struct MdbListConnectedSettingsSheet: View {
                             title: L10n.string("tvos_settings_mdblist_features", fallback: "MDBList Features"),
                             subtitle: L10n.string("tvos_settings_mdblist_features_subtitle", fallback: "Choose where playback, watched updates, and the Library are stored")
                         ) {
+                            SettingsToggleRow(
+                                title: L10n.string("tvos_settings_mdblist_scrobble", fallback: "Scrobble Playback"),
+                                subtitle: L10n.string(
+                                    "tvos_settings_mdblist_scrobble_sheet_subtitle",
+                                    fallback: "Send playback progress and watched updates to your MDBList account"
+                                ),
+                                isOn: Binding(
+                                    get: { RemoteTrackingState.isScrobbleEnabled(for: .mdblist) },
+                                    set: { RemoteTrackingState.setScrobbleEnabled($0, for: .mdblist) }
+                                ),
+                                accentColor: accentColor
+                            )
+
                             SettingsChoiceRow(
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
                                 subtitle: L10n.string("tvos_settings_mdblist_library_source_subtitle", fallback: "Use MDBList collection and watchlist as your Nuvio library"),
@@ -6676,6 +6755,19 @@ private struct SimklConnectedSettingsSheet: View {
                             title: L10n.string("tvos_settings_simkl_features", fallback: "Simkl Features"),
                             subtitle: L10n.string("tvos_settings_simkl_features_subtitle", fallback: "Choose how Simkl is used throughout Nuvio")
                         ) {
+                            SettingsToggleRow(
+                                title: L10n.string("tvos_settings_simkl_scrobble", fallback: "Scrobble Playback"),
+                                subtitle: L10n.string(
+                                    "tvos_settings_simkl_scrobble_sheet_subtitle",
+                                    fallback: "Send playback progress and watched updates to your Simkl account"
+                                ),
+                                isOn: Binding(
+                                    get: { RemoteTrackingState.isScrobbleEnabled(for: .simkl) },
+                                    set: { RemoteTrackingState.setScrobbleEnabled($0, for: .simkl) }
+                                ),
+                                accentColor: accentColor
+                            )
+
                             SettingsChoiceRow(
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
                                 subtitle: L10n.string("tvos_settings_simkl_library_source_subtitle", fallback: "Use Simkl Plan to Watch as your Nuvio library"),
@@ -7577,6 +7669,19 @@ private struct WeTrakrConnectedSettingsSheet: View {
                             title: L10n.string("tvos_settings_wetrakr_features", fallback: "WeTrakr Features"),
                             subtitle: L10n.string("tvos_settings_wetrakr_features_subtitle", fallback: "Choose how WeTrakr is used throughout Nuvio")
                         ) {
+                            SettingsToggleRow(
+                                title: L10n.string("tvos_settings_wetrakr_scrobble", fallback: "Scrobble Playback"),
+                                subtitle: L10n.string(
+                                    "tvos_settings_wetrakr_scrobble_sheet_subtitle",
+                                    fallback: "Send playback progress and watched updates to your WeTrakr account"
+                                ),
+                                isOn: Binding(
+                                    get: { RemoteTrackingState.isScrobbleEnabled(for: .wetrakr) },
+                                    set: { RemoteTrackingState.setScrobbleEnabled($0, for: .wetrakr) }
+                                ),
+                                accentColor: accentColor
+                            )
+
                             SettingsChoiceRow(
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
                                 subtitle: L10n.string("tvos_settings_wetrakr_library_source_subtitle", fallback: "Use WeTrakr tracking lists as your Nuvio library"),
