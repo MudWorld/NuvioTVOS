@@ -76,16 +76,43 @@ final class DiscoverViewModel: ObservableObject {
     }
 
     func typeTitle(for type: String) -> String {
-        switch type.lowercased() {
-        case "movie", "movies":
+        switch Self.discoverSelectionType(type) {
+        case "movie":
             return L10n.string("type_movies", fallback: L10n.string("type_movie", fallback: "Movies"))
-        case "series", "tv", "show", "shows":
+        case "series":
             return L10n.string("type_series_plural", fallback: L10n.string("type_series", fallback: "Series"))
+        case "tv":
+            // Distinct from episodic "Series": some add-ons use tv for live
+            // channels, upcoming events and replays.
+            return "TV"
         case "anime":
             return L10n.string("type_anime", fallback: "Anime")
         default:
             return type.capitalized
         }
+    }
+
+    /// Group UI aliases without changing the raw Stremio resource type.
+    /// In Discover only, 'tv' is its own category so it cannot silently
+    /// inherit Cinemeta's 'series' rows (or vice versa).
+    static func discoverSelectionType(_ rawType: String) -> String {
+        let normalized = rawType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "movie", "movies", "film", "films":
+            return "movie"
+        case "series", "show", "shows", "tvshow", "tvshows",
+             "tv_series", "tv-series", "tv_show", "tv-show":
+            return "series"
+        default:
+            return normalized
+        }
+    }
+
+    static func discoverCatalogs(
+        for selectedType: String, in sources: [DiscoverCatalogOption]
+    ) -> [DiscoverCatalogOption] {
+        let selectionType = discoverSelectionType(selectedType)
+        return sources.filter { discoverSelectionType($0.type) == selectionType }
     }
 
     private let repository: CatalogRepository
@@ -112,13 +139,15 @@ final class DiscoverViewModel: ObservableObject {
 
     private func applySources(_ sources: [DiscoverCatalogOption]) {
         self.discoverSources = sources
-        let types = Array(NSOrderedSet(array: sources.map(\.type)).compactMap { $0 as? String })
+        let types = Array(NSOrderedSet(array: sources.map { Self.discoverSelectionType($0.type) })
+            .compactMap { $0 as? String })
             .sorted { lhs, rhs in
                 let order: (String) -> Int = {
-                    switch $0.lowercased() {
-                    case "movie", "movies": return 0
-                    case "series", "tv", "show", "shows": return 1
-                    case "anime": return 2
+                    switch $0 {
+                    case "movie": return 0
+                    case "series": return 1
+                    case "tv": return 2
+                    case "anime": return 3
                     default: return 9
                     }
                 }
@@ -126,11 +155,11 @@ final class DiscoverViewModel: ObservableObject {
             }
         self.typeOptions = types.isEmpty ? ["movie", "series"] : types
 
-        if !self.typeOptions.contains(self.selectedType) {
-            self.selectedType = self.typeOptions.first ?? "movie"
-        }
+        let preferredType = Self.discoverSelectionType(self.selectedType)
+        self.selectedType = self.typeOptions.contains(preferredType)
+            ? preferredType : (self.typeOptions.first ?? "movie")
 
-        let catalogs = sources.filter { $0.type.caseInsensitiveCompare(self.selectedType) == .orderedSame || AddonTransportUrls.isTypeEquivalent($0.type, self.selectedType) }
+        let catalogs = Self.discoverCatalogs(for: self.selectedType, in: sources)
         self.catalogOptions = catalogs
 
         let currentOption = catalogs.first(where: { $0.key == self.selectedCatalogKey }) ?? catalogs.first
@@ -154,9 +183,10 @@ final class DiscoverViewModel: ObservableObject {
     }
 
     func setType(_ newType: String) {
-        guard selectedType != newType else { return }
-        selectedType = newType
-        let catalogs = discoverSources.filter { $0.type.caseInsensitiveCompare(newType) == .orderedSame || AddonTransportUrls.isTypeEquivalent($0.type, newType) }
+        let selectionType = Self.discoverSelectionType(newType)
+        guard selectedType != selectionType else { return }
+        selectedType = selectionType
+        let catalogs = Self.discoverCatalogs(for: selectionType, in: discoverSources)
         catalogOptions = catalogs
         let currentOption = catalogs.first
         selectedCatalogKey = currentOption?.key
