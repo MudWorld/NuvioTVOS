@@ -514,6 +514,11 @@ private struct DiscoverCard: View {
         AppCardStyle.cornerRadius(for: cardCornerRadiusSetting, fallback: 16)
     }
 
+    private var fallbackMediaSymbol: String {
+        let type = DiscoverViewModel.discoverSelectionType(meta.type)
+        return type == "series" || type == "tv" ? "tv" : "film"
+    }
+
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
     }
@@ -530,7 +535,7 @@ private struct DiscoverCard: View {
                 ) {
                     ZStack {
                         Rectangle().fill(Color.white.opacity(0.07))
-                        Image(systemName: meta.type == "series" ? "tv" : "film")
+                        Image(systemName: fallbackMediaSymbol)
                             .font(.system(size: 40))
                             .foregroundColor(.white.opacity(0.25))
                     }
