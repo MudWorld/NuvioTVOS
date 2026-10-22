@@ -71,7 +71,7 @@ final class CloudLibraryViewModel: ObservableObject {
             // Screen went away; ignore.
         } catch {
             guard !Task.isCancelled, loadGeneration == generation else { return }
-            errorMessage = L10n.string("cloud_library_load_failed", fallback: "Couldn't load your \(providerName) library.")
+            errorMessage = L10n.format("cloud_library_load_failed", fallback: "Couldn't load your %@ library.", providerName)
         }
     }
 
@@ -93,7 +93,7 @@ final class CloudLibraryViewModel: ObservableObject {
             case let .success(url, filename, _):
                 onResolved(url, .cloudPlaceholder(id: "cloud:\(file.id)", name: filename ?? file.name))
             case .missingCredentials:
-                let msg = L10n.string("cloud_library_play_not_connected", fallback: "Add your \(self.providerName) API key in Settings.")
+                let msg = L10n.format("cloud_library_play_not_connected", fallback: "Add your %@ API key in Settings.", self.providerName)
                 self.errorMessage = msg
                 self.playbackErrorMessage = msg
             case .notPlayable:

@@ -957,7 +957,7 @@ private struct PlayerAudioMenuButton: View, Equatable {
             if !humanLanguage.isEmpty {
                 return humanLanguage
             }
-            return rawName.isEmpty ? L10n.string("player_track_format", fallback: "Track \(track.id)") : rawName
+            return rawName.isEmpty ? L10n.format("player_track_format", fallback: "Track %d", track.id) : rawName
         }
 
         // 2. If name is just the language code (e.g. "eng", "en", "fra", "nob")
