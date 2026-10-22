@@ -230,5 +230,36 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertTrue(manager.isPictureInPictureActive)
         XCTAssertTrue(aether.engine.pictureInPictureActive)
     }
+
+    func testRestoreFullscreenFromAppWithoutSessionReturnsFalse() {
+        let manager = PictureInPictureManager.shared
+        manager.invalidateSession()
+        XCTAssertFalse(manager.restoreFullscreenFromApp())
+    }
+
+    func testRestoreFullscreenFromAppDirectlyRestoresWhenNotInPiP() {
+        let manager = PictureInPictureManager.shared
+        guard let aether = AetherPlaybackController() else {
+            XCTFail("AetherPlaybackController failed to initialize")
+            return
+        }
+        let coordinator = PlaybackSessionCoordinator(aetherController: aether)
+        let url = URL(string: "https://example.com/test.mp4")!
+        let meta = makeTestMeta(id: "tt1111111", name: "Test Movie", type: "movie")
+        let context = ActivePlaybackContext(url: url, meta: meta, subtitle: "1080p")
+        manager.registerSession(coordinator: coordinator, context: context)
+
+        var restoredContext: ActivePlaybackContext?
+        manager.onRestoreUI = { ctx, completion in
+            restoredContext = ctx
+            completion(true)
+        }
+
+        XCTAssertFalse(manager.isPictureInPictureActive)
+        let didInitiate = manager.restoreFullscreenFromApp()
+        XCTAssertTrue(didInitiate)
+        XCTAssertEqual(restoredContext, context)
+        XCTAssertFalse(manager.isRestoringUIInProgress)
+    }
 }
 

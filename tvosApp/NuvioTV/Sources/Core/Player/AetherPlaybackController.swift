@@ -1570,8 +1570,49 @@ struct AetherExternalSubtitleRegistration {
 }
 
 enum AetherPlaybackLifecyclePolicy {
+    static let maximumActiveCancellationRetries = 1
+
     static func shouldReloadAfterBackground(state: PlaybackState) -> Bool {
-        state == .playing || state == .paused
+        switch state {
+        case .playing, .paused, .loading, .seeking:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func shouldResumeAfterBackground(
+        state: PlaybackState,
+        isPlayerPlaying: Bool,
+        isTransportPlaying: Bool,
+        previousIntent: Bool
+    ) -> Bool {
+        previousIntent
+            || state == .playing
+            || (state != .paused && (isPlayerPlaying || isTransportPlaying))
+    }
+
+    enum ReloadFailureDisposition: Equatable {
+        case ignore
+        case keepPending
+        case retryAfterTaskClears
+        case report
+    }
+
+    static func reloadFailureDisposition(
+        isCancellation: Bool,
+        tokenIsCurrent: Bool,
+        applicationIsActive: Bool,
+        activeCancellationRetryCount: Int
+    ) -> ReloadFailureDisposition {
+        guard tokenIsCurrent else { return .ignore }
+        guard applicationIsActive else { return .keepPending }
+        if isCancellation {
+            return activeCancellationRetryCount < maximumActiveCancellationRetries
+                ? .retryAfterTaskClears
+                : .report
+        }
+        return .report
     }
 }
 
@@ -2451,6 +2492,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var needsForegroundReload = false
     private var playbackWasPlayingBeforeBackground = false
     private var foregroundReloadTask: Task<Void, Never>?
+    private var foregroundReloadActiveCancellationRetryCount = 0
     private var artworkLoadTask: Task<Void, Never>?
     private var nowPlayingInfo: [String: Any] = [:]
     private var lifecycleReloadToken: UInt64 = 0
@@ -3497,17 +3539,31 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     @objc private func appWillResignActive() {
+        let observedResumeIntent = AetherPlaybackLifecyclePolicy.shouldResumeAfterBackground(
+            state: engine.state,
+            isPlayerPlaying: isPlayerPlaying,
+            isTransportPlaying: isTransportPlaying,
+            previousIntent: playbackWasPlayingBeforeBackground
+        )
         if !engine.pictureInPictureActive {
             let mark = lifecycleReloadToken
             onWillSuspendPlayback?()
             guard lifecycleReloadToken == mark else { return }
         }
+        foregroundReloadActiveCancellationRetryCount = 0
         screensaverDebugLog("[ScreensaverDebug][AetherController] appWillResignActive: state=\(engine.state), isPlayerPlaying=\(isPlayerPlaying), lastKnownPos=\(lastKnownPositionMs)ms, clock=\(engine.clock.currentTime)")
+        let interruptedReload = foregroundReloadTask != nil
         if !engine.pictureInPictureActive {
+            // Invalidate the task before cancellation so its catch path cannot
+            // publish an expected background interruption as a terminal error.
+            lifecycleReloadToken &+= 1
+            if interruptedReload {
+                needsForegroundReload = true
+            }
             foregroundReloadTask?.cancel()
             foregroundReloadTask = nil
         }
-        playbackWasPlayingBeforeBackground = engine.state == .playing || (isPlayerPlaying && engine.state != .paused)
+        playbackWasPlayingBeforeBackground = observedResumeIntent
         screensaverDebugLog("[ScreensaverDebug][AetherController] appWillResignActive: computed playbackWasPlayingBeforeBackground=\(playbackWasPlayingBeforeBackground)")
         #if os(tvOS)
         let pos = lastKnownPositionMs
@@ -3517,34 +3573,43 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
         let shouldReload = AetherPlaybackLifecyclePolicy.shouldReloadAfterBackground(state: engine.state)
         screensaverDebugLog("[ScreensaverDebug][AetherController] appWillResignActive: shouldReload=\(shouldReload)")
-        guard shouldReload else { return }
-
-        lifecycleReloadToken &+= 1
+        guard shouldReload || interruptedReload else { return }
         needsForegroundReload = true
         screensaverDebugLog("[ScreensaverDebug][AetherController] appWillResignActive: set needsForegroundReload=true, playbackWasPlayingBeforeBackground=\(playbackWasPlayingBeforeBackground)")
     }
 
     @objc private func appDidEnterBackground() {
+        let observedResumeIntent = AetherPlaybackLifecyclePolicy.shouldResumeAfterBackground(
+            state: engine.state,
+            isPlayerPlaying: isPlayerPlaying,
+            isTransportPlaying: isTransportPlaying,
+            previousIntent: playbackWasPlayingBeforeBackground
+        )
         if !engine.pictureInPictureActive {
             let mark = lifecycleReloadToken
             onWillSuspendPlayback?()
             guard lifecycleReloadToken == mark else { return }
         }
+        foregroundReloadActiveCancellationRetryCount = 0
         let pos = lastKnownPositionMs
         let dur = lastKnownDurationMs
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidEnterBackground: state=\(engine.state), isPlayerPlaying=\(isPlayerPlaying), pos=\(pos)ms, dur=\(dur)ms, clock=\(engine.clock.currentTime)")
         onPlaybackSuspended?(pos, dur)
 
+        let interruptedReload = foregroundReloadTask != nil
         let shouldReload = AetherPlaybackLifecyclePolicy.shouldReloadAfterBackground(state: engine.state)
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidEnterBackground: shouldReload=\(shouldReload)")
-        guard shouldReload else { return }
+        guard shouldReload || interruptedReload else { return }
 
         lifecycleReloadToken &+= 1
+        if interruptedReload {
+            needsForegroundReload = true
+        }
         foregroundReloadTask?.cancel()
         foregroundReloadTask = nil
         needsForegroundReload = true
         if !playbackWasPlayingBeforeBackground {
-            playbackWasPlayingBeforeBackground = engine.state == .playing || (isPlayerPlaying && engine.state != .paused)
+            playbackWasPlayingBeforeBackground = observedResumeIntent
         }
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidEnterBackground: set needsForegroundReload=true, playbackWasPlayingBeforeBackground=\(playbackWasPlayingBeforeBackground)")
     }
@@ -3570,15 +3635,26 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
         needsForegroundReload = false
         let shouldResume = playbackWasPlayingBeforeBackground
-        playbackWasPlayingBeforeBackground = false
         let token = lifecycleReloadToken
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidBecomeActive: starting foreground reload task with shouldResume=\(shouldResume), token=\(token)")
         rebindSurface()
+        var shouldRetryAfterTaskClears = false
         foregroundReloadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
                 if self.lifecycleReloadToken == token {
                     self.foregroundReloadTask = nil
+                    if shouldRetryAfterTaskClears {
+                        Task { @MainActor [weak self] in
+                            guard let self,
+                                  self.lifecycleReloadToken == token,
+                                  self.foregroundReloadTask == nil,
+                                  self.needsForegroundReload,
+                                  UIApplication.shared.applicationState == .active,
+                                  self.foregroundReloadActiveCancellationRetryCount == AetherPlaybackLifecyclePolicy.maximumActiveCancellationRetries else { return }
+                            self.appDidBecomeActive()
+                        }
+                    }
                 }
             }
             do {
@@ -3586,7 +3662,26 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 try await self.engine.reloadAtCurrentPosition()
                 screensaverDebugLog("[ScreensaverDebug][AetherController] engine.reloadAtCurrentPosition completed")
             } catch {
-                guard self.lifecycleReloadToken == token else { return }
+                let disposition = AetherPlaybackLifecyclePolicy.reloadFailureDisposition(
+                    isCancellation: error is CancellationError || Task.isCancelled,
+                    tokenIsCurrent: self.lifecycleReloadToken == token,
+                    applicationIsActive: UIApplication.shared.applicationState == .active,
+                    activeCancellationRetryCount: self.foregroundReloadActiveCancellationRetryCount
+                )
+                switch disposition {
+                case .ignore:
+                    return
+                case .keepPending:
+                    self.needsForegroundReload = true
+                    return
+                case .retryAfterTaskClears:
+                    self.needsForegroundReload = true
+                    self.foregroundReloadActiveCancellationRetryCount += 1
+                    shouldRetryAfterTaskClears = true
+                    return
+                case .report:
+                    break
+                }
                 let message = error.localizedDescription
                 screensaverDebugLog("[ScreensaverDebug][AetherController] engine.reloadAtCurrentPosition FAILED: \(message)")
                 self.currentErrorMessage = message
@@ -3603,6 +3698,15 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 screensaverDebugLog("[ScreensaverDebug][AetherController] reload completed but token mismatch or pip active")
                 return
             }
+            guard !Task.isCancelled else {
+                self.needsForegroundReload = true
+                return
+            }
+            guard UIApplication.shared.applicationState == .active else {
+                self.needsForegroundReload = true
+                return
+            }
+            self.foregroundReloadActiveCancellationRetryCount = 0
             self.rebindSurface()
             let resumeAfterReload = shouldResume || self.playbackWasPlayingBeforeBackground
             screensaverDebugLog("[ScreensaverDebug][AetherController] reload completed, asserting post-reload state: resumeAfterReload=\(resumeAfterReload)")
@@ -3611,7 +3715,13 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             } else {
                 self.engine.pause()
             }
-            guard self.lifecycleReloadToken == token else { return }
+            guard self.lifecycleReloadToken == token,
+                  !Task.isCancelled,
+                  UIApplication.shared.applicationState == .active else {
+                self.needsForegroundReload = true
+                return
+            }
+            self.playbackWasPlayingBeforeBackground = false
             self.onDidRestorePlayback?()
         }
     }
@@ -3837,6 +3947,15 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             isPlayerEnded = true
             isAtEndOfFile = true
         case .error(let message):
+            if needsForegroundReload || foregroundReloadTask != nil {
+                // Aether may briefly report an error while its lifecycle
+                // reload is being canceled or reopened. The reload task owns
+                // the terminal result for this interval.
+                isPlayerLoading = true
+                isPlayerPlaying = false
+                isPlayerEnded = false
+                break
+            }
             isPlayerLoading = false
             isPlayerPlaying = false
             isPlayerEnded = false
@@ -4160,6 +4279,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         )
         lifecycleReloadToken &+= 1
         needsForegroundReload = false
+        foregroundReloadActiveCancellationRetryCount = 0
         playbackWasPlayingBeforeBackground = false
         foregroundReloadTask?.cancel()
         foregroundReloadTask = nil

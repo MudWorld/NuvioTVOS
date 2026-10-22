@@ -15,6 +15,165 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertEqual(PlaybackToggleDirection(isTransportPlaying: false), .play)
     }
 
+    func testAetherLifecycleRetriesOneActiveCancellationOnly() {
+        XCTAssertTrue(AetherPlaybackLifecyclePolicy.shouldReloadAfterBackground(state: .loading))
+        XCTAssertTrue(AetherPlaybackLifecyclePolicy.shouldReloadAfterBackground(state: .seeking))
+        XCTAssertTrue(AetherPlaybackLifecyclePolicy.shouldResumeAfterBackground(
+            state: .seeking,
+            isPlayerPlaying: false,
+            isTransportPlaying: true,
+            previousIntent: false
+        ))
+        XCTAssertEqual(
+            AetherPlaybackLifecyclePolicy.reloadFailureDisposition(
+                isCancellation: true,
+                tokenIsCurrent: true,
+                applicationIsActive: true,
+                activeCancellationRetryCount: 0
+            ),
+            .retryAfterTaskClears
+        )
+        XCTAssertEqual(
+            AetherPlaybackLifecyclePolicy.reloadFailureDisposition(
+                isCancellation: true,
+                tokenIsCurrent: true,
+                applicationIsActive: true,
+                activeCancellationRetryCount: AetherPlaybackLifecyclePolicy.maximumActiveCancellationRetries
+            ),
+            .report
+        )
+        XCTAssertEqual(
+            AetherPlaybackLifecyclePolicy.reloadFailureDisposition(
+                isCancellation: false,
+                tokenIsCurrent: true,
+                applicationIsActive: true,
+                activeCancellationRetryCount: 0
+            ),
+            .report
+        )
+        XCTAssertEqual(
+            AetherPlaybackLifecyclePolicy.reloadFailureDisposition(
+                isCancellation: true,
+                tokenIsCurrent: true,
+                applicationIsActive: false,
+                activeCancellationRetryCount: 0
+            ),
+            .keepPending
+        )
+        XCTAssertEqual(
+            AetherPlaybackLifecyclePolicy.reloadFailureDisposition(
+                isCancellation: false,
+                tokenIsCurrent: false,
+                applicationIsActive: true,
+                activeCancellationRetryCount: 0
+            ),
+            .ignore
+        )
+    }
+
+    func testMPVLifecycleRestoreWaitsForActiveAppAndSettledDisplay() {
+        XCTAssertFalse(MPVPlaybackLifecyclePolicy.canIssueRestore(
+            pending: true,
+            applicationIsActive: false,
+            displayIsSafe: true
+        ))
+        XCTAssertFalse(MPVPlaybackLifecyclePolicy.canIssueRestore(
+            pending: true,
+            applicationIsActive: true,
+            displayIsSafe: false
+        ))
+        XCTAssertTrue(MPVPlaybackLifecyclePolicy.canIssueRestore(
+            pending: true,
+            applicationIsActive: true,
+            displayIsSafe: true
+        ))
+        XCTAssertFalse(MPVPlaybackLifecyclePolicy.canIssueRestore(
+            pending: false,
+            applicationIsActive: true,
+            displayIsSafe: true
+        ))
+    }
+
+    func testMPVLifecycleRestorePlansTargetSeekAndPreservesPauseIntent() {
+        let plan = MPVPlaybackLifecyclePolicy.restorePlan(
+            targetPositionMs: 80_000,
+            currentPositionMs: 130_000,
+            watchPartyControlled: false,
+            reachedEOF: false,
+            shouldResume: false
+        )
+        XCTAssertEqual(plan.seekTargetMs, 80_000)
+        XCTAssertFalse(plan.shouldResume)
+
+        let alreadyAtTarget = MPVPlaybackLifecyclePolicy.restorePlan(
+            targetPositionMs: 80_000,
+            currentPositionMs: 80_500,
+            watchPartyControlled: false,
+            reachedEOF: false,
+            shouldResume: true
+        )
+        XCTAssertNil(alreadyAtTarget.seekTargetMs)
+        XCTAssertTrue(alreadyAtTarget.shouldResume)
+
+        let watchPartyRestore = MPVPlaybackLifecyclePolicy.restorePlan(
+            targetPositionMs: 80_000,
+            currentPositionMs: 80_500,
+            watchPartyControlled: true,
+            reachedEOF: false,
+            shouldResume: true
+        )
+        XCTAssertEqual(watchPartyRestore.seekTargetMs, 80_000)
+        XCTAssertFalse(watchPartyRestore.shouldResume)
+    }
+
+    func testMPVExplicitTransportInputUpdatesIntentWhileRestoreWaitsForDisplay() {
+        XCTAssertFalse(MPVPlaybackLifecyclePolicy.updatingSavedPlayIntent(
+            currentIntent: true,
+            restoreIsPending: true,
+            playWasRequested: false
+        ))
+        XCTAssertTrue(MPVPlaybackLifecyclePolicy.updatingSavedPlayIntent(
+            currentIntent: false,
+            restoreIsPending: true,
+            playWasRequested: true
+        ))
+        XCTAssertTrue(MPVPlaybackLifecyclePolicy.updatingSavedPlayIntent(
+            currentIntent: true,
+            restoreIsPending: false,
+            playWasRequested: false
+        ))
+    }
+
+    func testMPVLateLifecycleRecoveryClearsOnlyItsRestoreFailure() {
+        XCTAssertTrue(MPVPlaybackLifecyclePolicy.hasRecovered(
+            targetPositionMs: 80_000,
+            durationIsAvailable: true,
+            currentPositionMs: 84_000,
+            reachedEOF: false
+        ))
+        XCTAssertFalse(MPVPlaybackLifecyclePolicy.hasRecovered(
+            targetPositionMs: 80_000,
+            durationIsAvailable: true,
+            currentPositionMs: 86_000,
+            reachedEOF: false
+        ))
+        XCTAssertFalse(MPVPlaybackLifecyclePolicy.hasRecovered(
+            targetPositionMs: 80_000,
+            durationIsAvailable: true,
+            currentPositionMs: 80_000,
+            reachedEOF: true
+        ))
+
+        let combinedError = "Decoder warning\n\(MPVPlaybackLifecyclePolicy.restoreFailureMessage)"
+        XCTAssertEqual(
+            MPVPlaybackLifecyclePolicy.removingRestoreFailure(from: combinedError),
+            "Decoder warning"
+        )
+        XCTAssertNil(MPVPlaybackLifecyclePolicy.removingRestoreFailure(
+            from: MPVPlaybackLifecyclePolicy.restoreFailureMessage
+        ))
+    }
+
     @MainActor
     func testFailedStartupRetryPublishesErrorWithoutSourceWatchdog() {
         let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil }, engineSettingProvider: { "AetherEngine" }, loadDispatcher: { _, _, _ in XCTFail("Failed startup must not dispatch a load") })

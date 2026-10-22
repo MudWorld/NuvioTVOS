@@ -1910,7 +1910,7 @@ struct PlayerSettingsPanel: View {
             }
             .focusSection()
         }
-        .frame(width: 380, alignment: .leading)
+        .frame(width: 360, alignment: .leading)
     }
 
     private func languageRow(
@@ -1989,9 +1989,10 @@ struct PlayerSettingsPanel: View {
                     .padding(.vertical, 6)
                 }
                 .focusSection()
+                .scrollClipDisabledIfAvailable()
             }
         }
-        .frame(width: 460, alignment: .leading)
+        .frame(width: 580, alignment: .leading)
     }
 
     private func optionCard(_ option: SubtitlePanelOption) -> some View {
@@ -2004,7 +2005,7 @@ struct PlayerSettingsPanel: View {
                 viewModel.selectExternalSubtitle(subtitle)
             }
         } label: {
-            HStack(spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(option.badge)
                         .font(.system(size: 17, weight: .semibold))
@@ -2017,15 +2018,20 @@ struct PlayerSettingsPanel: View {
                     Text(option.title)
                         .font(.system(size: 28, weight: .semibold))
                         .foregroundColor(isFocused ? .black : .white)
-                        .lineLimit(1)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let detail = option.detail {
                         Text(detail)
                             .font(.system(size: 20, weight: .medium))
                             .foregroundColor(isFocused ? .black.opacity(0.52) : .white.opacity(0.5))
-                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
                 if option.isSelected {
                     Image(systemName: "checkmark")
                         .font(.system(size: 27, weight: .bold))

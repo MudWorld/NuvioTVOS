@@ -332,6 +332,38 @@ final class PictureInPictureManager: NSObject, ObservableObject {
         }
     }
 
+    /// Programmatically restores the fullscreen player interface from the app.
+    /// If PiP is active, safely coordinates with AVKit so that PiP stops only after
+    /// the fullscreen player surface has remounted.
+    @discardableResult
+    func restoreFullscreenFromApp() -> Bool {
+        guard let context = activeContext, !isRestoringUI, let onRestoreUI else { return false }
+        if isPictureInPictureActive, let pip = pipController {
+            let restoringGeneration = sessionGeneration
+            isRestoringUI = true
+            pendingRestoreCompletion = { [weak self, weak pip] success in
+                guard let self, self.sessionGeneration == restoringGeneration else { return }
+                if success {
+                    pip?.stopPictureInPicture()
+                } else {
+                    self.isRestoringUI = false
+                }
+            }
+            pendingRestoreResult = nil
+            restoreSurfaceReady = false
+            onRestoreUI(context) { [weak self, weak pip] success in
+                guard let self, let pip, self.sessionGeneration == restoringGeneration,
+                      self.pipController === pip, self.pendingRestoreCompletion != nil else { return }
+                self.pendingRestoreResult = success
+                self.finishRestoreIfReady()
+            }
+            return true
+        } else {
+            onRestoreUI(context) { _ in }
+            return true
+        }
+    }
+
     /// Stops playback and clears the active session state.
     func invalidateSession() {
         sessionGeneration = UUID()
