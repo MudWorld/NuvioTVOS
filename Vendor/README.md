@@ -1,16 +1,16 @@
 # Vendored playback dependencies
 
-## AetherEngine (pin 7.42.0)
+## AetherEngine (pin 7.46.0)
 
-Local pin of [AetherEngine 7.42.0](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.42.0) with imports rewritten to the namespaced FFmpeg modules below and Nuvio's host integration patches retained. This release also avoids Atmos-confirmation reads on sources limited to one request, and adds host-owned display-criteria handling.
+Local pin of [AetherEngine 7.46.0](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.46.0), upstream commit `40193cefa7244c097519d219f84af1b9028c181c`, merged from the [7.42.0](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.42.0) base commit `f5af2a389695021af6f3aee86dfd8e485cc2c975`. Imports remain rewritten to the namespaced FFmpeg modules below, and Nuvio's static product, four enabled default traits, local FFmpeg path dependency, and host integration patches are retained. AetherEngine 7.46 uses FFmpegBuild 3.9.0's patched `dca` decoder for DTS:X height channels through the `x_heights` option.
 
 Retain the local spatial-bridge patch that reports persistent APAC encoding failures independently of successful TrueHD decoding, along with its regression tests. The patch is merged with the 7.40 bed-split renderer and its telemetry reporting.
 
 Nuvio also retains its supplemental-codecs guard for non-Dolby-Vision displays, including the upstream Profile 7 to Profile 8.1 conversion. Explicit host DV assertions still enable the guarded route. The tagged API, architecture, and format docs are included for upstream documentation-consistency tests.
 
-## FFmpegBuild 3.7.1 (namespaced upstream)
+## FFmpegBuild 3.9.0 (namespaced upstream)
 
-Local pin of [FFmpegBuild 3.7.1](https://github.com/superuser404notfound/FFmpegBuild/tree/3.7.1). The upstream release ships the nine dynamic frameworks and SwiftPM targets under the `AetherLib*` namespace so they can embed next to MPVKit’s `Libav*` stack in the same app binary. The umbrella product is `AetherFFmpegBuild`.
+Local pin of [FFmpegBuild 3.9.0](https://github.com/superuser404notfound/FFmpegBuild/tree/3.9.0), upstream commit `3b398c8f6340fe5fb4a7cb9a2a211a16677171e0`. The upstream release ships the nine dynamic frameworks and SwiftPM targets under the `AetherLib*` namespace so they can embed next to MPVKit’s `Libav*` stack in the same app binary. The umbrella product is `AetherFFmpegBuild`.
 
 | Upstream module | Nuvio module / framework |
 |---|---|
@@ -33,4 +33,4 @@ Local pin of [FFmpegBuild 3.7.1](https://github.com/superuser404notfound/FFmpegB
 
 Keep the AetherEngine patch surface minimal so rebases stay manageable.
 
-The Nuvio host offers an off-by-default setting for TrueHD Atmos and DTS:X spatial rendering to 9.1.6 APAC. LibTrueHD and LibDTSX are pinned to 3.0.0; APAC rendering requires tvOS 26 or later and a supported 48 kHz VOD source. The app bundles their notices and license texts under `tvosApp/NuvioTV/Resources/AudioLicenses`. TrueHD uses the source's channel presentation split into a speaker bed; DTS:X 3.0 renders its standard presentation and falls back for object presentations. The engine retains its ordinary audio bridge for other content, including ordinary DTS-HD MA.
+The Nuvio host offers an off-by-default setting for TrueHD Atmos and DTS:X spatial rendering to 9.1.6 APAC. LibTrueHD remains pinned to 3.0.0. DTS:X standard-presentation heights now come from FFmpegBuild 3.9.0's patched `dca` decoder; object presentations continue to use the ordinary audio bridge. APAC rendering requires tvOS 26 or later and a supported 48 kHz VOD source. TrueHD uses the source's channel presentation split into a speaker bed. The engine retains its ordinary audio bridge for other content, including ordinary DTS-HD MA.

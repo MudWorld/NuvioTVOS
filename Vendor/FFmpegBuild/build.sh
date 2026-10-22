@@ -552,7 +552,12 @@ build_zvbi_one() {
         --disable-tests \
         --disable-examples \
         --without-doxygen \
+        --without-x \
         2>&1 | tail -5
+
+    # --without-x: on a Mac with X11 libraries installed (XQuartz, or Homebrew's libx11 as some formula's
+    # dependency) configure finds them for the macOS slices, whose host matches the build machine, and links
+    # -lX11, which the SDK sysroot does not have: `ld: library 'X11' not found`. The decoder needs no X.
 
     # Only src/ holds the decoder library; test/ and examples/ are disabled above.
     make -C src -j$(sysctl -n hw.ncpu) 2>&1 | tail -3
@@ -660,6 +665,16 @@ COMMON_FLAGS=(
     # IPTV channel opened as mp3 and every packet failed with "Header missing"
     # (AetherEngine #641). The decoders (dca, truehd, aac_latm) were always in.
     --enable-demuxer=dts --enable-demuxer=truehd --enable-demuxer=loas
+    # RealMedia (.rm / .rmvb) and VobSub (.idx + .sub). RealMedia is what most of the
+    # Chinese web's films and series shipped as from 2003 to 2010, so a library carried
+    # over from that time is full of it; VobSub is the DVD-era subtitle sidecar, the
+    # .idx (timing, palette, file offsets) beside a .sub (the subpicture packets as an
+    # MPEG program stream). The vobsub demuxer opens the .sub itself through the file
+    # protocol, by the .idx's own name, and reads it with the mpegps demuxer above, so
+    # a host hands it a local .idx with its .sub next to it. Their decoders are in the
+    # decoder block below, together, for the reason the WMA family is (a container
+    # without its audio decoder plays silently).
+    --enable-demuxer=rm --enable-demuxer=vobsub
     --disable-decoders
     --enable-decoder=h264 --enable-decoder=hevc --enable-decoder=vp8
     --enable-decoder=vp9 --enable-decoder=av1 --enable-decoder=libdav1d
@@ -718,6 +733,26 @@ COMMON_FLAGS=(
     # Blu-ray LPCM below. DecoderAvailabilityTests refuses a half set from here on.
     --enable-decoder=wmav1 --enable-decoder=wmav2 --enable-decoder=wmapro
     --enable-decoder=wmalossless --enable-decoder=wmavoice
+    # RealMedia, whole for the same all-or-nothing reason as WMA above: RealVideo 1 to
+    # 4 (rv10 / rv20 / rv30 / rv40; an .rmvb is almost always RV40) and every RealAudio
+    # an .rm carries (cook, the usual one; atrac3, sipr, ralf, and the 14.4 / 28.8
+    # speech codecs, which register as real_144 / real_288). AAC in RealMedia (raac /
+    # racp) needs nothing more. All are native libavcodec decoders, LGPL, no external
+    # library.
+    --enable-decoder=rv10 --enable-decoder=rv20 --enable-decoder=rv30 --enable-decoder=rv40
+    --enable-decoder=cook --enable-decoder=atrac3 --enable-decoder=sipr --enable-decoder=ralf
+    --enable-decoder=ra_144 --enable-decoder=ra_288
+    # Phone video, the 3GP / 3G2 that feature phones recorded: H.263 pictures with
+    # AMR narrowband (or wideband) speech, in the mov demuxer that is already here.
+    # The flv decoder above shares the h263 objects, so h263 itself costs little; the
+    # native AMR decoders (not libopencore) are LGPL.
+    --enable-decoder=h263 --enable-decoder=amrnb --enable-decoder=amrwb
+    # Theora, the video of .ogv (the ogg demuxer is already here, and Vorbis); it
+    # selects the vp3 core.
+    --enable-decoder=theora
+    # DVD LPCM (pcm_dvd), the uncompressed audio some DVDs (concerts, music titles)
+    # carry in their VOBs; Blu-ray LPCM is pcm_bluray below.
+    --enable-decoder=pcm_dvd
     --enable-decoder=aac --enable-decoder=aac_latm --enable-decoder=ac3
     --enable-decoder=eac3 --enable-decoder=flac --enable-decoder=mp3
     --enable-decoder=mp3float --enable-decoder=opus --enable-decoder=vorbis
@@ -1285,7 +1320,7 @@ patch_ffmpeg_movenc_fragment_end() {
     # get_cluster_duration() sees a negative duration and av_assert0() aborts the
     # process. A queued packet behind the last written sample says nothing about where
     # the track ends, so it is skipped, and the end stays what the sample's own duration
-    # gave it.
+    # gave it. Proposed upstream as FFmpeg PR 25021.
     local F="${FFMPEG_SRC}/libavformat/movenc.c"
     if grep -q "cannot end the track before them" "${F}"; then
         return
@@ -1298,6 +1333,26 @@ s#(                if \(track->dts_shift != AV_NOPTS_VALUE\)\n                  
         echo "ERROR: movenc fragment end patch did not apply (upstream source changed?)"
         exit 1
     fi
+}
+
+patch_ffmpeg_dca_x_heights() {
+    # DTS:X heights without LibDTSX (AetherEngine #798). The standard presentation of DTS:X
+    # carries its four height channels in a regular XLL channel set at the end of every XLL
+    # frame, which upstream recognises (it sets the "DTS-HD MA + DTS:X" profile) but skips.
+    # The patch decodes that set with the existing channel set code, adds a decoder option
+    # "x_heights" (off by default) that outputs 7.1.4, and removes the -3 dB fold of each
+    # height from the bed speaker under it. Without the option the output is unchanged
+    # byte for byte. It lives in patches/ rather than inline: at this size a perl
+    # substitution would be unreadable. The patch header explains the format.
+    local P="${SCRIPT_DIR}/patches/dca-xll-x-heights.patch"
+    if grep -q '"x_heights"' "${FFMPEG_SRC}/libavcodec/dcadec.c"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: decode the DTS:X standard presentation's height channels (AetherEngine #798)"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: DTS:X height patch did not apply (upstream source changed?)"
+        exit 1
+    }
 }
 
 echo "╔══════════════════════════════════════╗"
@@ -1316,6 +1371,7 @@ patch_ffmpeg_dav1_tag
 patch_ffmpeg_mpegts_mpeg1_probe
 patch_ffmpeg_eac3_dec3
 patch_ffmpeg_movenc_fragment_end
+patch_ffmpeg_dca_x_heights
 fetch_dav1d
 fetch_zimg
 fetch_zvbi

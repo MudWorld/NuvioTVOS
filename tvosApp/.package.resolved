@@ -19,15 +19,6 @@
       }
     },
     {
-      "identity" : "libdtsx",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/superuser404notfound/LibDTSX",
-      "state" : {
-        "revision" : "7d68c8bbda348a10e169b9bb9619c8b2b7a0c642",
-        "version" : "3.0.0"
-      }
-    },
-    {
       "identity" : "libtruehd",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/superuser404notfound/LibTrueHD",
