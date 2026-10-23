@@ -48,22 +48,22 @@ Download the latest Apple TV `.ipa` from [Releases](https://github.com/bobsupra/
 ## Latest tvOS Beta
 
 <!-- BEGIN LATEST_BETA -->
-**Beta 3.4.5** is the latest tvOS release.
+**Beta 3.4.6** is the latest tvOS release.
 
-[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.5/NuvioTV-3.4.5-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.5) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
+[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.6/NuvioTV-3.4.6-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.6) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
 <!-- END LATEST_BETA -->
 
-> 🎉 **Thank you for 200+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 200+ stars!
+> 🎉 **Thank you for 300+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 300+ stars!
 
 The IPA requires a compatible tvOS development or sideloading signing workflow before installation.
 
-### New in Beta 3.4.5
+### New in Beta 3.4.6
 
-- **Playback Engine, Subtitles & Telemetry Improvements:** Pre-computed stream candidate sort keys (`StreamPickerSortKey`) to eliminate sort churn, respected forced subtitles during automatic track matching, normalized subtitle preview layout and tracking clamps, preserved stream and row identity across resolved URLs, and hardened MPV display criteria.
-- **Trailers, Artwork & Visual Polish:** Bounded trailer preview delays and activation readiness, preserved artwork caches across playback transitions, and maintained Top Shelf order and AMOLED surface styling.
-- **Cloud, Library & Multi-Profile Hardening:** Serialized remote watchlist toggles from Details, deduplicated Continue Watching and Simkl Up Next seeds, and strictly scoped add-on and collection operations per profile.
-- **Watch Party Feature Gated:** Temporarily disabled the experimental Watch Party feature pending room coordination and lobby finalization.
-- **Tests & Stability:** 1,205 automated unit and regression tests passing with 0 failures across playback backends, stream caching, subtitle rendering, sync services, and layout settings.
+- **Watch Party on tvOS (Beta):** Dedicated sidebar space (`TVTab.party`) for joining and hosting rooms, Scene/Insight menu room creation, real-time incoming chat messages from mobile and desktop members, guest shared-source playback, and frame-accurate sync ("Watch the new Cyberpunk: Edgerunners Season 2 with your chooms").
+- **Independent Multi-Service Scrobble:** Simultaneously sync playback progress and completion history across Trakt, Simkl, WeTrakr, and MDBList without cross-service collisions, strictly scoped per profile.
+- **AetherEngine 7.46.0 & MPVKit Update:** Upgraded AetherEngine to 7.46.0 with FFmpegBuild 3.9.0 (DTS:X height channels via patched `dca` decoder), vendored MPVKit with MoltenVK 1.4.2, and hardened live stream startup and recovery.
+- **Scene Menu Frame Capture & UI Enhancements:** Active playback frame capture in Scene panel, preferred-language trailer resolution, expanded custom poster pattern recognition, and Jellyfin library grouping.
+- **Comprehensive Native Translations:** Complete native translations and terminology alignments across European Portuguese, Traditional Chinese, Simplified Chinese, French, Spanish, German, and Arabic.
 
 ### Built-in Player
 
