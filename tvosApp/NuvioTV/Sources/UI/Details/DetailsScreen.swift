@@ -1354,6 +1354,29 @@ actor YouTubeTrailerResolver {
     private var trailerIdFailureDates: [String: Date] = [:]
     private var trailerioCache: [String: TrailerPlaybackSource] = [:]
 
+    private let preferredLanguageProvider: () -> String
+    private let configurationIdentityProvider: () -> String
+    private let trailerYouTubeIdProvider: ((NuvioMeta) async -> String?)?
+    private let refreshedTrailerIdsProvider: ((NuvioMeta) async -> [String]?)?
+    private let trailerioProvider: ((String, Bool) async -> TrailerPlaybackSource?)?
+    private let youtubeSourceProvider: ((String, String?, String?, Bool) async -> TrailerPlaybackSource?)?
+
+    init(
+        preferredLanguageProvider: @escaping () -> String = { TmdbDetailsService.preferredLanguage },
+        configurationIdentityProvider: @escaping () -> String = { TmdbDetailsService.trailerResolutionConfigurationIdentity },
+        trailerYouTubeIdProvider: ((NuvioMeta) async -> String?)? = nil,
+        refreshedTrailerIdsProvider: ((NuvioMeta) async -> [String]?)? = nil,
+        trailerioProvider: ((String, Bool) async -> TrailerPlaybackSource?)? = nil,
+        youtubeSourceProvider: ((String, String?, String?, Bool) async -> TrailerPlaybackSource?)? = nil
+    ) {
+        self.preferredLanguageProvider = preferredLanguageProvider
+        self.configurationIdentityProvider = configurationIdentityProvider
+        self.trailerYouTubeIdProvider = trailerYouTubeIdProvider
+        self.refreshedTrailerIdsProvider = refreshedTrailerIdsProvider
+        self.trailerioProvider = trailerioProvider
+        self.youtubeSourceProvider = youtubeSourceProvider
+    }
+
     private struct TrailerioResponse: Decodable {
         struct Meta: Decodable {
             struct Link: Decodable {
@@ -1451,35 +1474,15 @@ actor YouTubeTrailerResolver {
     }
 
     func resolve(for meta: NuvioMeta) async -> TrailerPlaybackSource? {
-        // 1. Try Trailerio first (direct 1080p CDN streams from Apple TV, Rotten Tomatoes, Plex)
-        if let imdbId = meta.imdbId ?? NuvioMeta.canonicalImdbID(from: meta.id),
-           let source = await resolveTrailerio(imdbId: imdbId, isSeries: meta.isSeries) {
-            return source
+        await TmdbDetailsService.withRequestContext {
+            await self.resolveForCurrentContext(meta, preview: false)
         }
-
-        // 2. Fall back to YouTube resolver
-        guard let ytId = await preferredTrailerYouTubeId(for: meta) else { return nil }
-        return await resolve(
-            youtubeVideoId: ytId,
-            title: meta.name,
-            year: meta.year.map(String.init)
-        )
     }
 
     func resolvePreview(for meta: NuvioMeta) async -> TrailerPlaybackSource? {
-        // 1. Try Trailerio first (direct 1080p CDN streams from Apple TV, Rotten Tomatoes, Plex)
-        if let imdbId = meta.imdbId ?? NuvioMeta.canonicalImdbID(from: meta.id),
-           let source = await resolveTrailerio(imdbId: imdbId, isSeries: meta.isSeries) {
-            return source
+        await TmdbDetailsService.withRequestContext {
+            await self.resolveForCurrentContext(meta, preview: true)
         }
-
-        // 2. Fall back to YouTube preview resolver
-        guard let ytId = await preferredTrailerYouTubeId(for: meta) else { return nil }
-        return await resolvePreview(
-            youtubeVideoId: ytId,
-            title: meta.name,
-            year: meta.year.map(String.init)
-        )
     }
 
     static func preferredTrailerYouTubeId(for meta: NuvioMeta) async -> String? {
@@ -1487,7 +1490,21 @@ actor YouTubeTrailerResolver {
     }
 
     func preferredTrailerYouTubeId(for meta: NuvioMeta) async -> String? {
-        let cacheKey = "\(meta.id)|\(meta.tmdbId ?? 0)"
+        await TmdbDetailsService.withRequestContext {
+            await self.preferredTrailerYouTubeIdInCurrentContext(for: meta)
+        }
+    }
+
+    private func preferredTrailerYouTubeIdInCurrentContext(for meta: NuvioMeta) async -> String? {
+        let mediaType = meta.isSeries ? "tv" : "movie"
+        let language = TmdbMetadataLanguage.normalized(preferredLanguageProvider())
+        let cacheKey = [
+            meta.id,
+            String(meta.tmdbId ?? 0),
+            mediaType,
+            language,
+            configurationIdentityProvider()
+        ].joined(separator: "|")
         if let cached = trailerIdCache[cacheKey] {
             if !cached.isEmpty { return cached }
             if let failedAt = trailerIdFailureDates[cacheKey],
@@ -1500,20 +1517,36 @@ actor YouTubeTrailerResolver {
 
         var resolvedId: String? = nil
 
-        if let ytId = meta.trailerYtIds?
-            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
-            .first(where: { Self.isYouTubeVideoId($0) }) {
-            resolvedId = ytId
-        } else if let ytId = await TmdbDetailsService.fetchTrailerYouTubeId(for: meta),
+        // TMDB applies the selected metadata language and its own English
+        // fallback, so prefer it to untagged catalog trailer IDs.
+        let tmdbTrailerId: String?
+        if let trailerYouTubeIdProvider {
+            tmdbTrailerId = await trailerYouTubeIdProvider(meta)
+        } else {
+            tmdbTrailerId = await TmdbDetailsService.fetchTrailerYouTubeId(for: meta)
+        }
+        if let ytId = tmdbTrailerId,
            Self.isYouTubeVideoId(ytId.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            resolvedId = ytId
-        } else if let refreshed = try? await CinemetaCatalogRepository().getMetadata(
-            id: meta.id,
-            type: meta.type
-        ), let ytId = refreshed.trailerYtIds?
+            resolvedId = ytId.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let ytId = meta.trailerYtIds?
             .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
             .first(where: { Self.isYouTubeVideoId($0) }) {
             resolvedId = ytId
+        } else {
+            let refreshedTrailerIds: [String]?
+            if let refreshedTrailerIdsProvider {
+                refreshedTrailerIds = await refreshedTrailerIdsProvider(meta)
+            } else if let refreshed = try? await CinemetaCatalogRepository().getMetadata(
+                id: meta.id,
+                type: meta.type
+            ) {
+                refreshedTrailerIds = refreshed.trailerYtIds
+            } else {
+                refreshedTrailerIds = nil
+            }
+            resolvedId = refreshedTrailerIds?
+                .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                .first(where: { Self.isYouTubeVideoId($0) })
         }
 
         guard !Task.isCancelled else { return nil }
@@ -1528,6 +1561,57 @@ actor YouTubeTrailerResolver {
             trailerIdFailureDates.removeValue(forKey: cacheKey)
         }
         return resolvedId
+    }
+
+    private func resolveForCurrentContext(
+        _ meta: NuvioMeta,
+        preview: Bool
+    ) async -> TrailerPlaybackSource? {
+        let isEnglish = TmdbMetadataLanguage.normalized(preferredLanguageProvider())
+            .split(separator: "-").first?.lowercased() == "en"
+
+        if isEnglish, let source = await resolveTrailerio(for: meta) {
+            return source
+        }
+
+        if let ytId = await preferredTrailerYouTubeIdInCurrentContext(for: meta) {
+            let source: TrailerPlaybackSource?
+            if let youtubeSourceProvider {
+                source = await youtubeSourceProvider(
+                    ytId,
+                    meta.name,
+                    meta.year.map(String.init),
+                    preview
+                )
+            } else if preview {
+                source = await resolvePreview(
+                    youtubeVideoId: ytId,
+                    title: meta.name,
+                    year: meta.year.map(String.init)
+                )
+            } else {
+                source = await resolve(
+                    youtubeVideoId: ytId,
+                    title: meta.name,
+                    year: meta.year.map(String.init)
+                )
+            }
+            if let source { return source }
+        }
+
+        // The YouTube ID may be present while its stream is unavailable. Keep
+        // Trailerio as a fallback for both language paths in that case.
+        return isEnglish ? nil : await resolveTrailerio(for: meta)
+    }
+
+    private func resolveTrailerio(for meta: NuvioMeta) async -> TrailerPlaybackSource? {
+        guard let imdbId = meta.imdbId ?? NuvioMeta.canonicalImdbID(from: meta.id) else {
+            return nil
+        }
+        if let trailerioProvider {
+            return await trailerioProvider(imdbId, meta.isSeries)
+        }
+        return await resolveTrailerio(imdbId: imdbId, isSeries: meta.isSeries)
     }
     private struct Client {
         let key: String

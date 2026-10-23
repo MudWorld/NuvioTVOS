@@ -1,6 +1,13 @@
 import XCTest
 @testable import NuvioTV
 
+private final class TrailerResolverTestState: @unchecked Sendable {
+    var language = "en-US"
+    var configuration = "config-1"
+    var calls: [String] = []
+    var trailerIdLookups = 0
+}
+
 final class TrailerSettingsTests: XCTestCase {
     private let suiteName = "TrailerSettingsTestsSuite"
     private var testDefaults: UserDefaults!
@@ -98,6 +105,140 @@ final class TrailerSettingsTests: XCTestCase {
         // Clean up
         profile1Defaults.removePersistentDomain(forName: "TrailerProfile1Suite")
         profile2Defaults.removePersistentDomain(forName: "TrailerProfile2Suite")
+    }
+
+    func testLocalizedTrailerResolutionPrefersTMDBYouTubeBeforeTrailerio() async {
+        let state = TrailerResolverTestState()
+        state.language = "fr-FR"
+        let resolver = YouTubeTrailerResolver(
+            preferredLanguageProvider: { state.language },
+            configurationIdentityProvider: { state.configuration },
+            trailerYouTubeIdProvider: { _ in
+                state.calls.append("tmdb")
+                return "tmdb1234567"
+            },
+            refreshedTrailerIdsProvider: { _ in nil },
+            trailerioProvider: { _, _ in
+                state.calls.append("trailerio")
+                return TrailerPlaybackSource(videoUrl: "https://trailerio.test/trailer.m3u8", audioUrl: nil)
+            },
+            youtubeSourceProvider: { videoID, _, _, isPreview in
+                state.calls.append("youtube:\(videoID):\(isPreview)")
+                return TrailerPlaybackSource(videoUrl: "https://youtube.test/\(videoID).m3u8", audioUrl: nil)
+            }
+        )
+        let meta = NuvioMeta(
+            id: "tt1234567",
+            name: "Localized trailer",
+            imdbId: "tt1234567",
+            type: "movie",
+            trailerYtIds: ["meta1234567"]
+        )
+
+        let source = await resolver.resolve(for: meta)
+
+        XCTAssertEqual(source?.videoUrl, "https://youtube.test/tmdb1234567.m3u8")
+        XCTAssertEqual(state.calls, ["tmdb", "youtube:tmdb1234567:false"])
+    }
+
+    func testEnglishTrailerResolutionKeepsTrailerioFastPath() async {
+        let state = TrailerResolverTestState()
+        state.calls = []
+        let resolver = YouTubeTrailerResolver(
+            preferredLanguageProvider: { "en-US" },
+            configurationIdentityProvider: { state.configuration },
+            trailerYouTubeIdProvider: { _ in
+                state.calls.append("tmdb")
+                return "tmdb1234567"
+            },
+            refreshedTrailerIdsProvider: { _ in nil },
+            trailerioProvider: { _, _ in
+                state.calls.append("trailerio")
+                return TrailerPlaybackSource(videoUrl: "https://trailerio.test/english.m3u8", audioUrl: nil)
+            },
+            youtubeSourceProvider: { _, _, _, _ in
+                state.calls.append("youtube")
+                return nil
+            }
+        )
+        let meta = NuvioMeta(id: "tt7654321", name: "English trailer", imdbId: "tt7654321", type: "movie")
+
+        let source = await resolver.resolve(for: meta)
+
+        XCTAssertEqual(source?.videoUrl, "https://trailerio.test/english.m3u8")
+        XCTAssertEqual(state.calls, ["trailerio"])
+    }
+
+    func testLocalizedTrailerResolutionFallsBackToTrailerioAfterYouTubeFailure() async {
+        let state = TrailerResolverTestState()
+        state.language = "fr-FR"
+        let resolver = YouTubeTrailerResolver(
+            preferredLanguageProvider: { state.language },
+            configurationIdentityProvider: { state.configuration },
+            trailerYouTubeIdProvider: { _ in
+                state.calls.append("tmdb")
+                return "tmdb1234567"
+            },
+            refreshedTrailerIdsProvider: { _ in nil },
+            trailerioProvider: { _, _ in
+                state.calls.append("trailerio")
+                return TrailerPlaybackSource(videoUrl: "https://trailerio.test/fallback.m3u8", audioUrl: nil)
+            },
+            youtubeSourceProvider: { _, _, _, _ in
+                state.calls.append("youtube")
+                return nil
+            }
+        )
+        let meta = NuvioMeta(id: "tt1122334", name: "Fallback trailer", imdbId: "tt1122334", type: "movie")
+
+        let source = await resolver.resolve(for: meta)
+
+        XCTAssertEqual(source?.videoUrl, "https://trailerio.test/fallback.m3u8")
+        XCTAssertEqual(state.calls, ["tmdb", "youtube", "trailerio"])
+    }
+
+    func testTrailerIDCacheIncludesLanguageConfigurationAndMediaType() async {
+        let state = TrailerResolverTestState()
+        let resolver = YouTubeTrailerResolver(
+            preferredLanguageProvider: { state.language },
+            configurationIdentityProvider: { state.configuration },
+            trailerYouTubeIdProvider: { _ in
+                state.trailerIdLookups += 1
+                return "tmdb1234567"
+            },
+            refreshedTrailerIdsProvider: { _ in nil }
+        )
+        let movie = NuvioMeta(id: "same-meta-id", name: "Cache test", tmdbId: 42, type: "movie")
+        let series = NuvioMeta(id: "same-meta-id", name: "Cache test", tmdbId: 42, type: "series")
+
+        _ = await resolver.preferredTrailerYouTubeId(for: movie)
+        _ = await resolver.preferredTrailerYouTubeId(for: movie)
+        XCTAssertEqual(state.trailerIdLookups, 1)
+
+        state.language = "fr-FR"
+        _ = await resolver.preferredTrailerYouTubeId(for: movie)
+        XCTAssertEqual(state.trailerIdLookups, 2)
+
+        state.configuration = "config-2"
+        _ = await resolver.preferredTrailerYouTubeId(for: movie)
+        XCTAssertEqual(state.trailerIdLookups, 3)
+
+        _ = await resolver.preferredTrailerYouTubeId(for: series)
+        XCTAssertEqual(state.trailerIdLookups, 4)
+    }
+
+    func testTrailerConfigurationIdentityDoesNotExposeRawAPIKey() async {
+        let key = "trailer-cache-test-secret"
+        testDefaults.set(key, forKey: SettingsKey.tmdbApiKey)
+        testDefaults.set(true, forKey: SettingsKey.tmdbEnabled)
+        testDefaults.set(true, forKey: SettingsKey.tmdbUseTrailers)
+
+        let identity = await TmdbDetailsService.withRequestContext(defaults: testDefaults) {
+            TmdbDetailsService.trailerResolutionConfigurationIdentity
+        }
+
+        XCTAssertFalse(identity.contains(key))
+        XCTAssertNotEqual(identity, "true|true|no-key")
     }
 
     @MainActor

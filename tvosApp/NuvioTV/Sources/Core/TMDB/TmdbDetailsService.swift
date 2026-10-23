@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Production company / network shown on the details Production row.
@@ -258,6 +259,15 @@ enum TmdbDetailsService {
     static var preferredLanguage: String {
         if let requestContext { return requestContext.language }
         return TmdbMetadataLanguage.resolvedLanguage(in: ProfileSettings.current)
+    }
+
+    /// Opaque cache discriminator for trailer lookups. The key itself must
+    /// never become part of a cache key or diagnostic string.
+    static var trailerResolutionConfigurationIdentity: String {
+        let keyFingerprint = currentApiKey.map {
+            SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
+        } ?? "no-key"
+        return "\(isEnabled)|\(useTrailers)|\(keyFingerprint)"
     }
 
     static var useTrailers: Bool { tmdbBoolean(SettingsKey.tmdbUseTrailers) }
