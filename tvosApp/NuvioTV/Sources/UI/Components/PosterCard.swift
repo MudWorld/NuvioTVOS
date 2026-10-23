@@ -2434,7 +2434,8 @@ private let posterURLSession: URLSession = {
 enum PosterArtworkCachePolicy {
     private static let volatileHosts = [
         "xperience-app.com", "btttr.cc", "ratingposterdb.com", "top-posters.com",
-        "easyratingsdb.com", "extendedratings.com", "postersplus.elfhosted.com"
+        "easyratingsdb.com", "extendedratings.com", "postersplus.elfhosted.com",
+        "postersplus.cc", "slokker.cc", "stremio.ru"
     ]
 
     static func isVolatile(_ url: URL) -> Bool {

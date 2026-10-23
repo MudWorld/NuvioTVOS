@@ -620,6 +620,138 @@ final class CatalogArtworkMergeTests: XCTestCase {
         XCTAssertNil(CustomPosterURLResolver.resolve(pattern: "file://example.com/{tmdb_id}", meta: meta))
     }
 
+    func testPostersPlusPatternWithOptionalIDsAndStremioID() {
+        let pattern = "https://postersplus.example.com/poster?tmdb_id={tmdb_id?}&imdb_id={imdb_id?}&stremio_id={id}&type={type}&shape={shape}"
+
+        // 1. Movie with IMDb and TMDB
+        let movieBoth = makeMeta(id: "tt0137523", imdbId: "tt0137523", tmdbId: 550, type: "movie")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: movieBoth, shape: "poster"),
+            "https://postersplus.example.com/poster?tmdb_id=550&imdb_id=tt0137523&stremio_id=tt0137523&type=movie&shape=poster"
+        )
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: movieBoth, shape: "landscape"),
+            "https://postersplus.example.com/poster?tmdb_id=550&imdb_id=tt0137523&stremio_id=tt0137523&type=movie&shape=landscape"
+        )
+
+        // 2. Movie with IMDb ID only -> optional tmdb_id? becomes empty string
+        let movieImdbOnly = makeMeta(id: "tt0137523", imdbId: "tt0137523", tmdbId: nil, type: "movie")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: movieImdbOnly, shape: "poster"),
+            "https://postersplus.example.com/poster?tmdb_id=&imdb_id=tt0137523&stremio_id=tt0137523&type=movie&shape=poster"
+        )
+
+        // 3. Series with TMDB ID only -> optional imdb_id? becomes empty string
+        let seriesTmdbOnly = makeMeta(id: "tmdb:1396", imdbId: nil, tmdbId: 1396, type: "series")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: seriesTmdbOnly, shape: "poster"),
+            "https://postersplus.example.com/poster?tmdb_id=1396&imdb_id=&stremio_id=tmdb:1396&type=series&shape=poster"
+        )
+
+        // 4. Anime with Kitsu ID -> resolves {id} and sets optional IDs to empty
+        let animeKitsu = makeMeta(id: "kitsu:7442", imdbId: nil, tmdbId: nil, type: "series")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: animeKitsu, shape: "poster"),
+            "https://postersplus.example.com/poster?tmdb_id=&imdb_id=&stremio_id=kitsu:7442&type=series&shape=poster"
+        )
+
+        // 5. Full Posters+ URL with client parameters
+        let fullPostersPlus = "https://postersplus.stremio.ru/poster?tmdb_id={tmdb_id}&imdb_id={imdb_id?}&type={type}&primary_client=stremio_tv_nuvio&fallback_to_imdb=true&movie_weights=letterboxd%3A0.99"
+        let breakingBad = makeMeta(id: "tmdb:1396", imdbId: "tt0903747", tmdbId: 1396, type: "series")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: fullPostersPlus, meta: breakingBad),
+            "https://postersplus.stremio.ru/poster?tmdb_id=1396&imdb_id=tt0903747&type=series&primary_client=stremio_tv_nuvio&fallback_to_imdb=true&movie_weights=letterboxd%3A0.99"
+        )
+    }
+
+    func testPostersPlusSlokkerInstanceAndJsonPasteHandling() {
+        let rawPattern = "https://postersplus.slokker.cc/poster?tmdb_id={tmdb_id?}&imdb_id={imdb_id?}&stremio_id={id}&type={type}&shape={shape}"
+        let fightClub = makeMeta(id: "tt0137523", imdbId: "tt0137523", tmdbId: 550, type: "movie")
+
+        // Direct URL resolution for landscape and portrait
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: rawPattern, meta: fightClub, shape: "landscape"),
+            "https://postersplus.slokker.cc/poster?tmdb_id=550&imdb_id=tt0137523&stremio_id=tt0137523&type=movie&shape=landscape"
+        )
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: rawPattern, meta: fightClub, shape: "poster"),
+            "https://postersplus.slokker.cc/poster?tmdb_id=550&imdb_id=tt0137523&stremio_id=tt0137523&type=movie&shape=poster"
+        )
+
+        // Pasted JSON configuration with "pattern" key
+        let jsonPattern = """
+        {"pattern": "https://postersplus.slokker.cc/poster?tmdb_id={tmdb_id?}&imdb_id={imdb_id?}&stremio_id={id}&type={type}&shape={shape}"}
+        """
+        XCTAssertEqual(
+            CustomPosterURLResolver.sanitizePattern(jsonPattern),
+            rawPattern
+        )
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: jsonPattern, meta: fightClub, shape: "landscape"),
+            "https://postersplus.slokker.cc/poster?tmdb_id=550&imdb_id=tt0137523&stremio_id=tt0137523&type=movie&shape=landscape"
+        )
+
+        // Pasted JSON configuration with "url" key
+        let jsonUrl = """
+        {"url": "https://postersplus.slokker.cc/poster?tmdb_id={tmdb_id?}&imdb_id={imdb_id?}&stremio_id={id}&type={type}&shape={shape}"}
+        """
+        XCTAssertEqual(
+            CustomPosterURLResolver.sanitizePattern(jsonUrl),
+            rawPattern
+        )
+
+        // Quoted string
+        let quoted = "\"https://postersplus.slokker.cc/poster?tmdb_id={tmdb_id?}&imdb_id={imdb_id?}&stremio_id={id}&type={type}&shape={shape}\""
+        XCTAssertEqual(
+            CustomPosterURLResolver.sanitizePattern(quoted),
+            rawPattern
+        )
+    }
+
+    func testUnhandledOptionalTokensResolveToEmptyString() {
+        let patternWithExtraOptional = "https://postersplus.slokker.cc/poster?tmdb_id={tmdb_id?}&imdb_id={imdb_id?}&stremio_id={id}&type={type}&shape={shape}&tmdb_key={tmdb_key?}&mdblist_key={mdblist_key?}"
+        let fightClub = makeMeta(id: "tt0137523", imdbId: "tt0137523", tmdbId: 550, type: "movie")
+
+        // Extra optional placeholders {tmdb_key?} and {mdblist_key?} resolve to empty string instead of failing
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: patternWithExtraOptional, meta: fightClub, shape: "landscape"),
+            "https://postersplus.slokker.cc/poster?tmdb_id=550&imdb_id=tt0137523&stremio_id=tt0137523&type=movie&shape=landscape&tmdb_key=&mdblist_key="
+        )
+    }
+
+    func testUniversalPatternAndRPDBFamilyAutoFallback() {
+        let universalPattern = "https://api.aioratings.com/KEY/{id_type}/poster-default/{typed_id}.jpg"
+
+        // Universal pattern with IMDb
+        let imdbMeta = makeMeta(id: "tt0137523", imdbId: "tt0137523", tmdbId: nil, type: "movie")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: universalPattern, meta: imdbMeta),
+            "https://api.aioratings.com/KEY/imdb/poster-default/tt0137523.jpg"
+        )
+
+        // Universal pattern with TMDB movie
+        let tmdbMovie = makeMeta(id: "tmdb:550", imdbId: nil, tmdbId: 550, type: "movie")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: universalPattern, meta: tmdbMovie),
+            "https://api.aioratings.com/KEY/tmdb/poster-default/movie-550.jpg"
+        )
+
+        // Universal pattern with TMDB series
+        let tmdbSeries = makeMeta(id: "tmdb:1396", imdbId: nil, tmdbId: 1396, type: "series")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: universalPattern, meta: tmdbSeries),
+            "https://api.aioratings.com/KEY/tmdb/poster-default/series-1396.jpg"
+        )
+
+        // RPDB auto-fallback from IMDb to TMDB
+        let rpdbPattern = "https://api.ratingposterdb.com/t1-key/imdb/poster-default/{imdb_id}.jpg?fallback=true"
+        let missingImdb = makeMeta(id: "tmdb:1396", imdbId: nil, tmdbId: 1396, type: "series")
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: rpdbPattern, meta: missingImdb),
+            "https://api.ratingposterdb.com/t1-key/tmdb/poster-default/series-1396.jpg?fallback=true"
+        )
+    }
+
     func testCustomPosterScreenFilterDefaultsToAllAndSupportsExplicitNone() {
         let allScreens = Set(CustomPosterScreen.allCases)
         let pattern = "https://example.com/{tmdb_id}?shape={shape}"

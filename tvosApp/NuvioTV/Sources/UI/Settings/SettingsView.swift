@@ -2175,6 +2175,7 @@ private struct AppearanceSettingsView: View {
                     cornerRadiusOption: CardCornerRadiusOption.from(rawValue: cardCornerRadius),
                     isLiquidGlass: liquidGlassCards
                 )
+                .id(customPosterURLPattern)
 
                 SettingsOptionRow(
                     title: L10n.string("settings_poster_card_radius", fallback: "Corner Radius"),
@@ -2205,12 +2206,12 @@ private struct AppearanceSettingsView: View {
 
                 SettingsTextFieldRow(
                     title: "Custom Poster URL",
-                    subtitle: "Leave blank to use provider artwork. Supports {type}, {shape}, and {tmdb_id|imdb_id}.",
-                    placeholder: "https://example.com/{type}/{tmdb_id|imdb_id}?shape={shape}",
+                    subtitle: "Leave blank to use provider artwork. Supports {id}, {id_type}, {typed_id}, {type}, {shape}, and ID types ({imdb_id}, {tmdb_id}, {tvdb_id}, etc.).",
+                    placeholder: "https://example.com/poster?id={id}&id_type={id_type}&type={type}",
                     text: $customPosterURLDraft,
                     fieldWidth: 650,
                     onCommit: {
-                        let committedPattern = customPosterURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let committedPattern = CustomPosterURLResolver.sanitizePattern(customPosterURLDraft)
                         customPosterURLDraft = committedPattern
                         customPosterURLPattern = committedPattern
                     }
@@ -2333,10 +2334,20 @@ private struct AppearanceSettingsView: View {
         .onChange(of: liquidGlassCards) { _, _ in
             ProfileSettings.notifySettingsChanged()
         }
-        .onChange(of: customPosterURLPattern) { _, _ in
+        .onChange(of: customPosterURLPattern) { oldPattern, newPattern in
+            if oldPattern != newPattern {
+                Task {
+                    await PosterArtworkCache.clearAllArtwork()
+                }
+            }
             ProfileSettings.notifySettingsChanged()
         }
-        .onChange(of: customPosterEnabledScreens) { _, _ in
+        .onChange(of: customPosterEnabledScreens) { oldScreens, newScreens in
+            if oldScreens != newScreens {
+                Task {
+                    await PosterArtworkCache.clearAllArtwork()
+                }
+            }
             ProfileSettings.notifySettingsChanged()
         }
     }
