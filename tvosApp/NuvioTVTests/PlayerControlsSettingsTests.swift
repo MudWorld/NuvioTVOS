@@ -896,6 +896,75 @@ final class PlayerControlsSettingsTests: XCTestCase {
     }
 
     @MainActor
+    func testLateExternalSubtitlesSelectPreferredEmbeddedLanguageWithOrderedFallback() {
+        let savedLangs = ProfileSettings.current.string(forKey: SettingsKey.subtitleLanguages)
+        let savedAudioLanguage = ProfileSettings.current.string(forKey: SettingsKey.audioLanguage)
+        let savedSmart = ProfileSettings.current.object(forKey: SettingsKey.smartSubtitleMatching)
+        let savedForced = ProfileSettings.current.object(forKey: SettingsKey.forcedSubtitles)
+        addTeardownBlock {
+            if let savedLangs {
+                ProfileSettings.current.set(savedLangs, forKey: SettingsKey.subtitleLanguages)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.subtitleLanguages)
+            }
+            if let savedAudioLanguage {
+                ProfileSettings.current.set(savedAudioLanguage, forKey: SettingsKey.audioLanguage)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.audioLanguage)
+            }
+            if let savedSmart {
+                ProfileSettings.current.set(savedSmart, forKey: SettingsKey.smartSubtitleMatching)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.smartSubtitleMatching)
+            }
+            if let savedForced {
+                ProfileSettings.current.set(savedForced, forKey: SettingsKey.forcedSubtitles)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.forcedSubtitles)
+            }
+        }
+
+        ProfileSettings.current.set(SubtitleLanguagePreferences.encode(["English", "Arabic"]), forKey: SettingsKey.subtitleLanguages)
+        ProfileSettings.current.set("English", forKey: SettingsKey.audioLanguage)
+        ProfileSettings.current.set(true, forKey: SettingsKey.smartSubtitleMatching)
+        ProfileSettings.current.set(false, forKey: SettingsKey.forcedSubtitles)
+
+        let englishExternal = NuvioSubtitle(
+            url: "https://subs.example/english.srt",
+            language: "eng",
+            label: "English Full"
+        )
+        let cases: [(tracks: [SubtitleTrack], expectedID: String)] = [
+            (
+                [
+                    SubtitleTrack(id: "2", name: "English Full", language: "eng", isSelected: false),
+                    SubtitleTrack(id: "3", name: "Arabic Full", language: "ara", isSelected: false)
+                ],
+                "2"
+            ),
+            (
+                [SubtitleTrack(id: "3", name: "Arabic Full", language: "ara", isSelected: false)],
+                "3"
+            )
+        ]
+
+        for testCase in cases {
+            let model = PlayerViewModel(
+                sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+            )
+            model.audioTracks = [AudioTrack(id: "1", name: "English", language: "eng", isSelected: true)]
+            model.subtitles = [
+                SubtitleTrack(id: "off", name: "Off", language: "", isSelected: true)
+            ] + testCase.tracks
+
+            model.mergeExternalSubtitles([englishExternal])
+
+            XCTAssertEqual(model.subtitles.first(where: { $0.isSelected })?.id, testCase.expectedID)
+            XCTAssertTrue(model.pendingExternalSubtitles.isEmpty)
+        }
+    }
+
+    @MainActor
     func testMergeExternalSubtitlesDoesNotQueueWhenExplicitSelectionMade() {
         let savedLangs = ProfileSettings.current.string(forKey: SettingsKey.subtitleLanguages)
         let savedSmart = ProfileSettings.current.object(forKey: SettingsKey.smartSubtitleMatching)

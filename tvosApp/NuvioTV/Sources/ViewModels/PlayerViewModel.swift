@@ -5545,7 +5545,12 @@ class PlayerViewModel: ObservableObject {
         if let selectedAudio,
            let preferredAudioLanguage,
            selectedAudioTrack(selectedAudio, matches: preferredAudioLanguage) {
-            return allowForcedSubtitles ? .forced(language: preferredAudioLanguage) : .off
+            if allowForcedSubtitles {
+                return .forced(language: preferredAudioLanguage)
+            }
+            if preferredSubtitleLanguages.isEmpty {
+                return .off
+            }
         }
         guard !preferredSubtitleLanguages.isEmpty else { return nil }
         return .preferredLanguages(preferredSubtitleLanguages)

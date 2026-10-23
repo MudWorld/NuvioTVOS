@@ -483,6 +483,7 @@ struct PlayerControls: View {
                 .equatable()
                 .focused($focusedControl, equals: .subtitles)
                 .disabled(!isTransportButtonFocusable(.subtitles))
+                .onExitCommand(perform: handleExit)
                 .onMoveCommand { direction in
                     handleMove(direction, from: .subtitles)
                 }
@@ -513,6 +514,7 @@ struct PlayerControls: View {
                 .equatable()
                 .focused($focusedControl, equals: .audio)
                 .disabled(!isTransportButtonFocusable(.audio))
+                .onExitCommand(perform: handleExit)
                 .onMoveCommand { direction in
                     handleMove(direction, from: .audio)
                 }

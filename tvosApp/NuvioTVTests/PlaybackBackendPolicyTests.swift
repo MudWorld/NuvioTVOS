@@ -2048,6 +2048,24 @@ final class PlaybackBackendPolicyTests: XCTestCase {
                 preferredSubtitleLanguages: ["Spanish"],
                 allowForcedSubtitles: false
             ),
+            .preferredLanguages(["Spanish"])
+        )
+        XCTAssertEqual(
+            PlayerViewModel.automaticSubtitlePolicy(
+                selectedAudio: englishAudio,
+                preferredAudioLanguage: "English",
+                preferredSubtitleLanguages: ["English", "Arabic"],
+                allowForcedSubtitles: false
+            ),
+            .preferredLanguages(["English", "Arabic"])
+        )
+        XCTAssertEqual(
+            PlayerViewModel.automaticSubtitlePolicy(
+                selectedAudio: englishAudio,
+                preferredAudioLanguage: "English",
+                preferredSubtitleLanguages: [],
+                allowForcedSubtitles: false
+            ),
             .off
         )
         XCTAssertEqual(

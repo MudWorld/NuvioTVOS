@@ -282,10 +282,10 @@ extension PlayerView {
                     if let sender = toast.senderName, !sender.isEmpty {
                         Text("\(sender):")
                             .font(.system(size: 20, weight: .bold))
-                            .foregroundColor(toastAvatarColor(toast.avatarColor))
+                            .foregroundColor(.white)
                         Text(toast.message)
                             .font(.system(size: 20, weight: .medium))
-                            .foregroundColor(.white)
+                            .foregroundColor(.white.opacity(0.9))
                             .lineLimit(2)
                     } else {
                         Text(toast.message)
