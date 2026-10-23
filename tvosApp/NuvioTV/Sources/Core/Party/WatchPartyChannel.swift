@@ -24,7 +24,7 @@ protocol WatchPartyChannel: AnyObject {
 
 enum WatchPartyChannelContract {
     static let events = ["state", "state_request", "status", "control", "member_joined",
-                         "member_left", "ended", "media", "stream"]
+                         "member_left", "ended", "media", "stream", "chat"]
 
     static func realtimeURL(configuration: ServerConfiguration) throws -> URL {
         guard !configuration.publishableKey.isEmpty,

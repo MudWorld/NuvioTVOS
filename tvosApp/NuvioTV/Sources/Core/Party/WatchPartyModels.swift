@@ -148,15 +148,27 @@ struct WatchPartyChatMessage: Codable, Equatable, Sendable {
 extension WatchPartyChatMessage {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decodeIfPresent(Int64.self, forKey: .id)
+        if let intVal = try? c.decode(Int64.self, forKey: .id) {
+            id = intVal
+        } else if let strVal = try? c.decode(String.self, forKey: .id), let intVal = Int64(strVal) {
+            id = intVal
+        } else {
+            id = nil
+        }
         memberID = (try? c.decode(String.self, forKey: .memberID)) ?? ""
-        name = try c.decodeIfPresent(String.self, forKey: .name)
-        avatarURL = try c.decodeIfPresent(String.self, forKey: .avatarURL)
-        avatarColor = try c.decodeIfPresent(String.self, forKey: .avatarColor)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        avatarURL = try? c.decodeIfPresent(String.self, forKey: .avatarURL)
+        avatarColor = try? c.decodeIfPresent(String.self, forKey: .avatarColor)
         body = (try? c.decode(String.self, forKey: .body)) ?? ""
-        clientID = try c.decodeIfPresent(String.self, forKey: .clientID)
-        sentAt = try c.decodeIfPresent(Int64.self, forKey: .sentAt)
-        mine = try c.decodeIfPresent(Bool.self, forKey: .mine)
+        clientID = try? c.decodeIfPresent(String.self, forKey: .clientID)
+        if let intVal = try? c.decode(Int64.self, forKey: .sentAt) {
+            sentAt = intVal
+        } else if let strVal = try? c.decode(String.self, forKey: .sentAt), let intVal = Int64(strVal) {
+            sentAt = intVal
+        } else {
+            sentAt = nil
+        }
+        mine = try? c.decodeIfPresent(Bool.self, forKey: .mine)
     }
 }
 

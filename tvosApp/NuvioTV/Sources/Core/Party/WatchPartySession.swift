@@ -964,10 +964,20 @@ final class WatchPartySession {
                 }
             case "chat":
                 guard let message = try? JSONDecoder().decode(WatchPartyChatMessage.self, from: data) else { return }
-                guard message.memberID != memberID else { return }
+                if let mine = message.mine, mine { return }
+                if !message.memberID.isEmpty, message.memberID.caseInsensitiveCompare(memberID) == .orderedSame { return }
                 let cleanBody = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !cleanBody.isEmpty else { return }
-                notifyChatMessage(message)
+
+                var enriched = message
+                if enriched.name == nil || enriched.name?.isEmpty == true {
+                    if let member = members.first(where: { $0.id.caseInsensitiveCompare(message.memberID) == .orderedSame }) {
+                        enriched.name = member.displayName
+                        if enriched.avatarURL == nil { enriched.avatarURL = member.avatarURL }
+                        if enriched.avatarColor == nil { enriched.avatarColor = member.avatarColor }
+                    }
+                }
+                notifyChatMessage(enriched)
             default: break
             }
         }

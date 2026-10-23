@@ -283,6 +283,8 @@ final class WatchPartyCoordinationTests: XCTestCase {
     }
 
     func testIncomingChatMessageNotifiesObservers() async throws {
+        XCTAssertTrue(WatchPartyChannelContract.events.contains("chat"), "Realtime channel contract must include chat")
+
         let remote = Remote(), channel = Channel()
         let session = makeSession(remote, channel: channel, uptime: { 0 },
                                   sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
@@ -310,11 +312,28 @@ final class WatchPartyCoordinationTests: XCTestCase {
         channel.receive?(.message(name: "chat", payload: ownPayload))
         XCTAssertNil(receivedMessage)
 
-        // 3. Blank message should be ignored
-        let blankMsg = WatchPartyChatMessage(id: 103, memberID: "other", body: "   ")
+        // 3. Message marked mine = true should be ignored
+        receivedMessage = nil
+        let mineMsg = WatchPartyChatMessage(id: 103, memberID: "other", body: "Flagged mine", mine: true)
+        let minePayload = try JSONEncoder().encode(mineMsg)
+        channel.receive?(.message(name: "chat", payload: minePayload))
+        XCTAssertNil(receivedMessage)
+
+        // 4. Blank message should be ignored
+        let blankMsg = WatchPartyChatMessage(id: 104, memberID: "other", body: "   ")
         let blankPayload = try JSONEncoder().encode(blankMsg)
         channel.receive?(.message(name: "chat", payload: blankPayload))
         XCTAssertNil(receivedMessage)
+
+        // 5. Message with string id and sent_at, missing name enriches from known member
+        receivedMessage = nil
+        let jsonString = #"{"id":"999","member_id":"other","body":"Resilient test","sent_at":"1700000000"}"#
+        channel.receive?(.message(name: "chat", payload: Data(jsonString.utf8)))
+        XCTAssertEqual(receivedMessage?.body, "Resilient test")
+        XCTAssertEqual(receivedMessage?.id, 999)
+        XCTAssertEqual(receivedMessage?.sentAt, 1_700_000_000)
+        // remote.snapshot has member "other" with displayName "Other"
+        XCTAssertEqual(receivedMessage?.name, "Other")
     }
 
     func testGuestAcceptsOnlyCurrentHostStreamAndRevocationInvalidatesSelection() async throws {

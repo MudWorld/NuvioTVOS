@@ -30,6 +30,7 @@ extension PlayerView {
             playerStatusOverlay
                 .zIndex(10)
             playerToastLayer
+                .zIndex(22)
             focusSinkLayer
             pauseOverlayLayer
             skipSegmentLayer
@@ -302,7 +303,7 @@ extension PlayerView {
             }
             .transition(.opacity)
             .allowsHitTesting(false)
-            .zIndex(6)
+            .zIndex(22)
         }
     }
 
