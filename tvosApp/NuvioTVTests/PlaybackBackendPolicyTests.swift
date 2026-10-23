@@ -15,6 +15,76 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertEqual(PlaybackToggleDirection(isTransportPlaying: false), .play)
     }
 
+    @MainActor
+    func testHybridDiskCacheEligibilitySkipsLiveAndSportsRequests() {
+        let vod = PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie.mp4")!)
+        let live = PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/channel.ts")!,
+            isLiveStream: true
+        )
+        let sports = PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/event.ts")!,
+            isSports: true
+        )
+        let hls = PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie.m3u8")!)
+
+        XCTAssertTrue(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: vod))
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: live))
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: sports))
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: hls))
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: false, request: vod))
+    }
+
+    @MainActor
+    func testAutomaticLiveStartupFallbackHandsOffOnceWithoutResumeSeek() throws {
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        var dispatched: [(PlaybackLoadRequest, PlayerBackendKind)] = []
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            engineSettingProvider: { "Auto" },
+            loadDispatcher: { request, backend, _ in dispatched.append((request, backend)) }
+        )
+        defer { coordinator.stopAll() }
+
+        coordinator.load(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/channel.ts")!,
+            resumePositionSeconds: 180,
+            isLiveStream: true
+        ))
+        let initialGeneration = coordinator.loadGeneration
+
+        XCTAssertTrue(coordinator.requestLiveStartupFallback(generation: initialGeneration))
+        XCTAssertEqual(coordinator.activeBackend, .mpv)
+        XCTAssertEqual(dispatched.map { $0.1 }, [.aether, .mpv])
+        XCTAssertNil(dispatched.last?.0.resumePositionSeconds)
+        XCTAssertFalse(coordinator.requestLiveStartupFallback(generation: coordinator.loadGeneration))
+    }
+
+    @MainActor
+    func testLiveStartupFallbackRespectsManualBackendAndStaleGeneration() throws {
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            engineSettingProvider: { "AetherEngine" },
+            loadDispatcher: { _, _, _ in }
+        )
+        defer { coordinator.stopAll() }
+
+        coordinator.load(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/channel.ts")!,
+            isLiveStream: true
+        ))
+        let firstGeneration = coordinator.loadGeneration
+        XCTAssertFalse(coordinator.requestLiveStartupFallback(generation: firstGeneration))
+
+        coordinator.load(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/another-channel.ts")!,
+            isSports: true
+        ))
+        XCTAssertFalse(coordinator.requestLiveStartupFallback(generation: firstGeneration))
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+    }
+
     func testAetherLifecycleRetriesOneActiveCancellationOnly() {
         XCTAssertTrue(AetherPlaybackLifecyclePolicy.shouldReloadAfterBackground(state: .loading))
         XCTAssertTrue(AetherPlaybackLifecyclePolicy.shouldReloadAfterBackground(state: .seeking))
@@ -318,6 +388,34 @@ final class PlaybackBackendPolicyTests: XCTestCase {
 
         XCTAssertNotNil(model.loadWatchdogTask)
         model.shutdown()
+    }
+
+    @MainActor
+    func testUnstartedVODWatchdogRearmsAfterAetherToMPVHandoff() throws {
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            engineSettingProvider: { "Auto" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer { model.shutdown() }
+        model.reloadCurrentStream = { _, _ in nil }
+        model.load(
+            url: URL(fileURLWithPath: "/tmp/vod-handoff-watchdog.mkv"),
+            meta: NuvioMeta(id: "tt7654321", name: "Handoff test", type: "movie"),
+            subtitle: "",
+            resumeFrom: nil
+        )
+        let oldWatchdog = try XCTUnwrap(model.loadWatchdogTask)
+        let initialGeneration = coordinator.loadGeneration
+
+        coordinator.handoffToMPV(reason: "startup test", resumeSeconds: 0)
+
+        let currentWatchdog = try XCTUnwrap(model.loadWatchdogTask)
+        XCTAssertGreaterThan(coordinator.loadGeneration, initialGeneration)
+        XCTAssertTrue(oldWatchdog.isCancelled)
+        XCTAssertFalse(currentWatchdog.isCancelled)
     }
 
     @MainActor

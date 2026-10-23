@@ -791,6 +791,12 @@ class PlayerViewModel: ObservableObject {
             self.activeEngineKind = self.sessionCoordinator.activeBackend
             self.resetScrubThumbnailState()
             self.updateLoadingStepMessage()
+            if !self.currentLoadStarted,
+               !self.hasRenderedFirstFrame,
+               !self.livePlaybackHasStarted,
+               !self.hasProducedMidFilePosition {
+                self.startLoadWatchdog()
+            }
             if self.isPlaybackDebugEnabled == true {
                 self.playbackDebugHUDBackend = nil
                 self.isPlaybackDebugHUDVisible = true
@@ -2456,20 +2462,24 @@ class PlayerViewModel: ObservableObject {
     // MARK: Load timeout watchdog
 
     private func startLoadWatchdog() {
-        // Trailers / missing resolver: no alternate sources to fail over to.
         loadWatchdogTask?.cancel()
         loadWatchdogTask = nil
         guard !isStandalonePlaybackSession,
-              reloadCurrentStream != nil,
+              reloadCurrentStream != nil || isLiveStream || activeMeta?.isSports == true,
               sessionCoordinator.lastLoadError == nil else { return }
         currentLoadStarted = false
         let targetURL = activeStreamURL
+        let targetGeneration = sessionCoordinator.loadGeneration
         let timeout = loadTimeoutSeconds
         loadWatchdogTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: timeout * 1_000_000_000)
             guard !Task.isCancelled, let self,
+                  self.sessionCoordinator.loadGeneration == targetGeneration,
                   self.sessionCoordinator.lastLoadError == nil,
                   !self.currentLoadStarted,
+                  !self.hasRenderedFirstFrame,
+                  !self.livePlaybackHasStarted,
+                  !self.hasProducedMidFilePosition,
                   !self.didShutdown,
                   !self.isFailingOver,
                   self.activeStreamURL == targetURL
@@ -2477,6 +2487,17 @@ class PlayerViewModel: ObservableObject {
             let memReport = TVMemoryDiagnostic.detailedReport(label: "LOAD_WATCHDOG_TIMEOUT")
             print("[TVTrace] ⚠️ [LOAD_WATCHDOG_TIMEOUT] Source failed to start within \(timeout)s for url=\(targetURL ?? "nil")\n\(memReport)")
             if self.isStandalonePlaybackSession {
+                self.status = .error("The stream did not start within \(self.loadTimeoutSeconds) seconds.")
+                return
+            }
+            if (self.isLiveStream || self.activeMeta?.isSports == true),
+               self.sessionCoordinator.requestLiveStartupFallback(generation: targetGeneration) {
+                self.activeEngineKind = self.sessionCoordinator.activeBackend
+                self.currentLoadStarted = false
+                self.isAwaitingStreamStart = true
+                return
+            }
+            guard self.reloadCurrentStream != nil else {
                 self.status = .error("The stream did not start within \(self.loadTimeoutSeconds) seconds.")
                 return
             }
