@@ -21,8 +21,10 @@ final class MultiServiceScrobbleTests: XCTestCase {
 
     override func tearDown() {
         if let testProfileID {
+            MdbListKeychainTokenStorage().remove(for: testProfileID)
             UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(testProfileID)")
         }
+        MdbListKeychainTokenStorage().remove(for: ProfileSettings.activeProfileScope)
         WatchedStore.setActiveProfile(previousWatchedProfileID)
         if let previousSettingsProfileID {
             ProfileSettings.setActiveProfile(previousSettingsProfileID, isPrimary: previousSettingsProfileIsPrimary)
@@ -46,6 +48,22 @@ final class MultiServiceScrobbleTests: XCTestCase {
         )
         TraktAuthStore.saveToken(tokenResponse, clientID: clientID, store: store)
         TraktAuthStore.saveUser(username: "Test", slug: slug, store: store)
+    }
+
+    private func authenticateMdbList(in store: UserDefaults, tokenStorage: MdbListTokenStorage = MdbListKeychainTokenStorage()) {
+        let tokens = MdbListStoredTokens(
+            accessToken: "test-mdblist-access",
+            refreshToken: "test-mdblist-refresh",
+            expiresAtMillis: Date().timeIntervalSince1970 * 1_000 + 3_600_000
+        )
+        let scope = MdbListRuntimeSession.profileScope()
+        _ = MdbListAuthStore.saveTokens(
+            tokens,
+            user: MdbListUser(accountID: "1", username: "testuser", displayName: "Test User"),
+            profileScope: scope,
+            store: store,
+            tokenStorage: tokenStorage
+        )
     }
 
     // MARK: - Scrobble Enabled Defaults and Toggles
@@ -84,9 +102,7 @@ final class MultiServiceScrobbleTests: XCTestCase {
         let store = ProfileSettings.current
 
         authenticateTrakt(in: store)
-
-        // Authenticate MDBList via API key
-        store.set("test-mdb-key", forKey: SettingsKey.mdbListApiKey)
+        authenticateMdbList(in: store)
 
         // Initially both are authenticated but scrobble is off by default
         XCTAssertTrue(RemoteTrackingState.activeScrobbleSources(in: store).isEmpty)
@@ -108,13 +124,27 @@ final class MultiServiceScrobbleTests: XCTestCase {
         XCTAssertFalse(activeAfterDisable.contains(.mdblist))
     }
 
+    func testMdbListWithApiKeyOnlyIsNotAuthenticatedForSync() {
+        let store = ProfileSettings.current
+        store.set("ratings-api-key", forKey: SettingsKey.mdbListApiKey)
+        store.set(true, forKey: SettingsKey.mdbListEnabled)
+
+        // API key alone for ratings should NOT authenticate MDBList for sync or scrobble
+        XCTAssertFalse(MdbListRuntimeSession.isAuthenticated(in: store))
+        XCTAssertFalse(RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: store))
+        XCTAssertFalse(RemoteTrackingState.isLibrarySourceAuthenticated(.mdblist, in: store))
+        XCTAssertFalse(RemoteTrackingState.availableProgressSources(in: store).contains(.mdblist))
+        XCTAssertFalse(RemoteTrackingState.availableLibrarySources(in: store).contains(.mdblist))
+        XCTAssertFalse(RemoteTrackingState.isScrobbleEnabled(for: .mdblist, in: store))
+    }
+
     // MARK: - Continue Watching Source Independence
 
     func testContinueWatchingSourceCanBeNuvioSyncWhileScrobbleRemainsActive() {
         let store = ProfileSettings.current
 
         authenticateTrakt(in: store)
-        store.set("test-mdb-key", forKey: SettingsKey.mdbListApiKey)
+        authenticateMdbList(in: store)
 
         // Enable scrobble for Trakt and MDBList
         RemoteTrackingState.setScrobbleEnabled(true, for: .trakt, in: store)
@@ -136,7 +166,7 @@ final class MultiServiceScrobbleTests: XCTestCase {
         let store = ProfileSettings.current
 
         authenticateTrakt(in: store)
-        store.set("test-mdb-key", forKey: SettingsKey.mdbListApiKey)
+        authenticateMdbList(in: store)
 
         // Enable scrobble for Trakt and MDBList
         RemoteTrackingState.setScrobbleEnabled(true, for: .trakt, in: store)
@@ -159,7 +189,7 @@ final class MultiServiceScrobbleTests: XCTestCase {
         let store = ProfileSettings.current
 
         authenticateTrakt(in: store)
-        store.set("test-mdb-key", forKey: SettingsKey.mdbListApiKey)
+        authenticateMdbList(in: store)
         RemoteTrackingState.setScrobbleEnabled(true, for: .trakt, in: store)
         RemoteTrackingState.setScrobbleEnabled(true, for: .mdblist, in: store)
 
@@ -197,7 +227,7 @@ final class MultiServiceScrobbleTests: XCTestCase {
         let store = ProfileSettings.current
 
         authenticateTrakt(in: store)
-        store.set("test-mdb-key", forKey: SettingsKey.mdbListApiKey)
+        authenticateMdbList(in: store)
         store.set(TraktWatchProgressSource.nuvioSync.rawValue, forKey: SettingsKey.traktWatchProgressSource)
         RemoteTrackingState.setScrobbleEnabled(true, for: .trakt, in: store)
         RemoteTrackingState.setScrobbleEnabled(true, for: .mdblist, in: store)

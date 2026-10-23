@@ -288,14 +288,23 @@ final class MdbListProfileIsolationTests: XCTestCase {
         ProfileSettings.seedNewProfile(secondaryID)
         ProfileSettings.setActiveProfile(secondaryID, isPrimary: false)
         let secondary = ProfileSettings.current
-        secondary.set("secondary-mdblist-key", forKey: SettingsKey.mdbListApiKey)
-        secondary.set(true, forKey: SettingsKey.mdbListEnabled)
+        MdbListAuthStore.saveTokens(
+            MdbListStoredTokens(
+                accessToken: "secondary-token",
+                refreshToken: "secondary-refresh",
+                expiresAtMillis: Date().timeIntervalSince1970 * 1_000 + 3_600_000
+            ),
+            user: MdbListUser(accountID: "sec", username: "secuser", displayName: "Secondary"),
+            profileScope: secondaryID,
+            store: secondary,
+            tokenStorage: tokenStorage
+        )
         secondary.set(TraktWatchProgressSource.mdblist.rawValue, forKey: SettingsKey.traktWatchProgressSource)
 
-        XCTAssertTrue(RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: secondary))
+        XCTAssertTrue(RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: secondary, mdbListTokenStorage: tokenStorage, profileScope: secondaryID))
         ProfileSettings.setActiveProfile(primaryID, isPrimary: true)
         XCTAssertFalse(ProfileSettings.isActiveStore(secondary))
-        XCTAssertFalse(RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: secondary))
+        XCTAssertFalse(RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: secondary, mdbListTokenStorage: tokenStorage, profileScope: secondaryID))
     }
 }
 

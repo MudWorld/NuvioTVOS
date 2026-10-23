@@ -35,8 +35,10 @@ final class TraktLibraryMutationOwnershipTests: XCTestCase {
             ProfileSettings.clearActiveProfile()
         }
         for profileID in [profileA, profileB] {
+            MdbListKeychainTokenStorage().remove(for: profileID)
             UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileID)")
         }
+        MdbListKeychainTokenStorage().remove(for: ProfileSettings.activeProfileScope)
         super.tearDown()
     }
 
@@ -57,6 +59,14 @@ final class TraktLibraryMutationOwnershipTests: XCTestCase {
         let probe = observeNotifications()
         // MDBList is authenticated so the old generic usesRemoteLibrary guard
         // would have allowed the Trakt removal into this provider's items.
+        _ = MdbListKeychainTokenStorage().save(
+            MdbListStoredTokens(
+                accessToken: "test-token",
+                refreshToken: "test-refresh",
+                expiresAtMillis: Date().timeIntervalSince1970 * 1_000 + 3_600_000
+            ),
+            for: ProfileSettings.activeProfileScope
+        )
         ProfileSettings.current.set("test-key", forKey: SettingsKey.mdbListApiKey)
         ProfileSettings.current.set(TraktLibrarySourceMode.mdblist.rawValue,
                                     forKey: SettingsKey.traktLibrarySourceMode)

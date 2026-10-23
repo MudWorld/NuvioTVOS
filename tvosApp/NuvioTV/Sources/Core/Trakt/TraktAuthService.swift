@@ -529,14 +529,9 @@ enum RemoteTrackingState {
             return SimklRuntimeSession.authenticatedState(store: store, profileScope: profileScope) != nil
         case .mdblist:
             guard ProfileSettings.isActiveStore(store) else { return false }
-            if let mdbListTokenStorage {
-                return MdbListRuntimeSession.isAuthenticated(
-                    in: store,
-                    tokenStorage: mdbListTokenStorage,
-                    profileScope: profileScope
-                )
-            }
-            return MdbListRuntimeSession.isAuthenticated(in: store, profileScope: profileScope)
+            let scope = profileScope ?? MdbListRuntimeSession.profileScope()
+            let tokens = mdbListTokenStorage ?? MdbListKeychainTokenStorage()
+            return MdbListAuthStore.state(in: store, profileScope: scope, tokenStorage: tokens).hasOAuthTokens
         case .wetrakr:
             return ProfileSettings.isActiveStore(store)
                 && WeTrakrRuntimeSession.authenticatedState(store: store, profileScope: profileScope) != nil
@@ -626,7 +621,9 @@ enum RemoteTrackingState {
 
     static func isLibrarySourceAuthenticated(
         _ source: TraktLibrarySourceMode,
-        in store: UserDefaults
+        in store: UserDefaults = ProfileSettings.current,
+        mdbListTokenStorage: MdbListTokenStorage? = nil,
+        profileScope: String? = nil
     ) -> Bool {
         switch source {
         case .local:
@@ -638,8 +635,10 @@ enum RemoteTrackingState {
             return ProfileSettings.isActiveStore(store)
                 && SimklRuntimeSession.authenticatedState(store: store) != nil
         case .mdblist:
-            return ProfileSettings.isActiveStore(store)
-                && MdbListRuntimeSession.isAuthenticated(in: store)
+            guard ProfileSettings.isActiveStore(store) else { return false }
+            let scope = profileScope ?? MdbListRuntimeSession.profileScope()
+            let tokens = mdbListTokenStorage ?? MdbListKeychainTokenStorage()
+            return MdbListAuthStore.state(in: store, profileScope: scope, tokenStorage: tokens).hasOAuthTokens
         case .wetrakr:
             return ProfileSettings.isActiveStore(store)
                 && WeTrakrRuntimeSession.authenticatedState(store: store) != nil

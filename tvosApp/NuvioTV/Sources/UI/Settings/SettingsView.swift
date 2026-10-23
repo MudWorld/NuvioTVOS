@@ -4223,6 +4223,8 @@ private struct IntegrationSettingsView: View {
             if !mdbListHasApiKey {
                 mdbListEnabled = false
             }
+            RemoteTrackingState.normalizeWatchProgressSource()
+            RemoteTrackingState.normalizeLibrarySource()
         }
         .sheet(item: $debridAccountToConnect) { provider in
             if provider == .premiumize && !PremiumizeOAuthConfiguration.isDeviceOAuthConfigured {

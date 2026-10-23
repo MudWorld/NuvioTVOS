@@ -15,11 +15,12 @@ enum MdbListProgressService {
         tokenStorage: MdbListTokenStorage = MdbListKeychainTokenStorage(),
         profileScope: String? = nil
     ) -> Bool {
-        MdbListRuntimeSession.isAuthenticated(
-            in: store,
-            tokenStorage: tokenStorage,
-            profileScope: profileScope
-        )
+        let scope = profileScope ?? MdbListRuntimeSession.profileScope()
+        if MdbListAuthStore.state(in: store, profileScope: scope, tokenStorage: tokenStorage).hasOAuthTokens {
+            return true
+        }
+        return !(store.string(forKey: SettingsKey.mdbListApiKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
     }
 
     static func reportPlayback(
@@ -35,12 +36,13 @@ enum MdbListProgressService {
         profileScope: String? = nil
     ) async -> Bool {
         guard ProfileSettings.isActiveStore(store),
-              RemoteTrackingState.isScrobbleEnabled(
-                for: .mdblist,
-                in: store,
-                mdbListTokenStorage: tokenStorage,
-                profileScope: profileScope
-              ),
+              (TraktSettingsStore.watchProgressSource(in: store) == .mdblist
+                || RemoteTrackingState.isScrobbleEnabled(
+                    for: .mdblist,
+                    in: store,
+                    mdbListTokenStorage: tokenStorage,
+                    profileScope: profileScope
+                )),
               position.isFinite,
               duration.isFinite,
               position > 0,

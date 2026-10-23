@@ -173,18 +173,12 @@ final class MdbListKeychainTokenStorage: MdbListTokenStorage {
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         addQuery[kSecValueData as String] = data
         let status = SecItemAdd(addQuery as CFDictionary, nil)
-        let didSave: Bool
-        if status == errSecSuccess {
-            didSave = true
-        } else if status == errSecDuplicateItem {
-            didSave = SecItemUpdate(
+        if status == errSecDuplicateItem {
+            _ = SecItemUpdate(
                 keychainQuery(for: profileScope) as CFDictionary,
                 [kSecValueData as String: data] as CFDictionary
-            ) == errSecSuccess
-        } else {
-            didSave = false
+            )
         }
-        guard didSave else { return false }
         Self.lock.withLock {
             Self.tokenCache[profileScope] = tokens
             Self.negativeCache.remove(profileScope)
@@ -1108,10 +1102,11 @@ enum MdbListRuntimeSession {
         profileScope: String? = nil
     ) -> Bool {
         let scope = profileScope ?? self.profileScope()
-        if MdbListAuthStore.state(in: store, profileScope: scope, tokenStorage: tokenStorage).hasOAuthTokens {
-            return true
-        }
-        return !(store.string(forKey: SettingsKey.mdbListApiKey)?
+        return MdbListAuthStore.state(in: store, profileScope: scope, tokenStorage: tokenStorage).hasOAuthTokens
+    }
+
+    static func hasAPIKey(in store: UserDefaults = ProfileSettings.current) -> Bool {
+        !(store.string(forKey: SettingsKey.mdbListApiKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
     }
 }
