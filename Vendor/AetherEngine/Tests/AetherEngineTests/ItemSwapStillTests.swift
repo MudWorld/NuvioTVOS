@@ -17,7 +17,7 @@ struct ItemSwapStillTests {
     /// Four seconds of H.264 plus silent AAC, long enough to still be playing when the capture runs
     /// and with an audio stream for the audio-switch rebuild to name. The shared fixtures end after
     /// 0.2 s, before an output attached to them sees a frame.
-    private static func fixtureURL() async throws -> URL {
+    static func fixtureURL() async throws -> URL {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("ae711-still-\(UUID().uuidString).mp4")
         let writer = try AVAssetWriter(outputURL: file, fileType: .mp4)
@@ -167,6 +167,39 @@ struct ItemSwapStillTests {
         let frame = await host.captureDisplayedFrame()
         #expect(ContinuousClock.now - started < .milliseconds(500))
         #expect(frame != nil)
+    }
+
+    @Test("on-demand capture reads a native frame without retaining a video output")
+    func onDemandCaptureUsesTransientVideoOutput() async throws {
+        let file = try await Self.fixtureURL()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        _ = try await engine.load(url: file)
+        let host = try #require(engine.nativeHost)
+        // Make the permanent-output policy explicit on native macOS too; tvOS normally disables
+        // it at load because attaching that output can alter Dolby Vision rendering.
+        host.load(url: file, startPosition: nil, contract: .init(allowsVideoFrameCapture: false))
+        host.play()
+        try await waitFor { host.isVideoReadyForDisplay }
+        let item = try #require(host.avPlayer.currentItem)
+        let existingOutputCount = item.outputs.filter { $0 is AVPlayerItemVideoOutput }.count
+        #expect(!host.sessionContract.allowsVideoFrameCapture)
+        #expect(existingOutputCount == 0)
+
+        let analysis = await engine.captureVideoFrameForAnalysis(maxWidth: 64)
+        let image = analysis.image
+        #expect(image != nil)
+        #expect((image?.width ?? 0) <= 64)
+        #expect(analysis.sourceTime.isFinite)
+        #expect(analysis.diagnostics.contains("route=native-output"))
+        #expect(analysis.diagnostics.contains("reason=ok"))
+        #expect(analysis.diagnostics.contains("format="))
+        let compatibilityImage = await engine.captureCurrentVideoFrameOnDemand(maxWidth: 64)
+        #expect(compatibilityImage != nil)
+        #expect(engine.state == .playing)
+        #expect(host.avPlayer.currentItem === item)
+        #expect(item.outputs.filter { $0 is AVPlayerItemVideoOutput }.count == existingOutputCount)
     }
 
     @Test("an audio-switch rebuild holds the picture over the swap and drops it at the next first frame", .enabled(if: ItemSwapStillTests.vendsPausedFrames))

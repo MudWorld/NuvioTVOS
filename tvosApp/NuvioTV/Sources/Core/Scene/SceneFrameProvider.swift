@@ -6,7 +6,7 @@ import AetherEngine
 protocol SceneFrameProviding: AnyObject {
     var isSupported: Bool { get }
     var capabilityMessage: String? { get }
-    func captureCurrentFrame(maxWidth: Int, context: SceneContext) -> SceneFrame?
+    func captureCurrentFrame(maxWidth: Int, context: SceneContext) async -> SceneFrame?
 }
 
 @MainActor
@@ -28,18 +28,23 @@ final class AetherSceneFrameProvider: SceneFrameProviding {
         return nil
     }
     
-    func captureCurrentFrame(maxWidth: Int = 960, context: SceneContext) -> SceneFrame? {
+    func captureCurrentFrame(maxWidth: Int = 960, context: SceneContext) async -> SceneFrame? {
         guard let controller = aetherController else { return nil }
-        // Capture directly from the active display pipeline in presentation memory
-        guard let image = controller.engine.captureCurrentVideoFrame(maxWidth: maxWidth) else {
+        let engine = controller.engine
+        let capture = await engine.captureVideoFrameForAnalysis(maxWidth: maxWidth)
+        guard !Task.isCancelled,
+              aetherController === controller,
+              controller.engine === engine else { return nil }
+        guard let image = capture.image else {
+            print("[Scene] Capture unavailable: \(capture.diagnostics)")
             return nil
         }
-        let sourceTime = controller.engine.sourceTime
         return SceneFrame(
             image: image,
-            sourceTime: sourceTime,
+            sourceTime: capture.sourceTime,
             sessionID: context.sessionID,
-            generation: context.timelineGeneration
+            generation: context.timelineGeneration,
+            captureDiagnostics: capture.diagnostics
         )
     }
 }
@@ -55,7 +60,7 @@ final class UnsupportedSceneFrameProvider: SceneFrameProviding {
     var isSupported: Bool { false }
     var capabilityMessage: String? { reason }
     
-    func captureCurrentFrame(maxWidth: Int, context: SceneContext) -> SceneFrame? {
+    func captureCurrentFrame(maxWidth: Int, context: SceneContext) async -> SceneFrame? {
         return nil
     }
 }
@@ -87,20 +92,27 @@ final class DynamicPlayerSceneFrameProvider: SceneFrameProviding {
         return nil
     }
     
-    func captureCurrentFrame(maxWidth: Int = 960, context: SceneContext) -> SceneFrame? {
+    func captureCurrentFrame(maxWidth: Int = 960, context: SceneContext) async -> SceneFrame? {
         guard activeEngineKindProvider() == .aether,
               let controller = aetherControllerProvider() else {
             return nil
         }
-        guard let image = controller.engine.captureCurrentVideoFrame(maxWidth: maxWidth) else {
+        let engine = controller.engine
+        let capture = await engine.captureVideoFrameForAnalysis(maxWidth: maxWidth)
+        guard !Task.isCancelled,
+              activeEngineKindProvider() == .aether,
+              aetherControllerProvider() === controller,
+              controller.engine === engine else { return nil }
+        guard let image = capture.image else {
+            print("[Scene] Capture unavailable: \(capture.diagnostics)")
             return nil
         }
-        let sourceTime = controller.engine.sourceTime
         return SceneFrame(
             image: image,
-            sourceTime: sourceTime,
+            sourceTime: capture.sourceTime,
             sessionID: context.sessionID,
-            generation: context.timelineGeneration
+            generation: context.timelineGeneration,
+            captureDiagnostics: capture.diagnostics
         )
     }
 }

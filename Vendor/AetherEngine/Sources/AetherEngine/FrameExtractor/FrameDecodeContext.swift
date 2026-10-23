@@ -180,8 +180,9 @@ final class FrameDecodeContext: @unchecked Sendable {
         self.reader = reader
         self.formatHint = formatHint
         self.selectTitleID = nil
-        // DataIOReader is internal and exists for the native segment-cache still path.
-        self.allowsHardwareDecode = allowsHardwareDecode || reader is DataIOReader
+        // Resident readers normally allow VideoToolbox; source-known DV paths can explicitly
+        // disable it when cached segment metadata is incomplete.
+        self.allowsHardwareDecode = allowsHardwareDecode
     }
 
     deinit {
@@ -458,9 +459,10 @@ final class FrameDecodeContext: @unchecked Sendable {
         mode: FrameMode,
         targetWidth: Int,
         maxSize: CGSize?,
-afterFirstFrame offsetSeconds: Double? = nil,
+        afterFirstFrame offsetSeconds: Double? = nil,
         relativeToFirstFrame: Bool = false,
         relativeToPresentationStart: Bool = false,
+        requiredDolbyVisionReshaping: Bool = false,
         isCancelled: () -> Bool,
         residentTarget: Double? = nil,
         reportResidentTime: ((Double, Bool) -> Void)? = nil,
@@ -470,7 +472,9 @@ afterFirstFrame offsetSeconds: Double? = nil,
         guard isOpen, let ctx = codecContext, let demuxer else { return nil }
         // Without the reshaping these planes are IPT, which the standard path would read as YCbCr
         // (the green / magenta still of #103): no still at all, and nothing read or decoded for it.
-        guard Self.yieldsStill(dolbyVisionNoBaseLayer: isDolbyVisionNoBaseLayer) else { return nil }
+        guard Self.yieldsStill(dolbyVisionNoBaseLayer: isDolbyVisionNoBaseLayer || requiredDolbyVisionReshaping) else {
+            return nil
+        }
 
         // Bound this decode's HTTP reads so a stalled remote source can't park the
         // serial decode queue and freeze the scrub preview (issue #27). No-op for
@@ -587,12 +591,15 @@ afterFirstFrame offsetSeconds: Double? = nil,
                 ? targetWidth
                 : Self.clampedWidth(frame: f, maxSize: maxSize)
             #if DolbyVisionStillReshaping
-            if isDolbyVisionNoBaseLayer {
+            if requiredDolbyVisionReshaping || isDolbyVisionNoBaseLayer {
                 let sar = resolvedSAR(frame: f)
-                if let img = DolbyVisionStillConverter.makeImage(frame: f, targetWidth: width, sar: sar) {
+                if let img = DolbyVisionStillConverter.makeImage(
+                    frame: f, targetWidth: width, sar: sar, isCancelled: isCancelled) {
                     return img
                 }
-                // No DV metadata on this frame / unsupported layout: fall through to the standard path.
+                // A required reshaping capture must never publish IPT planes as ordinary YCbCr/HDR.
+                if requiredDolbyVisionReshaping { return nil }
+                // Existing still callers may fall back when DV metadata is absent or unsupported.
             }
             #endif
             if isHDR {
@@ -681,9 +688,10 @@ afterFirstFrame offsetSeconds: Double? = nil,
                         mode: mode,
                         targetWidth: targetWidth,
                         maxSize: maxSize,
-afterFirstFrame: offsetSeconds,
+                        afterFirstFrame: offsetSeconds,
                         relativeToFirstFrame: relativeToFirstFrame,
                         relativeToPresentationStart: relativeToPresentationStart,
+                        requiredDolbyVisionReshaping: requiredDolbyVisionReshaping,
                         isCancelled: isCancelled,
                         residentTarget: residentTarget,
                         reportResidentTime: reportResidentTime,

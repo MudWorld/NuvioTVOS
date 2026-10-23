@@ -28,6 +28,7 @@ final class SceneCoordinator: ObservableObject {
     private var samplingTask: Task<Void, Never>?
     private var audioSubscriptionId: UUID?
     private var activeAnalysisID: UUID?
+    private var analysisTask: Task<Void, Never>?
     private var isAnalyzingFrame: Bool { activeAnalysisID != nil }
     private var isFetchingCast: Bool = false
     private var isFetchingSoundtrack: Bool = false
@@ -181,6 +182,7 @@ final class SceneCoordinator: ObservableObject {
         guard isPanelOpen else { return }
         isPanelOpen = false
         currentGeneration &+= 1
+        analysisTask?.cancel()
         pendingPausedFrameGeneration = nil
         needsFrameAnalysisAfterCastLoad = false
         lastAnalyzedFrameSourceTime = nil
@@ -194,6 +196,7 @@ final class SceneCoordinator: ObservableObject {
         currentGeneration &+= 1
         let generation = currentGeneration
         stopSampling()
+        analysisTask?.cancel()
         pendingPausedFrameGeneration = nil
         needsFrameAnalysisAfterCastLoad = false
         lastAnalyzedFrameSourceTime = nil
@@ -275,6 +278,7 @@ final class SceneCoordinator: ObservableObject {
     func resetSession() {
         currentGeneration &+= 1
         isPanelOpen = false
+        analysisTask?.cancel()
         pendingPausedFrameGeneration = nil
         needsFrameAnalysisAfterCastLoad = false
         isFetchingCast = false
@@ -481,75 +485,167 @@ final class SceneCoordinator: ObservableObject {
 
         let requestedTime = sourceTimeProvider()
         let isPaused = !isPlayingProvider()
-        
-        guard let frame = frameProvider.captureCurrentFrame(maxWidth: 960, context: context) else {
-            print("[Scene] ⚠️ Frame capture returned nil (isSupported=\(frameProvider.isSupported), message=\(frameProvider.capabilityMessage ?? "none"))")
-            if !frameProvider.isSupported {
-                let msg = frameProvider.capabilityMessage ?? "Frame capture unsupported"
-                updateActorStatus(.unavailable(reason: msg))
-            }
-            Task { [weak self, context, requestedTime, gen] in
-                guard let self,
-                      let timelineMatch = await self.resultCache.findTimelineInterval(for: context, sourceTime: requestedTime) else { return }
-                for actor in timelineMatch.actors {
-                    await self.actorRecognition.recordConfirmedActor(actor, at: requestedTime)
-                }
-                guard self.isPanelOpen, self.currentGeneration == gen else { return }
-                self.updateActorStatus(.recognized(timelineMatch.actors))
-            }
-            return
-        }
-        guard frame.sessionID == context.sessionID,
-              frame.generation == context.timelineGeneration,
-              frame.sourceTime.isFinite else { return }
-        let time = frame.sourceTime
-        if !isPaused, let previousTime = lastAnalyzedFrameSourceTime,
-           abs(time - previousTime) < 0.01 {
-            return
-        }
-        lastAnalyzedFrameSourceTime = time
-        print("[Scene] Captured frame (\(frame.pixelSize.width)x\(frame.pixelSize.height)) at \(time)s (candidates: \(self.castCandidates.count))")
-        
+        let providerWasSupported = frameProvider.isSupported
         let analysisID = UUID()
         activeAnalysisID = analysisID
         let candidates = self.castCandidates
         let currentSubtitle = activeSubtitleTextProvider()
-        
-        Task { [weak self, frame, candidates, time, gen, isPaused, analysisID, currentSubtitle] in
+        let frameProvider = self.frameProvider
+        let actorRecognition = self.actorRecognition
+        let resultCache = self.resultCache
+        let sourceTime = self.sourceTimeProvider
+
+        // Capture shares the same single-flight owner as recognition. This prevents concurrent
+        // AVPlayerItemVideoOutput probes while the native provider is waiting for a displayed frame.
+        analysisTask = Task { @MainActor [weak self, context, requestedTime, gen, isPaused, analysisID, candidates, currentSubtitle, providerWasSupported, frameProvider, actorRecognition, resultCache, sourceTime] in
             defer {
                 Task { @MainActor [weak self] in
                     self?.finishFrameAnalysis(id: analysisID)
                 }
             }
-            
-            guard let self else { return }
-            let status = await self.actorRecognition.analyzeFrame(
+            guard self?.frameAnalysisIsCurrent(
+                id: analysisID,
+                generation: gen,
+                context: context,
+                providerWasSupported: providerWasSupported
+            ) == true else { return }
+
+            let frame = await frameProvider.captureCurrentFrame(maxWidth: 960, context: context)
+            guard self?.frameAnalysisIsCurrent(
+                id: analysisID,
+                generation: gen,
+                context: context,
+                providerWasSupported: providerWasSupported
+            ) == true else { return }
+
+            guard let frame else {
+                print("[Scene] ⚠️ Frame capture returned nil (isSupported=\(frameProvider.isSupported), message=\(frameProvider.capabilityMessage ?? "none"))")
+                if !providerWasSupported {
+                    guard let self,
+                          self.frameAnalysisIsCurrent(
+                            id: analysisID,
+                            generation: gen,
+                            context: context,
+                            providerWasSupported: providerWasSupported
+                          ) else { return }
+                    let msg = frameProvider.capabilityMessage ?? "Frame capture unsupported"
+                    self.updateActorStatus(.unavailable(reason: msg))
+                }
+                guard let timelineMatch = await resultCache.findTimelineInterval(
+                    for: context,
+                    sourceTime: requestedTime
+                ), self?.frameAnalysisIsCurrent(
+                    id: analysisID,
+                    generation: gen,
+                    context: context,
+                    providerWasSupported: providerWasSupported
+                ) == true else { return }
+                for actor in timelineMatch.actors {
+                    guard self?.frameAnalysisIsCurrent(
+                        id: analysisID,
+                        generation: gen,
+                        context: context,
+                        providerWasSupported: providerWasSupported
+                    ) == true else { return }
+                    await actorRecognition.recordConfirmedActor(actor, at: requestedTime)
+                }
+                guard let self,
+                      self.frameAnalysisIsCurrent(
+                    id: analysisID,
+                    generation: gen,
+                    context: context,
+                    providerWasSupported: providerWasSupported
+                      ) else { return }
+                self.updateActorStatus(.recognized(timelineMatch.actors))
+                return
+            }
+            guard frame.sessionID == context.sessionID,
+                  frame.generation == context.timelineGeneration,
+                  frame.sourceTime.isFinite else { return }
+            let time = frame.sourceTime
+            if !isPaused, let previousTime = self?.lastAnalyzedFrameSourceTime,
+               abs(time - previousTime) < 0.01 {
+                return
+            }
+            guard self?.frameAnalysisIsCurrent(
+                id: analysisID,
+                generation: gen,
+                context: context,
+                providerWasSupported: providerWasSupported
+            ) == true else { return }
+            self?.lastAnalyzedFrameSourceTime = time
+            let captureDetails = frame.captureDiagnostics.map { " capture={\($0)}" } ?? ""
+            print("[Scene] Captured frame (\(frame.pixelSize.width)x\(frame.pixelSize.height)) at \(time)s (candidates: \(candidates.count))\(captureDetails)")
+
+            let status = await actorRecognition.analyzeFrame(
                 frame,
                 candidates: candidates,
                 sourceTime: time,
                 isPaused: isPaused,
                 activeSubtitleText: currentSubtitle
             )
+            guard self?.frameAnalysisIsCurrent(
+                id: analysisID,
+                generation: gen,
+                context: context,
+                providerWasSupported: providerWasSupported
+            ) == true else { return }
             // Fall back to or augment with verified timeline interval
             var resolvedStatus = status
             if case .noMatch = status {
-                if let timelineMatch = await self.resultCache.findTimelineInterval(for: context, sourceTime: time) {
+                if let timelineMatch = await resultCache.findTimelineInterval(for: context, sourceTime: time) {
+                    guard self?.frameAnalysisIsCurrent(
+                        id: analysisID,
+                        generation: gen,
+                        context: context,
+                        providerWasSupported: providerWasSupported
+                    ) == true else { return }
                     for actor in timelineMatch.actors {
-                        await self.actorRecognition.recordConfirmedActor(actor, at: time)
+                        guard self?.frameAnalysisIsCurrent(
+                            id: analysisID,
+                            generation: gen,
+                            context: context,
+                            providerWasSupported: providerWasSupported
+                        ) == true else { return }
+                        await actorRecognition.recordConfirmedActor(actor, at: time)
                     }
                     resolvedStatus = .recognized(timelineMatch.actors)
                 }
             } else if case .unavailable = status {
-                if let timelineMatch = await self.resultCache.findTimelineInterval(for: context, sourceTime: time) {
+                if let timelineMatch = await resultCache.findTimelineInterval(for: context, sourceTime: time) {
+                    guard self?.frameAnalysisIsCurrent(
+                        id: analysisID,
+                        generation: gen,
+                        context: context,
+                        providerWasSupported: providerWasSupported
+                    ) == true else { return }
                     for actor in timelineMatch.actors {
-                        await self.actorRecognition.recordConfirmedActor(actor, at: time)
+                        guard self?.frameAnalysisIsCurrent(
+                            id: analysisID,
+                            generation: gen,
+                            context: context,
+                            providerWasSupported: providerWasSupported
+                        ) == true else { return }
+                        await actorRecognition.recordConfirmedActor(actor, at: time)
                     }
                     resolvedStatus = .recognized(timelineMatch.actors)
                 }
             } else if case .recognized(let visualActors) = status {
-                if let timelineMatch = await self.resultCache.findTimelineInterval(for: context, sourceTime: time) {
+                if let timelineMatch = await resultCache.findTimelineInterval(for: context, sourceTime: time) {
+                    guard self?.frameAnalysisIsCurrent(
+                        id: analysisID,
+                        generation: gen,
+                        context: context,
+                        providerWasSupported: providerWasSupported
+                    ) == true else { return }
                     for actor in timelineMatch.actors {
-                        await self.actorRecognition.recordConfirmedActor(actor, at: time)
+                        guard self?.frameAnalysisIsCurrent(
+                            id: analysisID,
+                            generation: gen,
+                            context: context,
+                            providerWasSupported: providerWasSupported
+                        ) == true else { return }
+                        await actorRecognition.recordConfirmedActor(actor, at: time)
                     }
                     var combinedActors = visualActors
                     for actor in timelineMatch.actors {
@@ -562,39 +658,58 @@ final class SceneCoordinator: ObservableObject {
             }
 
             let finalStatus = resolvedStatus
-            await MainActor.run {
-                guard self.isPanelOpen,
-                      self.currentGeneration == gen,
-                      abs(self.sourceTimeProvider() - time) <= 15.0 else { return }
+            guard let self,
+                  self.frameAnalysisIsCurrent(
+                id: analysisID,
+                generation: gen,
+                context: context,
+                providerWasSupported: providerWasSupported
+                  ), abs(sourceTime() - time) <= 15.0 else { return }
 
-                // Do not clobber recognized actors during transient analyzing frames
-                if case .analyzing = finalStatus, !self.currentSnapshot.actors.isEmpty {
-                    return
-                }
+            // Do not clobber recognized actors during transient analyzing frames
+            if case .analyzing = finalStatus, !self.currentSnapshot.actors.isEmpty {
+                return
+            }
 
-                self.updateActorStatus(finalStatus)
-                
-                // Store recognized actors in dynamic result cache
-                if case .recognized(let actors) = finalStatus {
-                    let snapshot = SceneSnapshot(
-                        timestamp: time,
-                        actors: actors,
-                        song: self.currentSnapshot.song,
-                        actorStatus: finalStatus,
-                        musicStatus: self.currentSnapshot.musicStatus,
-                        generation: gen
-                    )
-                    Task { [weak self, context, snapshot, time] in
-                        await self?.resultCache.store(snapshot: snapshot, context: context, sourceTime: time)
-                    }
+            self.updateActorStatus(finalStatus)
+
+            // Store recognized actors in dynamic result cache.
+            if case .recognized(let actors) = finalStatus {
+                let snapshot = SceneSnapshot(
+                    timestamp: time,
+                    actors: actors,
+                    song: self.currentSnapshot.song,
+                    actorStatus: finalStatus,
+                    musicStatus: self.currentSnapshot.musicStatus,
+                    generation: gen
+                )
+                Task { [context, snapshot, time, resultCache] in
+                    await resultCache.store(snapshot: snapshot, context: context, sourceTime: time)
                 }
             }
         }
     }
 
+    private func frameAnalysisIsCurrent(
+        id: UUID,
+        generation: UInt64,
+        context: SceneContext,
+        providerWasSupported: Bool
+    ) -> Bool {
+        guard !Task.isCancelled,
+              activeAnalysisID == id,
+              isPanelOpen,
+              currentGeneration == generation,
+              frameProvider.isSupported == providerWasSupported,
+              let currentContext = self.context else { return false }
+        return isSameMediaContext(currentContext, context)
+            && currentContext.sessionID == context.sessionID
+    }
+
     private func finishFrameAnalysis(id: UUID) {
         guard activeAnalysisID == id else { return }
         activeAnalysisID = nil
+        analysisTask = nil
         if needsFrameAnalysisAfterCastLoad {
             needsFrameAnalysisAfterCastLoad = false
             captureAndAnalyzeCurrentFrame()

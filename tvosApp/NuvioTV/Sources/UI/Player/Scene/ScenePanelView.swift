@@ -450,12 +450,6 @@ struct ScenePanelView: View {
                                     }
                                 }
                             }
-                            
-                            Image(systemName: isPlayable ? "play.fill" : "calendar")
-                                .font(.system(size: 30))
-                                .foregroundColor(.white)
-                                .padding(16)
-                                .background(Circle().fill(Color.black.opacity(0.6)))
                         }
                         
                         VStack(alignment: .leading, spacing: 8) {
@@ -479,7 +473,7 @@ struct ScenePanelView: View {
                                     .foregroundColor(isNextFocused ? Color.black.opacity(0.7) : Color.white.opacity(0.7))
                                     .lineLimit(2)
                             }
-                            
+
                             HStack(spacing: 8) {
                                 if isAdvancing {
                                     ProgressView()

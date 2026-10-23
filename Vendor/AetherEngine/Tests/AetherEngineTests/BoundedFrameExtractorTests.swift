@@ -31,21 +31,19 @@ struct BoundedFrameExtractorTests {
         await zeroTime.shutdown()
     }
 
-    @Test("A decoded still returns its measured presentation timestamp", .timeLimit(.minutes(1)))
-    func measuredPTS() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(".bounded-frame-\(UUID().uuidString).mp4")
-        try ProbeTestFixtures.hdr10Plus().write(to: url)
+    @Test("A bounded first-frame offset returns its measured presentation timestamp", .timeLimit(.minutes(1)))
+    func firstFrameOffsetPTS() async throws {
+        let url = try await ItemSwapStillTests.fixtureURL()
         defer { try? FileManager.default.removeItem(at: url) }
-        let extractor = FrameExtractor(url: url)
+        let extractor = FrameExtractor(url: url, allowsHardwareDecode: false)
         let result = await extractor.boundedSnapshot(at: 0,
             maxSize: CGSize(width: 320, height: 320),
             limits: ProbeLimits(maxInputBytes: 16 * 1_024 * 1_024, maxPackets: 900,
                                 maxPacketBytes: 4 * 1_024 * 1_024, timeBudget: 30),
-            cancellation: ProbeCancellation())
+            cancellation: ProbeCancellation(), firstFrameOffset: 0.1)
         await extractor.shutdown()
         let frame = try #require(result)
-        #expect(frame.actualSeconds?.isFinite == true)
+        #expect(frame.actualSeconds.map { $0 >= 0.099 && $0 <= 0.2 } == true)
     }
 
     @Test("The deadline interrupts a stalled HTTP open", .timeLimit(.minutes(1)))

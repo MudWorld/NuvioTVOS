@@ -151,18 +151,21 @@ struct SceneFrame: @unchecked Sendable {
     let sessionID: UUID
     let generation: UInt64
     let pixelSize: CGSize
+    let captureDiagnostics: String?
 
     init(
         image: CGImage,
         sourceTime: Double,
         sessionID: UUID,
-        generation: UInt64
+        generation: UInt64,
+        captureDiagnostics: String? = nil
     ) {
         self.image = image
         self.sourceTime = sourceTime
         self.sessionID = sessionID
         self.generation = generation
         self.pixelSize = CGSize(width: image.width, height: image.height)
+        self.captureDiagnostics = captureDiagnostics
     }
 }
 

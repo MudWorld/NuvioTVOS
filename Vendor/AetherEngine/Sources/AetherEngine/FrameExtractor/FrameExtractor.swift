@@ -214,8 +214,13 @@ public actor FrameExtractor {
     /// Unlike snapshot(), this never uses a previously opened or cached context.
     public func boundedSnapshot(at seconds: Double, maxSize: CGSize,
                                 limits: ProbeLimits, cancellation: ProbeCancellation,
-                                relativeToPresentationStart: Bool = false) async -> BoundedStillFrame? {
+                                relativeToPresentationStart: Bool = false,
+                                firstFrameOffset: Double? = nil,
+                                requiredDolbyVisionReshaping: Bool = false) async -> BoundedStillFrame? {
+        let yieldWhile = self.yieldWhile
         guard !isShutDown, !isClosingAuxiliaryContext, seconds.isFinite, !Task.isCancelled, !cancellation.isCancelled,
+              firstFrameOffset.map({ $0.isFinite && $0 >= 0 }) ?? true,
+              yieldWhile?() != true,
               let control = try? ProbeControl(limits: limits, cancellation: cancellation) else { return nil }
         currentToken?.cancel()
         boundedCancellation?.cancel()
@@ -234,8 +239,10 @@ public actor FrameExtractor {
                 var actual: Double?
                 guard let image = context.decodeFrame(at: seconds, mode: .snapshot,
                     targetWidth: 0, maxSize: maxSize,
+                    afterFirstFrame: firstFrameOffset,
                     relativeToPresentationStart: relativeToPresentationStart,
-                    isCancelled: { token.isCancelled || cancellation.isCancelled || control.isStopped },
+                    requiredDolbyVisionReshaping: requiredDolbyVisionReshaping,
+                    isCancelled: { token.isCancelled || cancellation.isCancelled || control.isStopped || yieldWhile?() == true },
                     reportDecodedTime: { actual = $0 }),
                     !token.isCancelled, !cancellation.isCancelled else { return nil }
                 do { try control.complete() } catch { return nil }

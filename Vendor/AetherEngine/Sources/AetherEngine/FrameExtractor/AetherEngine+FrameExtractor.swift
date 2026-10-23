@@ -1,5 +1,17 @@
 import Foundation
 import CoreGraphics
+import AVFoundation
+
+extension AetherEngine {
+    /// One frame and its capture-time provenance for analysis surfaces.
+    public struct VideoFrameAnalysisCapture: @unchecked Sendable {
+        public let image: CGImage?
+        /// The engine's requested source timestamp sampled before any asynchronous capture/decode.
+        public let sourceTime: Double
+        /// Immutable route, source format/profile, target, result reason, and per-frame metadata.
+        public let diagnostics: String
+    }
+}
 
 /// Thread-safe mirror of the active session's starvation inputs for extractor yield closures,
 /// which run on the extractor's decode queue off the main actor. MainActor writes (load / stop /
@@ -109,5 +121,177 @@ extension AetherEngine {
             return nativeHost.captureCurrentFrame(maxWidth: maxWidth)
         }
         return nil
+    }
+
+    /// Captures a frame and records the source timestamp and exact conversion path used.
+    /// Native P5/P10 sources are decoded only from the currently resident segment and reshaped
+    /// through their RPU; a cache miss never falls back to AVPlayer's IPT-PQ base-layer output.
+    public func captureVideoFrameForAnalysis(maxWidth: Int = 960) async -> VideoFrameAnalysisCapture {
+        let generation = loadGeneration
+        let requestedSourceTime = sourceTime
+        let sourceFormat = sourceVideoFormat
+        let sourceProfile = sourceDVProfile
+        let sourceCompatibilityID = sourceDVBLCompatID
+        let effectiveFormat = effectiveVideoFormat
+        let native = nativeHost
+        let software = softwareHost
+        let session = nativeVideoSession
+        let nativeSessionID = native?.sessionID
+        let width = min(960, max(1, maxWidth))
+        let route = Self.videoFrameAnalysisRoute(
+            sourceVideoFormat: sourceFormat,
+            sourceDVProfile: sourceProfile,
+            sourceDVBLCompatID: sourceCompatibilityID,
+            effectiveVideoFormat: effectiveFormat,
+            hasSoftwareHost: software != nil)
+
+        func result(image: CGImage? = nil, reason: String, detail: String? = nil,
+                    sourceTime resultSourceTime: Double? = nil) -> VideoFrameAnalysisCapture {
+            let profile = sourceProfile.map(String.init) ?? "none"
+            let compatibilityID = sourceCompatibilityID.map(String.init) ?? "none"
+            let capturedTime = resultSourceTime ?? requestedSourceTime
+            let target = String(format: "%.3f", capturedTime)
+            let suffix = detail.map { " \($0)" } ?? ""
+            return VideoFrameAnalysisCapture(
+                image: image,
+                sourceTime: capturedTime,
+                diagnostics: "route=\(route) sourceFormat=\(sourceFormat) sourceDVProfile=\(profile) "
+                    + "sourceDVBLCompatID=\(compatibilityID) effectiveFormat=\(effectiveFormat) "
+                    + "loadGeneration=\(generation) targetTime=\(target) "
+                    + "reason=\(reason)\(suffix)")
+        }
+
+        func requestIsCurrent() -> Bool {
+            !Task.isCancelled
+                && loadGeneration == generation
+                && nativeHost === native
+                && softwareHost === software
+                && nativeVideoSession === session
+                && native?.sessionID == nativeSessionID
+        }
+
+        guard !Task.isCancelled else { return result(reason: "cancelled-before-capture") }
+
+        if let software {
+            let image = software.captureCurrentFrame(maxWidth: width)
+            guard requestIsCurrent() else { return result(reason: "cancelled-or-superseded") }
+            return result(image: image, reason: image == nil ? "software-frame-unavailable" : "ok")
+        }
+
+        guard let native else { return result(reason: "native-host-unavailable") }
+        if route == "resident-dovi-rpu" {
+            guard OptionalComponent.dolbyVisionStillReshaping.isBuiltIn else {
+                return result(reason: "dv-reshaping-unavailable")
+            }
+            guard !isLive else { return result(reason: "live-resident-segment-unsupported") }
+            guard let session else { return result(reason: "native-session-unavailable") }
+            let itemSeconds = native.avPlayer.currentTime().seconds
+            guard itemSeconds.isFinite else { return result(reason: "native-item-time-unavailable") }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            let shouldYield = sessionYieldSignal()
+            guard !shouldYield() else { return result(reason: "playback-priority-yield") }
+
+            let source = await BlockingWork.detached(priority: .userInitiated) { [session] in
+                session.scrubThumbnailSource(atSeconds: itemSeconds)
+            }.value
+            guard requestIsCurrent() else { return result(reason: "cancelled-or-superseded") }
+            guard let source else { return result(reason: "resident-segment-cache-miss") }
+            guard !shouldYield() else {
+                return result(reason: "playback-priority-yield", detail: "segment=\(source.segmentIndex)")
+            }
+
+            let reader = await BlockingWork.detached(priority: .userInitiated) { [source] in
+                source.makeReader()
+            }.value
+            guard let reader else {
+                return result(reason: "resident-segment-read-failed", detail: "segment=\(source.segmentIndex)")
+            }
+            guard requestIsCurrent() else {
+                reader.close()
+                return result(reason: "cancelled-or-superseded")
+            }
+            guard !shouldYield() else {
+                reader.close()
+                return result(reason: "playback-priority-yield", detail: "segment=\(source.segmentIndex)")
+            }
+
+            let firstFrameOffset = max(0, itemSeconds - source.startSeconds)
+            guard firstFrameOffset.isFinite else {
+                reader.close()
+                return result(reason: "resident-segment-offset-invalid")
+            }
+            let remaining = Self.seconds(until: deadline)
+            guard remaining > 0 else {
+                reader.close()
+                return result(reason: "resident-decode-budget-expired")
+            }
+            let limits = ProbeLimits(
+                maxInputBytes: 64 * 1_024 * 1_024,
+                maxPackets: 4_096,
+                maxPacketBytes: 16 * 1_024 * 1_024,
+                timeBudget: remaining)
+            let extractor = FrameExtractor(reader: reader, formatHint: "mp4",
+                                           allowsHardwareDecode: false, yieldWhile: shouldYield)
+            let cancellation = ProbeCancellation()
+            let still = await extractor.boundedSnapshot(
+                at: 0,
+                maxSize: CGSize(width: width, height: width),
+                limits: limits,
+                cancellation: cancellation,
+                firstFrameOffset: firstFrameOffset,
+                requiredDolbyVisionReshaping: true)
+            await extractor.shutdown()
+            guard requestIsCurrent() else { return result(reason: "cancelled-or-superseded") }
+            guard let still else {
+                return result(reason: Task.isCancelled ? "cancelled" : "resident-dv-decode-failed-or-budget-expired",
+                              detail: "segment=\(source.segmentIndex) firstFrameOffset=\(String(format: "%.3f", firstFrameOffset))")
+            }
+            return result(
+                image: still.image,
+                reason: "ok",
+                detail: "segment=\(source.segmentIndex) firstFrameOffset=\(String(format: "%.3f", firstFrameOffset)) "
+                    + "decodedPTS=\(still.actualSeconds.map { String(format: "%.3f", $0) } ?? "unknown")")
+        }
+
+        let pixelBuffer = await native.captureDisplayedFrame()
+        guard requestIsCurrent() else { return result(reason: "cancelled-or-superseded") }
+        guard let pixelBuffer else { return result(reason: "native-output-frame-unavailable") }
+        var frameMetadata: String?
+        let image = native.renderThumbnail(from: pixelBuffer, maxWidth: width, diagnosticsCreated: {
+            frameMetadata = $0
+        })
+        let capturedSourceTime = sourceTime
+        guard requestIsCurrent() else { return result(reason: "cancelled-or-superseded") }
+        return result(image: image,
+                      reason: image == nil ? "native-thumbnail-render-failed" : "ok",
+                      detail: frameMetadata,
+                      sourceTime: capturedSourceTime)
+    }
+
+    /// Compatibility wrapper for callers that only need the image.
+    public func captureCurrentVideoFrameOnDemand(maxWidth: Int = 320) async -> CGImage? {
+        await captureVideoFrameForAnalysis(maxWidth: maxWidth).image
+    }
+
+    nonisolated static func videoFrameAnalysisRoute(
+        sourceVideoFormat: VideoFormat,
+        sourceDVProfile: Int?,
+        sourceDVBLCompatID: Int?,
+        effectiveVideoFormat _: VideoFormat,
+        hasSoftwareHost: Bool
+    ) -> String {
+        if hasSoftwareHost { return "software" }
+        if sourceVideoFormat == .dolbyVision, sourceDVProfile == 5 {
+            return "resident-dovi-rpu"
+        }
+        if sourceVideoFormat == .dolbyVision, sourceDVProfile == 10 {
+            return sourceDVBLCompatID.map { $0 > 0 } == true ? "native-output" : "resident-dovi-rpu"
+        }
+        return "native-output"
+    }
+
+    private nonisolated static func seconds(until deadline: ContinuousClock.Instant) -> Double {
+        let components = ContinuousClock.now.duration(to: deadline).components
+        return Double(components.seconds) + Double(components.attoseconds) / 1e18
     }
 }

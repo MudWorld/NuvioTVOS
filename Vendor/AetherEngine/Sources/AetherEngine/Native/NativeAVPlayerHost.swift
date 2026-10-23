@@ -3,6 +3,7 @@ import AVFoundation
 import AVKit
 import Combine
 import CoreImage
+import CoreImage.CIFilterBuiltins
 #if os(tvOS) || os(iOS)
 import MediaPlayer
 #endif
@@ -1914,7 +1915,8 @@ final class NativeAVPlayerHost {
     /// long the old item was kept. An output belongs to one item and is only attached for the read.
     /// nil when no frame arrives inside `timeout`, which the caller treats as "nothing to hold".
     func captureDisplayedFrame(timeout: Duration = .milliseconds(500)) async -> CVPixelBuffer? {
-        guard let item = playerItem else { return nil }
+        guard !Task.isCancelled,
+              let item = playerItem else { return nil }
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
         ])
@@ -1923,15 +1925,21 @@ final class NativeAVPlayerHost {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
         repeat {
+            guard !Task.isCancelled, playerItem === item else { return nil }
             // A playing item vends at the host clock, a paused one only at the time it holds.
             let itemTime = avPlayer.rate == 0 ? item.currentTime()
                 : output.itemTime(forHostTime: CACurrentMediaTime())
             if itemTime.isNumeric,
                let buffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
+                guard !Task.isCancelled, playerItem === item else { return nil }
                 return buffer
             }
-            try? await Task.sleep(for: .milliseconds(8))
-        } while clock.now < deadline && playerItem === item
+            do {
+                try await Task.sleep(for: .milliseconds(8))
+            } catch {
+                return nil
+            }
+        } while clock.now < deadline
         return nil
     }
 
@@ -2551,56 +2559,85 @@ final class NativeAVPlayerHost {
         guard let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) else {
             return nil
         }
-        return renderThumbnail(from: buffer, maxWidth: maxWidth) { [weak self] sourceImage in
-            self?.logFrameCaptureMetadataIfNeeded(buffer: buffer, sourceImage: sourceImage)
-        }
+        return renderThumbnail(from: buffer, maxWidth: maxWidth)
     }
 
-    /// Renders captured pixels into a thumbnail. The x420 path asks Core Image to map HDR
-    /// into SDR and emits an explicit 8-bit sRGB image; ordinary pixel formats retain the prior path.
+    /// Renders captured pixels into an 8-bit sRGB thumbnail, mapping sources with HDR headroom to SDR.
     func renderThumbnail(from pixelBuffer: CVPixelBuffer, maxWidth: Int = 320,
+                         diagnosticsCreated: ((String) -> Void)? = nil,
                          sourceImageCreated: ((CIImage) -> Void)? = nil) -> CGImage? {
-        let isTenBitVideoRange = CVPixelBufferGetPixelFormatType(pixelBuffer)
-            == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-        let ciImage: CIImage
-        if isTenBitVideoRange {
-            ciImage = CIImage(cvPixelBuffer: pixelBuffer, options: [.toneMapHDRtoSDR: true])
+        let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
+        sourceImageCreated?(sourceImage)
+        var sourceHeadroom: Float?
+        var renderImage = sourceImage
+        let explicitlyToneMapped: Bool
+        if #available(iOS 18, tvOS 18, macOS 15, visionOS 2, *) {
+            let measuredHeadroom = sourceImage.contentHeadroom
+            sourceHeadroom = measuredHeadroom
+            if measuredHeadroom.isFinite, measuredHeadroom > 1 {
+                let filter = CIFilter.toneMapHeadroom()
+                filter.inputImage = sourceImage
+                filter.sourceHeadroom = measuredHeadroom
+                filter.targetHeadroom = 1
+                guard let outputImage = filter.outputImage else { return nil }
+                renderImage = outputImage
+                explicitlyToneMapped = true
+            } else {
+                explicitlyToneMapped = false
+            }
         } else {
-            ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            sourceHeadroom = nil
+            explicitlyToneMapped = false
         }
-        sourceImageCreated?(ciImage)
-        let extent = ciImage.extent
+
+        let extent = renderImage.extent
         guard extent.width > 0, extent.height > 0 else { return nil }
 
         let scale = min(1.0, CGFloat(maxWidth) / extent.width)
-        let scaledImage: CIImage
-        if scale < 1.0 {
-            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        } else {
-            scaledImage = ciImage
-        }
+        let scaledImage = scale < 1.0
+            ? renderImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            : renderImage
 
-        if isTenBitVideoRange {
-            guard let sRGBColorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-            return ciContext.createCGImage(scaledImage, from: scaledImage.extent,
-                                           format: .RGBA8, colorSpace: sRGBColorSpace)
-        }
-        return ciContext.createCGImage(scaledImage, from: scaledImage.extent)
+        guard let sRGBColorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let renderedImage = ciContext.createCGImage(
+                scaledImage,
+                from: scaledImage.extent,
+                format: .RGBA8,
+                colorSpace: sRGBColorSpace
+              ) else { return nil }
+        let frameDiagnostics = frameCaptureMetadataSummary(
+            buffer: pixelBuffer,
+            sourceImage: sourceImage,
+            sourceHeadroom: sourceHeadroom,
+            explicitlyToneMapped: explicitlyToneMapped,
+            renderedImage: renderedImage
+        )
+        diagnosticsCreated?(frameDiagnostics)
+        logFrameCaptureMetadataIfNeeded(buffer: pixelBuffer, summary: frameDiagnostics)
+        return renderedImage
     }
 
-    private func logFrameCaptureMetadataIfNeeded(buffer: CVPixelBuffer, sourceImage: CIImage) {
-        guard firstCapturedPixelFormat == nil else { return }
-
+    private func frameCaptureMetadataSummary(
+        buffer: CVPixelBuffer,
+        sourceImage: CIImage,
+        sourceHeadroom: Float?,
+        explicitlyToneMapped: Bool,
+        renderedImage: CGImage
+    ) -> String {
         let format = CVPixelBufferGetPixelFormatType(buffer)
-        firstCapturedPixelFormat = format
         func attachment(_ key: CFString) -> String {
             CVBufferCopyAttachment(buffer, key, nil).map(String.init(describing:)) ?? "none"
         }
         let sourceColorSpace = sourceImage.colorSpace?.name.map(String.init(describing:)) ?? "none"
-        EngineLog.emit(
-            "[NativeAVPlayerHost] #\(sessionID) thumbnail frame format=\(Self.videoPixelFormatFourCC(format)) size=\(CVPixelBufferGetWidth(buffer))x\(CVPixelBufferGetHeight(buffer)) primaries=\(attachment(kCVImageBufferColorPrimariesKey)) transfer=\(attachment(kCVImageBufferTransferFunctionKey)) matrix=\(attachment(kCVImageBufferYCbCrMatrixKey)) sourceCIColorSpace=\(sourceColorSpace)",
-            category: .engine
-        )
+        let renderedColorSpace = renderedImage.colorSpace?.name.map(String.init(describing:)) ?? "none"
+        let headroomDescription = sourceHeadroom.map { String($0) } ?? "unavailable"
+        return "format=\(Self.videoPixelFormatFourCC(format)) size=\(CVPixelBufferGetWidth(buffer))x\(CVPixelBufferGetHeight(buffer)) primaries=\(attachment(kCVImageBufferColorPrimariesKey)) transfer=\(attachment(kCVImageBufferTransferFunctionKey)) matrix=\(attachment(kCVImageBufferYCbCrMatrixKey)) sourceCIColorSpace=\(sourceColorSpace) sourceHeadroom=\(headroomDescription) explicitToneMap=\(explicitlyToneMapped) renderedFormat=RGBA8/\(renderedImage.bitsPerComponent)bpc/\(renderedImage.bitsPerPixel)bpp bitmapInfo=\(renderedImage.bitmapInfo.rawValue) renderedColorSpace=\(renderedColorSpace)"
+    }
+
+    private func logFrameCaptureMetadataIfNeeded(buffer: CVPixelBuffer, summary: String) {
+        guard firstCapturedPixelFormat == nil else { return }
+        firstCapturedPixelFormat = CVPixelBufferGetPixelFormatType(buffer)
+        EngineLog.emit("[NativeAVPlayerHost] #\(sessionID) thumbnail frame \(summary)", category: .engine)
     }
 
     private static func videoPixelFormatFourCC(_ format: OSType) -> String {

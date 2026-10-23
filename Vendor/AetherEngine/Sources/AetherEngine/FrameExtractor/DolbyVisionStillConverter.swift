@@ -163,7 +163,8 @@ enum DolbyVisionStillConverter {
     static func makeImage(
         frame: UnsafeMutablePointer<AVFrame>,
         targetWidth: Int,
-        sar: AVRational
+        sar: AVRational,
+        isCancelled: () -> Bool = { false }
     ) -> CGImage? {
         // Only the 10-bit planar 4:2:0 base layer is handled; anything else falls back.
         let fmt = AVPixelFormat(rawValue: frame.pointee.format)
@@ -245,8 +246,13 @@ enum DolbyVisionStillConverter {
 
         let bytesPerRow = dstW * 4
         var rgba = [UInt8](repeating: 0, count: bytesPerRow * dstH)
+        var cancelled = false
         rgba.withUnsafeMutableBufferPointer { out in
             for oy in 0..<dstH {
+                guard !isCancelled() else {
+                    cancelled = true
+                    return
+                }
                 let sy = min(srcH - 1, oy * srcH / dstH)
                 let cy = sy / 2
                 for ox in 0..<dstW {
@@ -306,6 +312,7 @@ enum DolbyVisionStillConverter {
                 }
             }
         }
+        guard !cancelled else { return nil }
 
         let data = Data(rgba)
         guard let provider = CGDataProvider(data: data as CFData),

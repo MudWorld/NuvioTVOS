@@ -97,6 +97,31 @@ struct FrameDecodeContextHardwareTests {
         #endif
     }
 
+#if DolbyVisionStillReshaping
+    @Test("required P5 reshaping stops when cancellation reaches its output rows",
+          .enabled(if: FileManager.default.fileExists(atPath: FrameDecodeContextHardwareTests.profile5FixtureURL.path)))
+    func requiredProfile5ReshapingHonorsCancellation() throws {
+        let data = try Data(contentsOf: Self.profile5FixtureURL, options: .alwaysMapped)
+        let context = FrameDecodeContext(reader: DataIOReader(data: data), formatHint: "mp4",
+                                         allowsHardwareDecode: false)
+        defer { context.close() }
+        try context.ensureOpen()
+        #expect(context.isDolbyVisionNoBaseLayer)
+
+        var cancellationChecks = 0
+        let image = context.decodeFrame(
+            at: 0, mode: .snapshot, targetWidth: 960,
+            maxSize: CGSize(width: 960, height: 960),
+            requiredDolbyVisionReshaping: true,
+            isCancelled: {
+                cancellationChecks += 1
+                return cancellationChecks >= 4
+            })
+        #expect(image == nil)
+        #expect(cancellationChecks >= 4)
+    }
+#endif
+
     /// One 64x64 MPEG-4 Part 2 frame. VideoToolbox does not offer that legacy codec, while
     /// FFmpeg's software decoder does; this is the deterministic decline/fallback witness.
     /// Regenerate with:

@@ -7,7 +7,7 @@ private final class CountingSceneFrameProvider: SceneFrameProviding {
     var capabilityMessage: String? { "Test frame unavailable" }
     var onCapture: (() -> Void)?
 
-    func captureCurrentFrame(maxWidth: Int, context: SceneContext) -> SceneFrame? {
+    func captureCurrentFrame(maxWidth: Int, context: SceneContext) async -> SceneFrame? {
         onCapture?()
         return nil
     }
@@ -35,7 +35,7 @@ private final class PausedFrameSceneProvider: SceneFrameProviding {
         self.image = context.makeImage()!
     }
 
-    func captureCurrentFrame(maxWidth: Int, context: SceneContext) -> SceneFrame? {
+    func captureCurrentFrame(maxWidth: Int, context: SceneContext) async -> SceneFrame? {
         captureCount += 1
         onCapture?()
         return SceneFrame(
@@ -44,6 +44,62 @@ private final class PausedFrameSceneProvider: SceneFrameProviding {
             sessionID: context.sessionID,
             generation: context.timelineGeneration
         )
+    }
+}
+
+@MainActor
+private final class DelayedSceneFrameProvider: SceneFrameProviding {
+    let isSupported = true
+    let capabilityMessage: String? = nil
+    private(set) var captureCount = 0
+    private(set) var cancelledCaptureCount = 0
+    var onCapture: ((Int) -> Void)?
+    var onCancelledCapture: ((Int) -> Void)?
+
+    private let image: CGImage
+    private var pendingCaptures: [(SceneContext, CheckedContinuation<SceneFrame?, Never>)] = []
+
+    init() {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = CGContext(
+            data: nil,
+            width: 16,
+            height: 16,
+            bitsPerComponent: 8,
+            bytesPerRow: 64,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        image = context.makeImage()!
+    }
+
+    func captureCurrentFrame(maxWidth: Int, context: SceneContext) async -> SceneFrame? {
+        captureCount += 1
+        let requestID = captureCount
+        onCapture?(requestID)
+        let result = await withCheckedContinuation { continuation in
+            pendingCaptures.append((context, continuation))
+        }
+        if Task.isCancelled {
+            cancelledCaptureCount += 1
+            onCancelledCapture?(requestID)
+        }
+        // Deliberately return the late value even when cancelled. The coordinator must fence it.
+        return result
+    }
+
+    func resumeNext(withFrame: Bool) {
+        guard !pendingCaptures.isEmpty else { return }
+        let (context, continuation) = pendingCaptures.removeFirst()
+        let frame = withFrame
+            ? SceneFrame(
+                image: image,
+                sourceTime: 10,
+                sessionID: context.sessionID,
+                generation: context.timelineGeneration
+            )
+            : nil
+        continuation.resume(returning: frame)
     }
 }
 
@@ -429,14 +485,18 @@ final class SceneLifecycleTests: XCTestCase {
         var isPlaying = true
         coordinator.setPlaybackProviders(isPlaying: { isPlaying }, sourceTime: { 10.0 })
 
+        let initialCapture = expectation(description: "initial frame capture starts")
         let pausedCapture = expectation(description: "One still is captured after analysis finishes")
         frameProvider.onCapture = {
-            if frameProvider.captureCount == 2 {
+            if frameProvider.captureCount == 1 {
+                initialCapture.fulfill()
+            } else if frameProvider.captureCount == 2 {
                 pausedCapture.fulfill()
             }
         }
 
         coordinator.openPanel()
+        await fulfillment(of: [initialCapture], timeout: 2)
         XCTAssertEqual(frameProvider.captureCount, 1)
         isPlaying = false
         coordinator.handlePlaybackPaused()
@@ -463,14 +523,18 @@ final class SceneLifecycleTests: XCTestCase {
         var isPlaying = true
         coordinator.setPlaybackProviders(isPlaying: { isPlaying }, sourceTime: { 10.0 })
 
+        let initialCapture = expectation(description: "initial frame capture starts")
         let reopenedCapture = expectation(description: "Paused reopened panel captures after prior analysis")
         frameProvider.onCapture = {
-            if frameProvider.captureCount == 2 {
+            if frameProvider.captureCount == 1 {
+                initialCapture.fulfill()
+            } else if frameProvider.captureCount == 2 {
                 reopenedCapture.fulfill()
             }
         }
 
         coordinator.openPanel()
+        await fulfillment(of: [initialCapture], timeout: 2)
         XCTAssertEqual(frameProvider.captureCount, 1)
         coordinator.closePanel()
         isPlaying = false
@@ -480,6 +544,82 @@ final class SceneLifecycleTests: XCTestCase {
         await fulfillment(of: [reopenedCapture], timeout: 3)
         XCTAssertEqual(frameProvider.captureCount, 2)
         coordinator.closePanel()
+    }
+
+    func testDelayedCaptureIsSingleFlightAndDropsCancelledSessionFallback() async throws {
+        let frameProvider = DelayedSceneFrameProvider()
+        let actorRecognition = ActorRecognitionService()
+        let resultCache = SceneResultCache()
+        let staleActor = SceneRecognizedActor(id: "old-session-actor", name: "Old Session Actor", character: "Old")
+        let oldContext = SceneContext(
+            canonicalId: "movie-before-session-switch",
+            mediaType: "movie",
+            title: "Old Session",
+            sessionID: UUID(),
+            timelineGeneration: 1
+        )
+        await resultCache.storeTimelineInterval(SceneTimelineInterval(
+            id: "old-session-interval",
+            canonicalId: oldContext.canonicalId,
+            startTime: 0,
+            endTime: 30,
+            actors: [staleActor]
+        ))
+
+        let coordinator = SceneCoordinator(
+            frameProvider: frameProvider,
+            castProvider: EmptySceneCastProvider(),
+            actorRecognition: actorRecognition,
+            resultCache: resultCache
+        )
+        coordinator.updateContext(oldContext)
+        coordinator.setPlaybackProviders(isPlaying: { false }, sourceTime: { 10 })
+
+        let firstCaptureStarted = expectation(description: "first asynchronous capture starts")
+        let reopenedCaptureStarted = expectation(description: "paused reopened capture starts")
+        let firstCaptureCancelled = expectation(description: "old session capture observes cancellation")
+        let reopenedCaptureCancelled = expectation(description: "reopened capture observes close cancellation")
+        frameProvider.onCapture = { count in
+            if count == 1 { firstCaptureStarted.fulfill() }
+            if count == 2 { reopenedCaptureStarted.fulfill() }
+        }
+        frameProvider.onCancelledCapture = { count in
+            if count == 1 { firstCaptureCancelled.fulfill() }
+            if count == 2 { reopenedCaptureCancelled.fulfill() }
+        }
+
+        coordinator.openPanel()
+        await fulfillment(of: [firstCaptureStarted], timeout: 2)
+        XCTAssertEqual(frameProvider.captureCount, 1)
+        coordinator.handlePlaybackPaused()
+        XCTAssertEqual(frameProvider.captureCount, 1, "paused requests queue behind the in-flight capture")
+
+        let newContext = SceneContext(
+            canonicalId: "movie-after-session-switch",
+            mediaType: "movie",
+            title: "New Session",
+            sessionID: UUID(),
+            timelineGeneration: 2
+        )
+        coordinator.updateContext(newContext)
+        await actorRecognition.resetTemporalTracking()
+        coordinator.openPanel()
+        XCTAssertEqual(frameProvider.captureCount, 1, "reopen waits for ownership of the old capture to finish")
+
+        frameProvider.resumeNext(withFrame: false)
+        await fulfillment(of: [firstCaptureCancelled, reopenedCaptureStarted], timeout: 2)
+        XCTAssertEqual(frameProvider.cancelledCaptureCount, 1)
+        let trackedAfterStaleFallback = await actorRecognition.currentTrackedActors(at: 10)
+        XCTAssertFalse(
+            trackedAfterStaleFallback.contains(where: { $0.id == staleActor.id }),
+            "the old session's cached timeline must not be recorded after its capture is cancelled"
+        )
+        XCTAssertEqual(frameProvider.captureCount, 2)
+
+        coordinator.closePanel()
+        frameProvider.resumeNext(withFrame: true)
+        await fulfillment(of: [reopenedCaptureCancelled], timeout: 2)
+        XCTAssertEqual(frameProvider.cancelledCaptureCount, 2)
     }
     
     func testResultCacheStorageAndRetrieval() async {
@@ -612,7 +752,7 @@ final class SceneLifecycleTests: XCTestCase {
         XCTAssertEqual(coordinator.currentSnapshot.actors.first?.character, "Bruce Wayne / Batman")
     }
     
-    func testDynamicPlayerSceneFrameProviderMPVFallback() {
+    func testDynamicPlayerSceneFrameProviderMPVFallback() async {
         let currentBackend: PlayerBackendKind = .mpv
         let dynamicProvider = DynamicPlayerSceneFrameProvider(
             activeEngineKindProvider: { currentBackend },
@@ -631,7 +771,8 @@ final class SceneLifecycleTests: XCTestCase {
             mediaType: "movie",
             title: "Movie"
         )
-        XCTAssertNil(dynamicProvider.captureCurrentFrame(maxWidth: 960, context: dummyContext))
+        let frame = await dynamicProvider.captureCurrentFrame(maxWidth: 960, context: dummyContext)
+        XCTAssertNil(frame)
     }
 
     func testSceneCoordinatorPrewarmFetchesCastWithoutOpeningPanel() async throws {
@@ -645,8 +786,12 @@ final class SceneLifecycleTests: XCTestCase {
         let castProvider = StubSceneCastProvider(candidates: [candidate])
         let frameProvider = CountingSceneFrameProvider()
         var captureCount = 0
+        let firstCaptureStarted = expectation(description: "opening the panel starts frame capture")
         frameProvider.onCapture = {
             captureCount += 1
+            if captureCount == 1 {
+                firstCaptureStarted.fulfill()
+            }
         }
         
         let coordinator = SceneCoordinator(
@@ -679,6 +824,7 @@ final class SceneLifecycleTests: XCTestCase {
         coordinator.openPanel()
         XCTAssertTrue(coordinator.isPanelOpen)
         XCTAssertEqual(castProvider.fetchCount, 1, "Opening panel should not re-fetch already pre-warmed cast")
+        await fulfillment(of: [firstCaptureStarted], timeout: 2)
         XCTAssertGreaterThanOrEqual(captureCount, 1, "Opening panel should initiate frame capture")
     }
     
