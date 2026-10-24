@@ -31,7 +31,7 @@ final class AetherSceneFrameProvider: SceneFrameProviding {
     func captureCurrentFrame(maxWidth: Int = 960, context: SceneContext) async -> SceneFrame? {
         guard let controller = aetherController else { return nil }
         let engine = controller.engine
-        let capture = await engine.captureVideoFrameForAnalysis(maxWidth: maxWidth)
+        let capture = await controller.captureSceneFrameForAnalysis(maxWidth: maxWidth)
         guard !Task.isCancelled,
               aetherController === controller,
               controller.engine === engine else { return nil }
@@ -98,7 +98,7 @@ final class DynamicPlayerSceneFrameProvider: SceneFrameProviding {
             return nil
         }
         let engine = controller.engine
-        let capture = await engine.captureVideoFrameForAnalysis(maxWidth: maxWidth)
+        let capture = await controller.captureSceneFrameForAnalysis(maxWidth: maxWidth)
         guard !Task.isCancelled,
               activeEngineKindProvider() == .aether,
               aetherControllerProvider() === controller,

@@ -9,6 +9,51 @@ import AetherEngine
 import AetherEngineSMB
 import SwiftAssRenderer
 
+@MainActor
+private final class SceneFrameAnalysisResultBox {
+    var capture: AetherEngine.VideoFrameAnalysisCapture?
+}
+
+private final class SceneAnalysisYieldLatch: @unchecked Sendable {
+    private let signal: @Sendable () -> Bool
+    private let lock = NSLock()
+    private var observedYield = false
+
+    init(signal: @escaping @Sendable () -> Bool) {
+        self.signal = signal
+    }
+
+    func check() -> Bool {
+        let value = signal()
+        if value {
+            lock.lock()
+            observedYield = true
+            lock.unlock()
+        }
+        return value
+    }
+
+    var didYield: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return observedYield
+    }
+}
+
+struct AetherSceneFrameAnalysisIdentity: Equatable, @unchecked Sendable {
+    let hostGeneration: UInt64
+    let engineStartupGeneration: UInt64?
+    let nativePlayer: AnyObject?
+    let nativeItem: AnyObject?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.hostGeneration == rhs.hostGeneration
+            && lhs.engineStartupGeneration == rhs.engineStartupGeneration
+            && lhs.nativePlayer === rhs.nativePlayer
+            && lhs.nativeItem === rhs.nativeItem
+    }
+}
+
 /// High-frequency state observed only by the subtitle overlay. Keeping it
 /// separate prevents Aether's 10 Hz presentation clock from rebuilding the
 /// whole player screen while still making cue changes immediately visible.
@@ -2807,6 +2852,247 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         return result
     }
 
+    /// Scene adapter preserves primary capture results and permits only the DV5 resident failure
+    /// allowlist to use the bounded, mandatory-RPU original-source path.
+    func captureSceneFrameForAnalysis(maxWidth: Int = 960) async -> AetherEngine.VideoFrameAnalysisCapture {
+        let generation = loadGeneration
+        let engineSnapshot = engine
+        let captureIdentity = sceneFrameAnalysisIdentity(for: engineSnapshot, hostGeneration: generation)
+        let sourceContext = thumbnailSourceContext
+        let previousTask = activeThumbnailTask
+        let softwareCleanupTask = softwareFrameExtractorCleanupTask
+        let softwareCleanupGeneration = softwareFrameExtractorCleanupGeneration
+        let engineCleanupTask = engineAuxiliaryCleanupTask
+        let engineCleanupRequestID = engineAuxiliaryCleanupRequestID
+        let requestID = beginScrubThumbnailRequest()
+        let providerGeneration = externalProviderGeneration
+        let cancellation = PlaybackThumbnailRequestCancellation()
+        activeThumbnailCancellation = cancellation
+        let captureBox = SceneFrameAnalysisResultBox()
+        let width = min(960, max(1, maxWidth))
+
+        let work: Task<CGImage?, Never> = Task { @MainActor
+            [weak self, previousTask, softwareCleanupTask, engineCleanupTask] in
+            _ = await previousTask?.value
+            _ = await softwareCleanupTask?.value
+            _ = await engineCleanupTask?.value
+            guard let self,
+                  self.isCurrentSceneFrameRequest(
+                    requestID, generation: generation, providerGeneration: providerGeneration,
+                    sourceContext: sourceContext, engine: engineSnapshot,
+                    captureIdentity: captureIdentity, cancellation: cancellation) else {
+                return nil
+            }
+            if self.softwareFrameExtractorCleanupGeneration == softwareCleanupGeneration {
+                self.softwareFrameExtractorCleanupTask = nil
+            }
+            if self.engineAuxiliaryCleanupRequestID == engineCleanupRequestID {
+                self.engineAuxiliaryCleanupTask = nil
+            }
+            let capture = await self.generateSceneFrameAnalysisCapture(
+                engine: engineSnapshot,
+                sourceContext: sourceContext,
+                maxWidth: width,
+                requestID: requestID,
+                generation: generation,
+                providerGeneration: providerGeneration,
+                captureIdentity: captureIdentity,
+                cancellation: cancellation
+            )
+            captureBox.capture = capture
+            return capture.image
+        }
+        activeThumbnailTask = work
+        activeThumbnailTaskRequestID = requestID
+        _ = await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            cancellation.cancel()
+            work.cancel()
+        }
+        if activeThumbnailTaskRequestID == requestID {
+            activeThumbnailTask = nil
+            activeThumbnailTaskRequestID = nil
+        }
+        if thumbnailRequestSequence == requestID,
+           activeThumbnailCancellation === cancellation {
+            activeThumbnailCancellation = nil
+        }
+        return captureBox.capture ?? AetherEngine.VideoFrameAnalysisCapture(
+            image: nil, sourceTime: engineSnapshot.clock.currentTime,
+            diagnostics: "route=scene-adapter reason=cancelled-or-superseded")
+    }
+
+    private func generateSceneFrameAnalysisCapture(
+        engine engineSnapshot: AetherEngine,
+        sourceContext: PlaybackThumbnailSourceContext?,
+        maxWidth: Int,
+        requestID: UInt64,
+        generation: UInt64,
+        providerGeneration: UInt64,
+        captureIdentity: AetherSceneFrameAnalysisIdentity,
+        cancellation: PlaybackThumbnailRequestCancellation
+    ) async -> AetherEngine.VideoFrameAnalysisCapture {
+        let primary = await engineSnapshot.captureVideoFrameForAnalysis(maxWidth: maxWidth)
+        guard isCurrentSceneFrameRequest(
+            requestID, generation: generation, providerGeneration: providerGeneration,
+            sourceContext: sourceContext, engine: engineSnapshot,
+            captureIdentity: captureIdentity, cancellation: cancellation) else {
+            return AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: primary.sourceTime,
+                diagnostics: "route=scene-adapter reason=cancelled-or-superseded primary={\(primary.diagnostics)}")
+        }
+        let sourceProfile = engineSnapshot.sourceDVProfile
+        let sourceEligible = sourceContext != nil && usesBoundedProgressiveScrubPreview(sourceContext)
+        let yieldLatch = SceneAnalysisYieldLatch(signal: engineSnapshot.frameAnalysisYieldSignal())
+        // This is sampled only after the primary capture attempt. Scene time is elapsed Aether time.
+        let targetSeconds = engineSnapshot.clock.currentTime
+        let limits = ProbeLimits(
+            maxInputBytes: 64 * 1024 * 1024,
+            maxPackets: 4_096,
+            maxPacketBytes: 16 * 1024 * 1024,
+            timeBudget: 3)
+        return await Self.resolveSceneCaptureAfterPrimary(
+            primary,
+            sourceDVProfile: sourceProfile,
+            sourceEligible: sourceEligible,
+            targetSeconds: targetSeconds,
+            shouldYield: { yieldLatch.check() },
+            didYield: { yieldLatch.didYield },
+            isCurrent: {
+                self.isCurrentSceneFrameRequest(
+                    requestID, generation: generation, providerGeneration: providerGeneration,
+                    sourceContext: sourceContext, engine: engineSnapshot,
+                    captureIdentity: captureIdentity, cancellation: cancellation)
+            },
+            fallback: {
+                guard let sourceContext else { return nil }
+                return await PlaybackThumbnailSourceFallback.boundedSnapshot(
+                    sourceContext: sourceContext,
+                    atSeconds: targetSeconds,
+                    maxWidth: maxWidth,
+                    cancellation: cancellation,
+                    isCurrent: {
+                        self.isCurrentSceneFrameRequest(
+                            requestID, generation: generation, providerGeneration: providerGeneration,
+                            sourceContext: sourceContext, engine: engineSnapshot,
+                            captureIdentity: captureIdentity, cancellation: cancellation)
+                    },
+                    requiredDolbyVisionReshaping: true,
+                    limits: limits,
+                    yieldWhile: { yieldLatch.check() })
+            })
+    }
+
+    @MainActor
+    static func resolveSceneCaptureAfterPrimary(
+        _ primary: AetherEngine.VideoFrameAnalysisCapture,
+        sourceDVProfile: Int?,
+        sourceEligible: Bool,
+        targetSeconds: Double,
+        shouldYield: (@Sendable () -> Bool)? = nil,
+        didYield: (@Sendable () -> Bool)? = nil,
+        isCurrent: @MainActor () -> Bool,
+        fallback: @MainActor () async -> BoundedStillFrame?
+    ) async -> AetherEngine.VideoFrameAnalysisCapture {
+        guard isCurrent() else {
+            return AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: targetSeconds,
+                diagnostics: "route=scene-adapter reason=cancelled-or-superseded primary={\(primary.diagnostics)}")
+        }
+        guard primary.image == nil,
+              sourceDVProfile == 5,
+              sourceEligible,
+              Self.isRecoverableDV5ResidentCaptureFailure(primary.diagnostics) else { return primary }
+        guard targetSeconds.isFinite, targetSeconds >= 0 else {
+            return AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: primary.sourceTime,
+                diagnostics: "route=bounded-dovi-source reason=invalid-target primary={\(primary.diagnostics)}")
+        }
+        guard shouldYield?() != true, didYield?() != true else {
+            return AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: targetSeconds,
+                diagnostics: "route=bounded-dovi-source reason=playback-priority-yield primary={\(primary.diagnostics)}")
+        }
+        let still = await fallback()
+        guard isCurrent() else {
+            return AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: targetSeconds,
+                diagnostics: "route=bounded-dovi-source reason=cancelled-or-superseded primary={\(primary.diagnostics)}")
+        }
+        guard shouldYield?() != true, didYield?() != true else {
+            return AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: targetSeconds,
+                diagnostics: "route=bounded-dovi-source reason=playback-priority-yield primary={\(primary.diagnostics)}")
+        }
+        guard let still, let actualSeconds = still.actualSeconds, actualSeconds.isFinite,
+              abs(actualSeconds - targetSeconds) <= HybridSeekThumbnailPolicy.maximumPreviewTimeError else {
+            return AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: targetSeconds,
+                diagnostics: "route=bounded-dovi-source reason=bounded-source-unavailable primary={\(primary.diagnostics)} targetTime=\(String(format: "%.3f", targetSeconds))")
+        }
+        return AetherEngine.VideoFrameAnalysisCapture(
+            image: still.image,
+            sourceTime: actualSeconds,
+            diagnostics: "route=bounded-dovi-source reason=ok actualTime=\(String(format: "%.3f", actualSeconds)) primary={\(primary.diagnostics)}"
+        )
+    }
+
+    private func isCurrentSceneFrameRequest(
+        _ requestID: UInt64,
+        generation: UInt64,
+        providerGeneration: UInt64,
+        sourceContext: PlaybackThumbnailSourceContext?,
+        engine engineSnapshot: AetherEngine,
+        captureIdentity: AetherSceneFrameAnalysisIdentity,
+        cancellation: PlaybackThumbnailRequestCancellation
+    ) -> Bool {
+        guard isCurrentScrubThumbnailRequest(
+            requestID, generation: generation, providerGeneration: providerGeneration,
+            cancellation: cancellation),
+              thumbnailSourceContext == sourceContext,
+              engine === engineSnapshot,
+              sceneFrameAnalysisIdentity(for: engineSnapshot, hostGeneration: generation) == captureIdentity
+        else { return false }
+        return true
+    }
+
+    private func sceneFrameAnalysisIdentity(
+        for engine: AetherEngine,
+        hostGeneration: UInt64
+    ) -> AetherSceneFrameAnalysisIdentity {
+        let player = engine.nativePlayerLayer?.player ?? engine.currentAVPlayer
+        return AetherSceneFrameAnalysisIdentity(
+            hostGeneration: hostGeneration,
+            engineStartupGeneration: engine.startupProgress?.generation,
+            nativePlayer: player,
+            nativeItem: player?.currentItem
+        )
+    }
+
+    static func sceneFrameAnalysisIdentityMatches(
+        _ captured: AetherSceneFrameAnalysisIdentity,
+        current: AetherSceneFrameAnalysisIdentity
+    ) -> Bool {
+        captured == current
+    }
+
+    private static func isRecoverableDV5ResidentCaptureFailure(_ diagnostics: String) -> Bool {
+        var route: String?
+        var reason: String?
+        for field in diagnostics.split(whereSeparator: \.isWhitespace) {
+            if field.hasPrefix("route=") { route = String(field.dropFirst("route=".count)) }
+            if field.hasPrefix("reason=") { reason = String(field.dropFirst("reason=".count)) }
+        }
+        guard route == "resident-dovi-rpu" else { return false }
+        return [
+            "resident-dv-decode-failed-or-budget-expired",
+            "resident-decode-budget-expired",
+            "resident-segment-cache-miss",
+            "resident-segment-read-failed",
+        ].contains(reason ?? "")
+    }
+
     private func generateScrubThumbnail(
         atSeconds seconds: Double,
         maxWidth: Int,
@@ -4408,6 +4694,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             panelPresentsDV = AVPlayer.availableHDRModes.contains(.dolbyVision)
         }
 
+        let isLive = request.isLiveStream || request.isSports
         let options = LoadOptions(
             httpHeaders: request.httpHeaders,
             matchContentEnabled: matchContent,
@@ -4416,6 +4703,9 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             audioBridgeMode: .surroundCompat,
             // Read the active profile for each load; unsupported sources keep the normal bridge.
             objectAudioRendering: SpatialAudioSettings.rendering(),
+            isLive: isLive,
+            liveEdgeCushionSeconds: isLive ? 15.0 : nil,
+            liveJoinStartsImmediately: true,
             nativeRemoteHLS: isRemoteHLS,
             // AetherEngine honors this for ASS/SSA codec tracks only; other text
             // subtitle decoders keep their normal styled/plain cue path.

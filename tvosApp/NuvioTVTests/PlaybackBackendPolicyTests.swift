@@ -609,7 +609,74 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         )
         let result = PlaybackBackendPolicy.resolve(input)
         XCTAssertEqual(result.backend, .aether)
-        XCTAssertTrue(result.allowAutomaticFallback)
+        XCTAssertFalse(result.allowAutomaticFallback)
+    }
+
+    func testRemoteHLSCannotBeForcedThroughMPVOnlyFeatures() {
+        for setting in [PlayerEngineSetting.auto, .mpv, .aether] {
+            let result = PlaybackBackendPolicy.resolve(.init(
+                urlString: "https://example.test/hls/channel/index.m3u8?token=abc",
+                separateAudioURL: "https://example.test/audio.aac",
+                engineSetting: setting,
+                requiresMPVAudioControls: true,
+                assMode: .scale,
+                isAnime: true,
+                isLiveStream: true
+            ))
+            XCTAssertEqual(result.backend, .aether)
+            XCTAssertFalse(result.allowAutomaticFallback)
+        }
+        XCTAssertTrue(PlaybackBackendPolicy.mpvSupportsURL("https://example.test/movie.mp4"))
+        XCTAssertTrue(PlaybackBackendPolicy.mpvSupportsURL("https://example.test/channel.ts"))
+        for url in ["https://example.test/hls/channel.ts", "https://example.test/m3u/movie.mp4?name=x.m3u8"] {
+            XCTAssertTrue(PlaybackBackendPolicy.mpvSupportsURL(url))
+            let result = PlaybackBackendPolicy.resolve(.init(
+                urlString: url, engineSetting: .mpv,
+                requiresMPVAudioControls: false, assMode: .off
+            ))
+            XCTAssertEqual(result.backend, .mpv)
+        }
+        XCTAssertFalse(PlaybackBackendPolicy.mpvSupportsURL("https://example.test/CHANNEL.M3U8"))
+    }
+
+    @MainActor
+    func testRemoteHLSRejectsStartupAndExplicitMPVHandoffs() throws {
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        var dispatched: [PlayerBackendKind] = []
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            engineSettingProvider: { "Auto" },
+            loadDispatcher: { _, backend, _ in dispatched.append(backend) }
+        )
+        defer { coordinator.stopAll() }
+        coordinator.load(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/channel.m3u8")!,
+            isLiveStream: true
+        ))
+        XCTAssertFalse(coordinator.requestLiveStartupFallback(generation: coordinator.loadGeneration))
+        coordinator.handoffToMPV(reason: "Audio amplification", resumeSeconds: nil)
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertEqual(dispatched, [.aether])
+        aether.onTerminalError?("Live reconnect attempts exhausted")
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertEqual(coordinator.lastLoadError, "Live reconnect attempts exhausted")
+    }
+
+    @MainActor
+    func testProxiedHLSOriginPreventsMPVHandoff() throws {
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            engineSettingProvider: { "Auto" },
+            loadDispatcher: { _, _, _ in }
+        )
+        defer { coordinator.stopAll() }
+        var request = PlaybackLoadRequest(videoURL: URL(string: "http://127.0.0.1:8080/stream")!)
+        request.httpHeaderSourceURL = URL(string: "https://example.test/channel.m3u8")!
+        coordinator.load(request)
+        aether.onTerminalError?("Playlist unavailable")
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertEqual(coordinator.lastLoadError, "Playlist unavailable")
     }
 
     func testPlaybackBackendPolicyRoutesDirectTSToAether() {

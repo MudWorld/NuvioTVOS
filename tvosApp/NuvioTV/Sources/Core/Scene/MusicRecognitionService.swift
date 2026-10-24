@@ -150,9 +150,11 @@ actor MusicRecognitionService: NSObject {
         let signature = signatureGenerator.signature()
         let duration = signature.duration
         
+        #if DEBUG
         if bufferCounter == 1 || bufferCounter % 25 == 0 {
             print("[MusicRecognition] Tap buffer #\(bufferCounter): sig duration=\(String(format: "%.1f", duration))s at sourceTime=\(String(format: "%.1f", tapBuffer.sourceTime))s (frames=\(tapBuffer.buffer.frameLength))")
         }
+        #endif
         
         // When enough audio duration is accumulated and no match is currently running
         if duration >= minMatchDuration && !isMatching {

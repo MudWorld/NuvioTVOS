@@ -6,7 +6,10 @@
 //  and metadata formatting.
 //
 
+import Combine
 import Foundation
+import SwiftUI
+import UIKit
 import XCTest
 @testable import NuvioTV
 
@@ -43,7 +46,220 @@ private extension Optional where Wrapped == [URLQueryItem] {
     var orEmpty: [URLQueryItem] { self ?? [] }
 }
 
+@MainActor
+private final class PlayerSurfaceBoundsProbeController: UIViewController {
+    private(set) var mountCount = 0
+    private(set) var unmountCount = 0
+    private(set) var laidOutBounds: [CGSize] = []
+
+    func recordMount() { mountCount += 1 }
+    func recordUnmount() { unmountCount += 1 }
+    func resetLayoutSamples() { laidOutBounds.removeAll() }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if view.bounds.width > 0, view.bounds.height > 0 {
+            laidOutBounds.append(view.bounds.size)
+        }
+    }
+}
+
+private struct PlayerSurfaceBoundsProbe: UIViewControllerRepresentable {
+    let controller: PlayerSurfaceBoundsProbeController
+
+    func makeUIViewController(context: Context) -> PlayerSurfaceBoundsProbeController {
+        controller.recordMount()
+        return controller
+    }
+
+    func updateUIViewController(_ controller: PlayerSurfaceBoundsProbeController, context: Context) {}
+
+    static func dismantleUIViewController(
+        _ controller: PlayerSurfaceBoundsProbeController,
+        coordinator: ()
+    ) {
+        controller.recordUnmount()
+    }
+}
+
+@MainActor
+private final class PlayerSurfacePresentationTestState: ObservableObject {
+    @Published var isMini = false
+    @Published var isVisible = true
+}
+
+private struct PlayerSurfacePresentationMetric: Equatable {
+    let size: CGSize
+    let isMini: Bool
+    let isVisible: Bool
+}
+
+@MainActor
+private final class PlayerSurfacePresentationRecorder {
+    private(set) var metrics: [PlayerSurfacePresentationMetric] = []
+    private var expectedMatch: ((PlayerSurfacePresentationMetric) -> Bool)?
+    private var expectedFulfillment: XCTestExpectation?
+
+    func expect(
+        _ match: @escaping (PlayerSurfacePresentationMetric) -> Bool,
+        fulfillment: XCTestExpectation
+    ) {
+        expectedMatch = match
+        expectedFulfillment = fulfillment
+        if let latest = metrics.last, match(latest) {
+            expectedFulfillment?.fulfill()
+            expectedFulfillment = nil
+            expectedMatch = nil
+        }
+    }
+
+    func record(_ metric: PlayerSurfacePresentationMetric) {
+        metrics.append(metric)
+        guard let expectedFulfillment, expectedMatch?(metric) == true else { return }
+        expectedFulfillment.fulfill()
+        self.expectedFulfillment = nil
+        expectedMatch = nil
+    }
+}
+
+@available(tvOS 18.0, *)
+private struct PlayerSurfacePresentationTestHost: View {
+    @ObservedObject var state: PlayerSurfacePresentationTestState
+    let controller: PlayerSurfaceBoundsProbeController
+    let recorder: PlayerSurfacePresentationRecorder
+
+    var body: some View {
+        GeometryReader { geometry in
+            let isMini = state.isMini
+            let isVisible = state.isVisible
+            let insets = geometry.safeAreaInsets
+            let viewportSize = CGSize(
+                width: geometry.size.width + insets.leading + insets.trailing,
+                height: geometry.size.height + insets.top + insets.bottom
+            )
+            let miniSize = CGSize(width: 580, height: 326)
+            ZStack {
+                StablePlayerSurfacePresentation(
+                    viewportSize: viewportSize,
+                    presentationSize: isMini ? miniSize : viewportSize
+                ) {
+                    PlayerSurfaceBoundsProbe(controller: controller)
+                }
+                .onGeometryChange(for: PlayerSurfacePresentationMetric.self) { presentationGeometry in
+                    PlayerSurfacePresentationMetric(
+                        size: presentationGeometry.size,
+                        isMini: isMini,
+                        isVisible: isVisible
+                    )
+                } action: { metric in
+                    recorder.record(metric)
+                }
+                .offset(x: isMini ? -60 : 0, y: isMini ? 50 : 0)
+            }
+            .frame(
+                width: geometry.size.width,
+                height: geometry.size.height,
+                alignment: isMini ? .topTrailing : .center
+            )
+            .zIndex(isMini ? 5 : 0)
+            .opacity(isVisible ? 1 : 0)
+            .accessibilityHidden(!isVisible)
+            .allowsHitTesting(isVisible)
+            .animation(.easeInOut(duration: 0.16), value: isMini)
+        }
+    }
+}
+
 final class PostPlayRecommendationTests: XCTestCase {
+
+    @MainActor
+    @available(tvOS 18.0, *)
+    func testMPVSurfaceKeepsNativeBoundsAndIdentityAcrossPostPlayTransitions() async throws {
+        let state = PlayerSurfacePresentationTestState()
+        let controller = PlayerSurfaceBoundsProbeController()
+        let recorder = PlayerSurfacePresentationRecorder()
+        let hostingController = UIHostingController(
+            rootView: PlayerSurfacePresentationTestHost(
+                state: state,
+                controller: controller,
+                recorder: recorder
+            )
+        )
+        hostingController.additionalSafeAreaInsets = UIEdgeInsets(top: 36, left: 24, bottom: 28, right: 24)
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first { $0.activationState == .foregroundActive },
+            "The hosted layout regression needs the active tvOS window scene"
+        )
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = hostingController
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKeyAndVisible()
+        }
+
+        let initialLayout = expectation(description: "fullscreen wrapper uses full viewport")
+        recorder.expect({ !$0.isMini && $0.isVisible && $0.size.width > 0 }, fulfillment: initialLayout)
+        hostingController.view.setNeedsLayout()
+        window.layoutIfNeeded()
+        hostingController.view.layoutIfNeeded()
+        await fulfillment(of: [initialLayout], timeout: 1.0)
+
+        let nativeBounds = controller.view.bounds.size
+        XCTAssertGreaterThan(hostingController.view.safeAreaInsets.top, 0)
+        XCTAssertEqual(nativeBounds, hostingController.view.bounds.size)
+        XCTAssertEqual(recorder.metrics.last?.size, nativeBounds)
+        XCTAssertEqual(controller.mountCount, 1)
+        controller.resetLayoutSamples()
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+
+        let miniSize = CGSize(width: 580, height: 326)
+        let miniLayout = expectation(description: "mini wrapper uses recommendation size")
+        recorder.expect({ $0.isMini && $0.isVisible && $0.size == miniSize }, fulfillment: miniLayout)
+        withAnimation(.easeInOut(duration: 0.16)) {
+            state.isMini = true
+        }
+        hostingController.view.setNeedsLayout()
+        window.layoutIfNeeded()
+        await fulfillment(of: [miniLayout], timeout: 1.0)
+        XCTAssertEqual(controller.view.bounds.size, nativeBounds)
+        XCTAssertNotNil(controller.parent)
+        XCTAssertEqual(controller.mountCount, 1)
+        XCTAssertEqual(controller.unmountCount, 0)
+
+        let hiddenLayout = expectation(description: "trailer/EOF hides without unmounting")
+        recorder.expect({ $0.isMini && !$0.isVisible && $0.size == miniSize }, fulfillment: hiddenLayout)
+        state.isVisible = false
+        hostingController.view.setNeedsLayout()
+        window.layoutIfNeeded()
+        await fulfillment(of: [hiddenLayout], timeout: 1.0)
+        XCTAssertEqual(controller.view.bounds.size, nativeBounds)
+        XCTAssertNotNil(controller.view.superview)
+        XCTAssertNotNil(controller.view.window, "The hidden MPV surface must remain attached to its window")
+        XCTAssertEqual(controller.mountCount, 1)
+        XCTAssertEqual(controller.unmountCount, 0)
+
+        let restoredLayout = expectation(description: "fullscreen wrapper restores")
+        recorder.expect({ !$0.isMini && $0.isVisible && $0.size == nativeBounds }, fulfillment: restoredLayout)
+        state.isVisible = true
+        withAnimation(.easeInOut(duration: 0.16)) {
+            state.isMini = false
+        }
+        hostingController.view.setNeedsLayout()
+        window.layoutIfNeeded()
+        await fulfillment(of: [restoredLayout], timeout: 1.0)
+        XCTAssertEqual(controller.view.bounds.size, nativeBounds)
+        XCTAssertFalse(controller.laidOutBounds.isEmpty)
+        XCTAssertTrue(controller.laidOutBounds.allSatisfy { $0 == nativeBounds })
+        XCTAssertEqual(controller.mountCount, 1)
+        XCTAssertEqual(controller.unmountCount, 0)
+    }
 
     func testIntroDBSeasonConsensusRequiresTwoEpisodes() {
         let samples = [
@@ -432,5 +648,105 @@ final class PostPlayRecommendationTests: XCTestCase {
         XCTAssertEqual(recommendation.metadataLine, "1999 • Drama, Thriller • 139 min • R")
         XCTAssertFalse(recommendation.isSeries)
         XCTAssertFalse(recommendation.hasTrailer)
+    }
+
+    func testSkipIntervalCategorization() {
+        let intro1 = SkipInterval(startTime: 10, endTime: 30, type: "intro", provider: "introdb")
+        let intro2 = SkipInterval(startTime: 10, endTime: 30, type: "op", provider: "introdb")
+        let intro3 = SkipInterval(startTime: 10, endTime: 30, type: "opening", provider: "introdb")
+        let intro4 = SkipInterval(startTime: 10, endTime: 30, type: "mixed-op", provider: "introdb")
+        let recap = SkipInterval(startTime: 0, endTime: 10, type: "recap", provider: "introdb")
+        let outro1 = SkipInterval(startTime: 500, endTime: 550, type: "outro", provider: "introdb")
+        let outro2 = SkipInterval(startTime: 500, endTime: 550, type: "ed", provider: "introdb")
+        let outro3 = SkipInterval(startTime: 500, endTime: 550, type: "ending", provider: "introdb")
+        let outro4 = SkipInterval(startTime: 500, endTime: 550, type: "credits", provider: "introdb")
+
+        XCTAssertTrue(intro1.isIntro)
+        XCTAssertTrue(intro2.isIntro)
+        XCTAssertTrue(intro3.isIntro)
+        XCTAssertTrue(intro4.isIntro)
+        XCTAssertFalse(intro1.isRecap)
+        XCTAssertFalse(intro1.isEnding)
+
+        XCTAssertTrue(recap.isRecap)
+        XCTAssertFalse(recap.isIntro)
+        XCTAssertFalse(recap.isEnding)
+
+        XCTAssertTrue(outro1.isEnding)
+        XCTAssertTrue(outro2.isEnding)
+        XCTAssertTrue(outro3.isEnding)
+        XCTAssertTrue(outro4.isEnding)
+        XCTAssertFalse(outro1.isIntro)
+        XCTAssertFalse(outro1.isRecap)
+    }
+
+    func testAutoSkipSettingsKeysRegistered() {
+        XCTAssertEqual(SettingsKey.autoSkipIntro, "nuvio.tv.settings.playback.autoSkipIntro")
+        XCTAssertEqual(SettingsKey.autoSkipRecap, "nuvio.tv.settings.playback.autoSkipRecap")
+        XCTAssertEqual(SettingsKey.autoSkipOutro, "nuvio.tv.settings.playback.autoSkipOutro")
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.autoSkipIntro))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.autoSkipRecap))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.autoSkipOutro))
+    }
+
+    @MainActor
+    func testAutoSkipEvaluationRules() {
+        let viewModel = PlayerViewModel()
+        let intro = SkipInterval(startTime: 10, endTime: 40, type: "intro", provider: "introdb")
+        let recap = SkipInterval(startTime: 0, endTime: 10, type: "recap", provider: "introdb")
+        let outro = SkipInterval(startTime: 500, endTime: 550, type: "outro", provider: "introdb")
+
+        let store = ProfileSettings.current
+        let origIntro = store.object(forKey: SettingsKey.autoSkipIntro)
+        let origRecap = store.object(forKey: SettingsKey.autoSkipRecap)
+        let origOutro = store.object(forKey: SettingsKey.autoSkipOutro)
+        defer {
+            store.set(origIntro, forKey: SettingsKey.autoSkipIntro)
+            store.set(origRecap, forKey: SettingsKey.autoSkipRecap)
+            store.set(origOutro, forKey: SettingsKey.autoSkipOutro)
+        }
+
+        viewModel.autoSkipIntroEnabled = false
+        viewModel.autoSkipRecapEnabled = false
+        viewModel.autoSkipOutroEnabled = false
+
+        XCTAssertFalse(viewModel.shouldAutoSkip(interval: intro))
+        XCTAssertFalse(viewModel.shouldAutoSkip(interval: recap))
+        XCTAssertFalse(viewModel.shouldAutoSkip(interval: outro))
+
+        viewModel.autoSkipIntroEnabled = true
+        XCTAssertTrue(viewModel.shouldAutoSkip(interval: intro))
+        XCTAssertFalse(viewModel.shouldAutoSkip(interval: recap))
+        XCTAssertFalse(viewModel.shouldAutoSkip(interval: outro))
+
+        viewModel.autoSkipRecapEnabled = true
+        XCTAssertTrue(viewModel.shouldAutoSkip(interval: recap))
+
+        viewModel.autoSkipOutroEnabled = true
+        XCTAssertTrue(viewModel.shouldAutoSkip(interval: outro))
+
+        let originalStatus = viewModel.status
+        viewModel.status = .paused
+        viewModel.beginScrub()
+        XCTAssertTrue(viewModel.isScrubbing)
+        XCTAssertFalse(viewModel.shouldAutoSkip(interval: intro))
+        viewModel.cancelScrub()
+        XCTAssertFalse(viewModel.isScrubbing)
+        viewModel.status = originalStatus
+
+        viewModel.isHoldingSeek = true
+        XCTAssertFalse(viewModel.shouldAutoSkip(interval: intro))
+        viewModel.isHoldingSeek = false
+    }
+
+    func testAutoSkipLocalizationKeysPresent() {
+        XCTAssertEqual(L10n.string("playback_auto_skip_segments", fallback: ""), "Automatic Skipping")
+        XCTAssertEqual(L10n.string("playback_auto_skip_segments_sub", fallback: ""), "Choose which segments skip automatically.")
+        XCTAssertEqual(L10n.string("auto_skip_intro", fallback: ""), "Intro / Opening")
+        XCTAssertEqual(L10n.string("auto_skip_intro_sub", fallback: ""), "Skip intros and anime openings automatically.")
+        XCTAssertEqual(L10n.string("auto_skip_recap", fallback: ""), "Recap")
+        XCTAssertEqual(L10n.string("auto_skip_recap_sub", fallback: ""), "Skip recap segments automatically.")
+        XCTAssertEqual(L10n.string("auto_skip_outro", fallback: ""), "Outro / Ending")
+        XCTAssertEqual(L10n.string("auto_skip_outro_sub", fallback: ""), "Skip outros and anime endings automatically.")
     }
 }

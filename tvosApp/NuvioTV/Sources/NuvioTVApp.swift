@@ -75,10 +75,11 @@ enum TVHomeDebugTrace {
         String(format: "%.1f", Double(now() - start) / 1_000_000)
     }
 
-    static func breadcrumb(_ message: String) {
+    static func breadcrumb(_ message: @autoclosure () -> String) {
         guard enabled else { return }
+        let text = message()
         let isMain = Thread.isMainThread
-        let item = Breadcrumb(timestamp: now(), message: message, isMainThread: isMain)
+        let item = Breadcrumb(timestamp: now(), message: text, isMainThread: isMain)
         os_unfair_lock_lock(&breadcrumbLock)
         breadcrumbs.append(item)
         if breadcrumbs.count > maxBreadcrumbs {
@@ -108,30 +109,32 @@ enum TVHomeDebugTrace {
     }
 
     @discardableResult
-    static func measure<T>(_ label: String, thresholdMs: Double = 15.0, block: () throws -> T) rethrows -> T {
+    static func measure<T>(_ label: @autoclosure () -> String, thresholdMs: Double = 15.0, block: () throws -> T) rethrows -> T {
         guard enabled else { return try block() }
-        breadcrumb("\(label) begin")
+        let text = label()
+        breadcrumb("\(text) begin")
         let start = now()
         defer {
             let elapsedMs = Double(now() - start) / 1_000_000
-            breadcrumb("\(label) end (\(String(format: "%.1f", elapsedMs))ms)")
+            breadcrumb("\(text) end (\(String(format: "%.1f", elapsedMs))ms)")
             if elapsedMs >= thresholdMs {
-                log("⚠️ [SLOW_OP] \(label) took \(String(format: "%.1f", elapsedMs))ms (threshold \(thresholdMs)ms)")
+                log("⚠️ [SLOW_OP] \(text) took \(String(format: "%.1f", elapsedMs))ms (threshold \(thresholdMs)ms)")
             }
         }
         return try block()
     }
 
     @discardableResult
-    static func measureAsync<T>(_ label: String, thresholdMs: Double = 20.0, block: () async throws -> T) async rethrows -> T {
+    static func measureAsync<T>(_ label: @autoclosure () -> String, thresholdMs: Double = 20.0, block: () async throws -> T) async rethrows -> T {
         guard enabled else { return try await block() }
-        breadcrumb("\(label) begin")
+        let text = label()
+        breadcrumb("\(text) begin")
         let start = now()
         defer {
             let elapsedMs = Double(now() - start) / 1_000_000
-            breadcrumb("\(label) end (\(String(format: "%.1f", elapsedMs))ms)")
+            breadcrumb("\(text) end (\(String(format: "%.1f", elapsedMs))ms)")
             if elapsedMs >= thresholdMs {
-                log("⚠️ [SLOW_OP_ASYNC] \(label) took \(String(format: "%.1f", elapsedMs))ms")
+                log("⚠️ [SLOW_OP_ASYNC] \(text) took \(String(format: "%.1f", elapsedMs))ms")
             }
         }
         return try await block()
@@ -4179,7 +4182,13 @@ private struct TVMainTabView: View {
                 canUseAccount: isAuthenticated && !sessionNeedsReauthentication && activeProfile != nil,
                 isChoosing: partyIsChoosing, onCreate: onCreateParty,
                 onChooseSource: onChoosePartySource, onCancelSelection: onCancelPartySelection,
-                onOpenProfile: onSwitchProfile,
+                onOpenProfile: {
+                    if !isAuthenticated || sessionNeedsReauthentication {
+                        onSignIn()
+                    } else {
+                        onSwitchProfile()
+                    }
+                },
                 detailsMedia: partyDetailsMedia, onRoomExited: onPartyRoomExited)
         } else {
             Text("Sign in and choose a profile to use Watch Party.")

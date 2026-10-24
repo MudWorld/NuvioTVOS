@@ -1,5 +1,12 @@
 import Foundation
 
+@inline(__always)
+private func ledgerLog(_ message: @autoclosure () -> String) {
+    #if DEBUG
+    print(message())
+    #endif
+}
+
 /// One synced watch-progress row, exactly as Nuvio Sync stores it.
 ///
 /// Deliberately carries no metadata and no display state. The phone app keeps
@@ -168,7 +175,7 @@ enum WatchProgressLedger {
             return FixtureCleanupArchive()
         }
         guard var archive = try? JSONDecoder().decode(FixtureCleanupArchive.self, from: data) else {
-            print("[WatchProgressLedger] fixture cleanup archive decode failed; cleanup will be deferred")
+            ledgerLog("[WatchProgressLedger] fixture cleanup archive decode failed; cleanup will be deferred")
             return nil
         }
         var classifiedRecords: [String: WatchProgressRecord] = [:]
@@ -329,7 +336,7 @@ enum WatchProgressLedger {
         defer { cacheLock.unlock() }
         var current = recordsLocked(profileId: profileId).filter { $0.progressKey != record.progressKey }
         current.append(record)
-        print("[WatchProgressLedger] upsert: key=\(record.progressKey), id=\(record.contentId), S\(record.season.map(String.init) ?? "nil")E\(record.episode.map(String.init) ?? "nil"), pos=\(record.position)/\(record.duration), isPendingPush=\(record.isPendingPush), totalRecords=\(current.count)")
+        ledgerLog("[WatchProgressLedger] upsert: key=\(record.progressKey), id=\(record.contentId), S\(record.season.map(String.init) ?? "nil")E\(record.episode.map(String.init) ?? "nil"), pos=\(record.position)/\(record.duration), isPendingPush=\(record.isPendingPush), totalRecords=\(current.count)")
         return persistLocked(current, profileId: profileId)
     }
 
@@ -342,7 +349,7 @@ enum WatchProgressLedger {
         let current = recordsLocked(profileId: profileId)
         let remaining = current.filter { !removing.contains($0.progressKey) }
         guard remaining.count != current.count else { return true }
-        print("[WatchProgressLedger] remove: keys=\(keys), remainingRecords=\(remaining.count)")
+        ledgerLog("[WatchProgressLedger] remove: keys=\(keys), remainingRecords=\(remaining.count)")
         return persistLocked(remaining, profileId: profileId)
     }
 
@@ -353,7 +360,7 @@ enum WatchProgressLedger {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         let remaining = recordsLocked(profileId: profileId).filter { $0.contentId != id }
-        print("[WatchProgressLedger] removeContent: id=\(id), remainingRecords=\(remaining.count)")
+        ledgerLog("[WatchProgressLedger] removeContent: id=\(id), remainingRecords=\(remaining.count)")
         return persistLocked(remaining, profileId: profileId)
     }
 
@@ -371,7 +378,7 @@ enum WatchProgressLedger {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         let mergedResult = Array(merged(remote, into: recordsLocked(profileId: profileId)).values)
-        print("[WatchProgressLedger] mergeRemote: received \(remote.count) remote records -> total \(mergedResult.count) records")
+        ledgerLog("[WatchProgressLedger] mergeRemote: received \(remote.count) remote records -> total \(mergedResult.count) records")
         return persistLocked(mergedResult, profileId: profileId)
     }
 
@@ -411,11 +418,11 @@ enum WatchProgressLedger {
                 survivors.append(record)
             } else {
                 removedKeys.append(record.progressKey)
-                print("[WatchProgressLedger] reconcileRemote: DROPPING record \(record.progressKey) (contentId=\(record.contentId), pos=\(record.position)/\(record.duration)) - not in remoteKeys, isPendingPush=\(record.isPendingPush), lastWatchedAt=\(record.lastWatchedAt) <= syncStartedAt=\(syncStartedAt)")
+                ledgerLog("[WatchProgressLedger] reconcileRemote: DROPPING record \(record.progressKey) (contentId=\(record.contentId), pos=\(record.position)/\(record.duration)) - not in remoteKeys, isPendingPush=\(record.isPendingPush), lastWatchedAt=\(record.lastWatchedAt) <= syncStartedAt=\(syncStartedAt)")
             }
         }
 
-        print("[WatchProgressLedger] reconcileRemote: remote=\(remote.count), local=\(current.count), survivors=\(survivors.count), removed=\(removedKeys.count)")
+        ledgerLog("[WatchProgressLedger] reconcileRemote: remote=\(remote.count), local=\(current.count), survivors=\(survivors.count), removed=\(removedKeys.count)")
 
         // A refresh that did not change the merged ledger (the common case on
         // a background pull of an account that has been quiet) must not
@@ -505,7 +512,7 @@ enum WatchProgressLedger {
             return copy
         }
         guard changed else { return }
-        print("[WatchProgressLedger] markPushed: cleared isPendingPush for \(keys.count) keys: \(keys)")
+        ledgerLog("[WatchProgressLedger] markPushed: cleared isPendingPush for \(keys.count) keys: \(keys)")
         _ = persistLocked(updated, profileId: profileId)
     }
 
@@ -706,11 +713,11 @@ enum WatchProgressLedger {
                 return false
             }
             guard hasStarted(record) else {
-                print("[WatchProgressLedger] continueWatchingCandidates: rejected \(record.progressKey) - hasStarted=false (pos=\(record.position))")
+                ledgerLog("[WatchProgressLedger] continueWatchingCandidates: rejected \(record.progressKey) - hasStarted=false (pos=\(record.position))")
                 return false
             }
             guard !isComplete(record) else {
-                print("[WatchProgressLedger] continueWatchingCandidates: rejected \(record.progressKey) - isComplete=true (pos=\(record.position)/\(record.duration))")
+                ledgerLog("[WatchProgressLedger] continueWatchingCandidates: rejected \(record.progressKey) - isComplete=true (pos=\(record.position)/\(record.duration))")
                 return false
             }
             // An episode or movie already marked watched in WatchedStore has been completed
@@ -718,13 +725,13 @@ enum WatchProgressLedger {
             if record.isEpisode, let season = record.season, let episode = record.episode {
                 if let watchedAt = WatchedStore.watchedAt(metaId: record.contentId, season: season, episode: episode),
                    watchedAt >= record.lastWatchedAt {
-                    print("[WatchProgressLedger] continueWatchingCandidates: rejected episode \(record.progressKey) - already in WatchedStore")
+                    ledgerLog("[WatchProgressLedger] continueWatchingCandidates: rejected episode \(record.progressKey) - already in WatchedStore")
                     return false
                 }
             } else if !record.isEpisode {
                 if let watchedAt = WatchedStore.watchedAt(metaId: record.contentId),
                    watchedAt >= record.lastWatchedAt {
-                    print("[WatchProgressLedger] continueWatchingCandidates: rejected movie \(record.progressKey) - already in WatchedStore")
+                    ledgerLog("[WatchProgressLedger] continueWatchingCandidates: rejected movie \(record.progressKey) - already in WatchedStore")
                     return false
                 }
             }
@@ -734,7 +741,7 @@ enum WatchProgressLedger {
         let others = inProgress.filter { !$0.isEpisode }
 
         let result = (others + episodes).sorted { $0.lastWatchedAt > $1.lastWatchedAt }
-        print("[WatchProgressLedger] continueWatchingCandidates: from \(allRecords.count) ledger records -> \(result.count) candidates: \(result.map(\.progressKey))")
+        ledgerLog("[WatchProgressLedger] continueWatchingCandidates: from \(allRecords.count) ledger records -> \(result.count) candidates: \(result.map(\.progressKey))")
         return result
     }
 
@@ -778,7 +785,7 @@ enum WatchProgressLedger {
             }
         }
         let result = selectedBySeries.values.sorted { $0.lastWatchedAt > $1.lastWatchedAt }
-        print("[WatchProgressLedger] upNextSeeds: found \(result.count) seeds: \(result.map(\.progressKey))")
+        ledgerLog("[WatchProgressLedger] upNextSeeds: found \(result.count) seeds: \(result.map(\.progressKey))")
         return result
     }
 }

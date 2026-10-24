@@ -76,7 +76,35 @@ enum PlaybackBackendPolicy {
         return scheme == "https" || scheme == "http"
     }
 
+    static func isHLS(_ urlString: String) -> Bool {
+        let lower = urlString.lowercased()
+        return lower.contains(".m3u8")
+            || lower.contains("/m3u/") || lower.contains("/hls/")
+            || lower.contains("manifest.googlevideo.com")
+    }
+
+    static func isHLSPlaylist(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        return ["m3u8", "m3u"].contains(url.pathExtension.lowercased())
+    }
+
+    static func mpvSupportsURL(_ urlString: String) -> Bool {
+        guard isRemoteHTTP(urlString) else { return true }
+        return PlaybackEngineCapabilities.mpv.supportsDirectHTTPS
+            && (!isHLSPlaylist(urlString) || PlaybackEngineCapabilities.mpv.supportsRemoteHLS)
+    }
+
     static func resolve(_ input: Input) -> Result {
+        if isRemoteHTTP(input.urlString), isHLSPlaylist(input.urlString),
+           !PlaybackEngineCapabilities.mpv.supportsRemoteHLS {
+            return Result(
+                backend: .aether,
+                allowAutomaticFallback: false,
+                reason: "Remote HLS uses AetherEngine; MPVKit cannot fetch HTTPS playlist segments",
+                statusMessage: nil
+            )
+        }
+
         // Hard capability exceptions always take MPV.
         if let audio = input.separateAudioURL, !audio.isEmpty {
             return Result(
@@ -134,10 +162,7 @@ enum PlaybackBackendPolicy {
             return lower == "referer" || lower == "origin" || lower == "user-agent"
         }
         let urlLower = input.urlString.lowercased()
-        let isHLS = urlLower.contains(".m3u8")
-            || urlLower.contains("/m3u/")
-            || urlLower.contains("/hls/")
-            || urlLower.contains("manifest.googlevideo.com")
+        let isHLS = Self.isHLS(input.urlString)
         let isLiveOrSports = input.isLiveStream
             || input.isSports
             || hasSegmentHeaders

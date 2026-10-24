@@ -492,13 +492,17 @@ enum PlaybackThumbnailSourceFallback {
         atSeconds seconds: Double,
         maxWidth: Int,
         cancellation: PlaybackThumbnailRequestCancellation,
-        isCurrent: @MainActor () -> Bool
+        isCurrent: @MainActor () -> Bool,
+        requiredDolbyVisionReshaping: Bool = false,
+        limits: ProbeLimits? = nil,
+        yieldWhile: (@Sendable () -> Bool)? = nil
     ) async -> BoundedStillFrame? {
         guard seconds.isFinite, maxWidth > 0, !sourceContext.isLive, !sourceContext.isKnownHLS,
-              isCurrent(), let playbackURL = sourceContext.playbackURL else { return nil }
+              isCurrent(), yieldWhile?() != true,
+              let playbackURL = sourceContext.playbackURL else { return nil }
 
         let descriptor = await PlaybackStreamCacheManager.shared.thumbnailSource(for: playbackURL)
-        guard isCurrent(), !cancellation.isCancelled else { return nil }
+        guard isCurrent(), !cancellation.isCancelled, yieldWhile?() != true else { return nil }
         let originURL = descriptor?.remoteURL ?? sourceContext.headerSourceURL ?? playbackURL
         guard !isKnownHLSURL(originURL), supportsIndependentPreview(originURL) else { return nil }
 
@@ -508,25 +512,35 @@ enum PlaybackThumbnailSourceFallback {
                 reader.close()
                 return nil
             }
-            let extractor = FrameExtractor(reader: reader)
+            let extractor = FrameExtractor(
+                reader: reader, allowsHardwareDecode: !requiredDolbyVisionReshaping,
+                yieldWhile: yieldWhile)
             let still = await boundedSnapshot(
-                extractor, seconds: seconds, maxWidth: maxWidth, limits: cacheLimits, cancellation: stage)
+                extractor, seconds: seconds, maxWidth: maxWidth, limits: limits ?? cacheLimits,
+                cancellation: stage, requiredDolbyVisionReshaping: requiredDolbyVisionReshaping,
+                yieldWhile: yieldWhile)
             cancellation.finishStage(stage)
             reader.close()
-            guard isCurrent(), !cancellation.isCancelled else { return nil }
+            guard isCurrent(), !cancellation.isCancelled, yieldWhile?() != true else { return nil }
             if isAccurate(still, requestedSeconds: seconds) { return still }
         } else if isCacheProxyURL(playbackURL) {
             // A loopback cache URL is usable only while its exact active server descriptor exists.
             return nil
         }
 
-        guard isCurrent(), !cancellation.isCancelled,
+        guard isCurrent(), !cancellation.isCancelled, yieldWhile?() != true,
               let stage = cancellation.beginStage() else { return nil }
-        let extractor = FrameExtractor(url: originURL, httpHeaders: descriptor?.originalHeaders ?? sourceContext.requestHeaders)
+        let extractor = FrameExtractor(
+            url: originURL,
+            httpHeaders: descriptor?.originalHeaders ?? sourceContext.requestHeaders,
+            allowsHardwareDecode: !requiredDolbyVisionReshaping,
+            yieldWhile: yieldWhile)
         let still = await boundedSnapshot(
-            extractor, seconds: seconds, maxWidth: maxWidth, limits: sourceLimits, cancellation: stage)
+            extractor, seconds: seconds, maxWidth: maxWidth, limits: limits ?? sourceLimits,
+            cancellation: stage, requiredDolbyVisionReshaping: requiredDolbyVisionReshaping,
+            yieldWhile: yieldWhile)
         cancellation.finishStage(stage)
-        guard isCurrent(), !cancellation.isCancelled,
+        guard isCurrent(), !cancellation.isCancelled, yieldWhile?() != true,
               isAccurate(still, requestedSeconds: seconds) else { return nil }
         return still
     }
@@ -537,7 +551,9 @@ enum PlaybackThumbnailSourceFallback {
         seconds: Double,
         maxWidth: Int,
         limits: ProbeLimits,
-        cancellation: ProbeCancellation
+        cancellation: ProbeCancellation,
+        requiredDolbyVisionReshaping: Bool,
+        yieldWhile: (@Sendable () -> Bool)?
     ) async -> BoundedStillFrame? {
         let width = CGFloat(maxWidth)
         let result = await extractor.boundedSnapshot(
@@ -545,7 +561,8 @@ enum PlaybackThumbnailSourceFallback {
             maxSize: CGSize(width: width, height: width),
             limits: limits,
             cancellation: cancellation,
-            relativeToPresentationStart: true
+            relativeToPresentationStart: true,
+            requiredDolbyVisionReshaping: requiredDolbyVisionReshaping
         )
         await extractor.shutdown()
         return result
@@ -1679,7 +1696,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             startTime: now
         )
         screensaverDebugLog("[ScreensaverDebug][MPVController] seekToMs(\(ms)) called: currentPos=\(positionMs)ms")
-        print("[SeekWatchdog][#\(seekId)] ⏩ Seek started -> target: \(ms)ms (current: \(positionMs)ms, duration: \(durationMs)ms, isLocalCache: \(isLocalOrDiskCacheStream))")
+        seekWatchdogLog("[SeekWatchdog][#\(seekId)] ⏩ Seek started -> target: \(ms)ms (current: \(positionMs)ms, duration: \(durationMs)ms, isLocalCache: \(isLocalOrDiskCacheStream))")
         subtitleTranslationState.cancelPendingTranslations()
         rememberExplicitSeek(to: ms)
         command("seek", args: [String(format: "%.3f", Double(ms) / 1000.0), exact ? "absolute+exact" : "absolute+keyframes"])
@@ -2355,24 +2372,24 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             if seeking, watchdog.seekingStartTime == nil {
                 watchdog.seekingStartTime = now
                 let elapsed = (now - watchdog.startTime) * 1000
-                print("[SeekWatchdog][#\(watchdog.id)] 🔄 MPV seeking=true (+\(String(format: "%.1f", elapsed))ms from command)")
+                seekWatchdogLog("[SeekWatchdog][#\(watchdog.id)] 🔄 MPV seeking=true (+\(String(format: "%.1f", elapsed))ms from command)")
             }
             if !seeking, let start = watchdog.seekingStartTime, watchdog.seekingEndTime == nil {
                 watchdog.seekingEndTime = now
                 let seekDuration = (now - start) * 1000
-                print("[SeekWatchdog][#\(watchdog.id)] ⏸️ MPV seeking=false (seeking state lasted \(String(format: "%.1f", seekDuration))ms)")
+                seekWatchdogLog("[SeekWatchdog][#\(watchdog.id)] ⏸️ MPV seeking=false (seeking state lasted \(String(format: "%.1f", seekDuration))ms)")
             }
             if bufferingCache {
                 if watchdog.cacheWaitStartTime == nil {
                     watchdog.cacheWaitStartTime = now
                     let elapsed = (now - watchdog.startTime) * 1000
-                    print("[SeekWatchdog][#\(watchdog.id)] ⏳ paused-for-cache=true (+\(String(format: "%.1f", elapsed))ms from seek start)")
+                    seekWatchdogLog("[SeekWatchdog][#\(watchdog.id)] ⏳ paused-for-cache=true (+\(String(format: "%.1f", elapsed))ms from seek start)")
                 }
             } else if let cacheStart = watchdog.cacheWaitStartTime {
                 let cacheDuration = now - cacheStart
                 watchdog.totalCacheWaitDuration += cacheDuration
                 watchdog.cacheWaitStartTime = nil
-                print("[SeekWatchdog][#\(watchdog.id)] ⚡ paused-for-cache=false (waited for cache: \(String(format: "%.1f", cacheDuration * 1000))ms)")
+                seekWatchdogLog("[SeekWatchdog][#\(watchdog.id)] ⚡ paused-for-cache=false (waited for cache: \(String(format: "%.1f", cacheDuration * 1000))ms)")
             }
             if !watchdog.reported, !seeking, !bufferingCache, !idle, (positionMs > 0 || watchdog.targetMs == 0) {
                 let posDiff = abs(positionMs - watchdog.targetMs)
@@ -2381,7 +2398,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                     let totalElapsed = (now - watchdog.startTime) * 1000
                     let cacheMs = (watchdog.totalCacheWaitDuration + (watchdog.cacheWaitStartTime.map { now - $0 } ?? 0)) * 1000
                     let seekStateMs = (watchdog.seekingEndTime.flatMap { end in watchdog.seekingStartTime.map { (end - $0) * 1000 } }) ?? 0
-                    print("[SeekWatchdog][#\(watchdog.id)] ✅ Seek completed in \(String(format: "%.1f", totalElapsed))ms (seeking: \(String(format: "%.1f", seekStateMs))ms, cacheWait: \(String(format: "%.1f", cacheMs))ms) -> landed at \(positionMs)ms (target: \(watchdog.targetMs)ms, demuxerCached: \(cached)s)")
+                    seekWatchdogLog("[SeekWatchdog][#\(watchdog.id)] ✅ Seek completed in \(String(format: "%.1f", totalElapsed))ms (seeking: \(String(format: "%.1f", seekStateMs))ms, cacheWait: \(String(format: "%.1f", cacheMs))ms) -> landed at \(positionMs)ms (target: \(watchdog.targetMs)ms, demuxerCached: \(cached)s)")
                     activeSeekWatchdog = nil
                 } else {
                     activeSeekWatchdog = watchdog

@@ -3011,6 +3011,72 @@ final class NuvioSyncProfileSettingsTests: XCTestCase {
         )
     }
 
+    func testNuvioSyncMirrorPreferenceRoundTripsThroughProfileSettings() async throws {
+        let defaults = ProfileSettings.store(for: profileId)
+        let before = ProfileSettingsSnapshot.capture(for: profileId)
+        defaults.set(true, forKey: SettingsKey.nuvioSyncScrobbleEnabled)
+        XCTAssertFalse(ProfileSettingsSnapshot.areEqual(before, ProfileSettingsSnapshot.capture(for: profileId)))
+        var tvDocument: [String: Any] = ["version": 1, "features": [:]]
+        ProfileSettingsSyncURLProtocol.install { request in
+            switch request.rpc {
+            case "sync_pull_profile_settings_blob":
+                return request.params["p_platform"] as? String == "tv"
+                    ? self.response([["settings_json": tvDocument]]) : self.response([])
+            case "sync_push_profile_settings_blob":
+                if request.params["p_platform"] as? String == "tv" {
+                    tvDocument = request.params["p_settings_json"] as? [String: Any] ?? [:]
+                }
+                return self.response([])
+            default: return (404, Data("{}".utf8))
+            }
+        }
+        let client = NuvioAPIClient(session: session)
+        try await push(with: client)
+        defaults.removeObject(forKey: SettingsKey.nuvioSyncScrobbleEnabled)
+        _ = try await client.pullProfileSettings(session: authSession, remoteProfileId: 7, localProfileId: profileId)
+        XCTAssertTrue(defaults.bool(forKey: SettingsKey.nuvioSyncScrobbleEnabled))
+    }
+
+    @MainActor
+    func testNuvioProgressUploadExcludesRemoteCheckpointsAndPulledRows() async throws {
+        defer { ContinueWatchingStore.eraseProfile(profileId) }
+        let now = Date()
+        let mirrored = WatchProgressRecord(
+            progressKey: "mirrored_s1e2", contentId: "mirrored", contentType: "series", videoId: "mirrored:1:2",
+            season: 1, episode: 2, position: 1449, duration: 2469, lastWatchedAt: now, isPendingPush: true
+        )
+        let pulled = WatchProgressRecord(
+            progressKey: "pulled_s1e2", contentId: "pulled", contentType: "series", videoId: "pulled:1:2",
+            season: 1, episode: 2, position: 100, duration: 2400, lastWatchedAt: now, isPendingPush: false
+        )
+        XCTAssertTrue(WatchProgressLedger.upsert(mirrored, profileId: profileId))
+        XCTAssertTrue(WatchProgressLedger.upsert(pulled, profileId: profileId))
+        let remoteMeta = NuvioMeta(id: "remote-only-\(UUID().uuidString)", name: "Remote checkpoint", type: "series")
+        let previousProfile = ContinueWatchingStore.activeProfileId
+        let previousLedgerProfile = WatchProgressLedger.activeProfileId
+        let previousDismissalProfile = ContinueWatchingDismissStore.activeProfileId
+        ContinueWatchingStore.setActiveProfile(profileId)
+        TraktProgressService.recordLocalPlayback(
+            meta: remoteMeta, position: 200, duration: 2600, season: 1, episode: 2, source: .trakt, notify: false
+        )
+        ContinueWatchingStore.setActiveProfile(previousProfile)
+        WatchProgressLedger.setActiveProfile(previousLedgerProfile)
+        ContinueWatchingDismissStore.setActiveProfile(previousDismissalProfile)
+        defer { TraktProgressService.forgetLocalPlaybackForCompletion(meta: remoteMeta, profileId: profileId) }
+        ProfileSettingsSyncURLProtocol.install { request in
+            XCTAssertEqual(request.rpc, "sync_push_watch_progress")
+            return self.response([])
+        }
+        try await NuvioAPIClient(session: session).pushWatchProgress(session: authSession, remoteProfileId: 7, profileId: profileId)
+        let request = try XCTUnwrap(ProfileSettingsSyncURLProtocol.capturedRequests().first)
+        let entries = try XCTUnwrap(request.params["p_entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?["content_id"] as? String, "mirrored")
+        XCTAssertEqual(entries.first?["position"] as? Int, 1_449_000)
+        XCTAssertEqual(entries.first?["duration"] as? Int, 2_469_000)
+        XCTAssertFalse(WatchProgressLedger.records(profileId: profileId).contains { $0.isPendingPush })
+    }
+
     func testSnapshotComparesFullDataAndIgnoresTransientKeys() {
         let defaults = ProfileSettings.store(for: profileId)
         var originalData = Data(repeating: 0x41, count: 512)

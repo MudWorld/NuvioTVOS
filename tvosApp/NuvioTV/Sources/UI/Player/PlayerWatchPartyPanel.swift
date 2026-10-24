@@ -322,26 +322,36 @@ struct PlayerWatchPartyPanel: View {
                     .disabled(service.busy || operation != nil || room.connection != .ready
                         || (focusContext.entryLocked && "party.hostOnly" != effectiveEntryFocusTarget))
 
+                    let isSharing = room.isSharingStream || hasSharedStream
                     let shareFocused = focusedControlID == "party.shareStream"
                     Button {
-                        do {
-                            let source = try viewModel.watchPartyShareableStream(for: party.media)
-                            pendingStreamShare = source
-                            if ProfileSettings.current.bool(forKey: "nuvio.tv.party.hideStreamSharingWarning") {
-                                sendApprovedStream(source)
-                                pendingStreamShare = nil
-                            } else {
-                                showingStreamWarning = true
+                        if isSharing {
+                            run {
+                                try await room.stopSharingStream()
+                                hasSharedStream = false
                             }
-                        } catch {
-                            message = "This source can't be shared. Use a compatible HTTP source or let guests choose their own."
+                        } else {
+                            do {
+                                let source = try viewModel.watchPartyShareableStream(for: party.media)
+                                pendingStreamShare = source
+                                if ProfileSettings.current.bool(forKey: "nuvio.tv.party.hideStreamSharingWarning") {
+                                    sendApprovedStream(source)
+                                    pendingStreamShare = nil
+                                } else {
+                                    showingStreamWarning = true
+                                }
+                            } catch {
+                                message = "This source can't be shared. Use a compatible HTTP source or let guests choose their own."
+                            }
                         }
                     } label: {
                         actionLabel(
                             title: "Share my stream · BETA",
-                            subtitle: "Share this playback link with guests (may expose Debrid tokens)",
+                            subtitle: isSharing
+                                ? "Sharing this playback link with guests"
+                                : "Share this playback link with guests (may expose Debrid tokens)",
                             symbol: "antenna.radiowaves.left.and.right",
-                            value: (room.isSharingStream || hasSharedStream) ? "Sharing" : "Off",
+                            value: isSharing ? "Sharing" : "Off",
                             isFocused: shareFocused
                         )
                     }
@@ -352,21 +362,6 @@ struct PlayerWatchPartyPanel: View {
                     .disabled(service.busy || operation != nil || room.connection != .ready
                         || owner.presentation?.mount.isCurrent != true
                         || (focusContext.entryLocked && "party.shareStream" != effectiveEntryFocusTarget))
-                    if room.isSharingStream || hasSharedStream {
-                        Button {
-                            run {
-                                try await room.stopSharingStream()
-                                hasSharedStream = false
-                            }
-                        } label: {
-                            actionLabel(title: "Stop sharing", subtitle: "Does not revoke links already received",
-                                        symbol: "xmark.shield", isFocused: focusedControlID == "party.stopSharing")
-                        }
-                        .buttonStyle(PosterCardButtonStyle())
-                        .focused($focusedControlID, equals: "party.stopSharing")
-                        .disabled(service.busy || operation != nil || room.connection != .ready
-                            || (focusContext.entryLocked && "party.stopSharing" != effectiveEntryFocusTarget))
-                    }
                 } else {
                     if room.sharedStream != nil {
                         PlayerPanelRow(title: "Host stream available · BETA",
@@ -387,7 +382,7 @@ struct PlayerWatchPartyPanel: View {
                 }
 
                 let chatToastsFocused = focusedControlID == "party.chatToasts"
-                Button {
+                let chatToastsButton = Button {
                     chatToastsEnabled.toggle()
                     ProfileSettings.current.set(chatToastsEnabled, forKey: SettingsKey.partyChatToastsEnabled)
                 } label: {
@@ -402,7 +397,14 @@ struct PlayerWatchPartyPanel: View {
                 .buttonStyle(PosterCardButtonStyle())
                 .focusEffectDisabledIfAvailable()
                 .focused($focusedControlID, equals: "party.chatToasts")
-                .onMoveCommand(perform: handleFocusMove)
+                .disabled(service.busy || operation != nil
+                    || (focusContext.entryLocked && "party.chatToasts" != effectiveEntryFocusTarget))
+
+                if !isHost {
+                    chatToastsButton.onMoveCommand(perform: handleFocusMove)
+                } else {
+                    chatToastsButton
+                }
 
                 let leaveFocused = focusedControlID == "party.leave"
                 Button {
@@ -668,9 +670,6 @@ struct PlayerWatchPartyPanel: View {
                 if owner.presentation?.mount.isCurrent == true {
                     ids.append("party.shareStream")
                 }
-                if hasSharedStream && !requestBusy && room.connection == .ready {
-                    ids.append("party.stopSharing")
-                }
             }
         }
         if owner.presentation?.mount.isCurrent == true {
@@ -679,6 +678,7 @@ struct PlayerWatchPartyPanel: View {
             ids.append("party.lobby")
         }
         if !requestBusy {
+            ids.append("party.chatToasts")
             ids.append("party.leave")
             if isHost { ids.append("party.endRoom") }
         }

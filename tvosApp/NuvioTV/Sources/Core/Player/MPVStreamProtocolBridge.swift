@@ -372,7 +372,9 @@ final class MPVStreamSession: NSObject, URLSessionDataDelegate, @unchecked Senda
                     // Live streams reconnect from zero after a clean disconnect, matching prior behavior.
                     if consecutiveReadFailures < 50 {
                         consecutiveReadFailures += 1
+                        #if DEBUG
                         print("[LiveWatchdog][Bridge] 🔄 Live stream connection closed by server, reconnecting seamlessly (attempt \(consecutiveReadFailures)/50)...")
+                        #endif
                         startRangeRequest(from: 0)
                     } else {
                         isEOF = true

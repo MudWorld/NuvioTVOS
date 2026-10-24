@@ -12,6 +12,13 @@ func screensaverDebugLog(_ message: @autoclosure () -> String) {
     #endif
 }
 
+@inline(__always)
+func seekWatchdogLog(_ message: @autoclosure () -> String) {
+    #if DEBUG
+    print(message())
+    #endif
+}
+
 func formattedAVSyncGap(_ gapMs: Double?) -> String {
     guard let gapMs, gapMs.isFinite else { return "Unavailable" }
     return String(format: "%+.1f ms", gapMs)

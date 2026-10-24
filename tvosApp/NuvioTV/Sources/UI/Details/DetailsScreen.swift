@@ -683,6 +683,7 @@ struct DetailsScreen: View {
             let debridSaved = preResolvedDuration ?? 0
             let totalSaved = discoverySaved + debridSaved
 
+            #if DEBUG
             print("\n============================================================")
             print("[PreFetch] 🚀 INSTANT PLAYBACK TRIGGERED (ZERO-WAIT LAUNCH):")
             print("  • Title:              \(meta.name)")
@@ -692,6 +693,7 @@ struct DetailsScreen: View {
             print("  • Debrid Resolution:  Saved \(String(format: "%.3fs", debridSaved)) (bypassed)")
             print("  ⏱ TOTAL TIME SAVED:   \(String(format: "%.3fs", totalSaved))")
             print("============================================================\n")
+            #endif
 
             let startupToken = ensureStartupRequest(title: meta.name)
             PlaybackStartupTiming.markSourcePicked(stream: preStream, token: startupToken)

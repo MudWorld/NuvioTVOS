@@ -263,7 +263,9 @@ actor ActorRecognitionService {
         lastShotTimestamp = sourceTime
         let analysisEpoch = trackingEpoch
         
+        #if DEBUG
         print("[ActorRecognition] analyzeFrame at \(sourceTime)s (candidates: \(candidates.count), isPaused: \(isPaused))")
+        #endif
         
         // Active dialogue speakers from subtitles in this frame
         var matchedCandidateIDs = Set<String>()
@@ -305,12 +307,16 @@ actor ActorRecognitionService {
             let isValidAspect = pixelAspect >= 0.55 && pixelAspect <= 2.2
             
             let isValid = isLargeEnough && isWithinBounds && isValidAspect
+            #if DEBUG
             if !isValid {
                 print("[ActorRecognition] Filtered candidate face: \(Int(pixelW))x\(Int(pixelH))px (pxAspect=\(String(format: "%.2f", pixelAspect)), relW=\(String(format: "%.3f", box.width)), relH=\(String(format: "%.3f", box.height))) -> size=\(isLargeEnough), bounds=\(isWithinBounds), aspect=\(isValidAspect)")
             }
+            #endif
             return isValid
         }
+        #if DEBUG
         print("[ActorRecognition] Detected \(detections.count) face(s), \(validDetections.count) valid for recognition")
+        #endif
 
         if bundledPipeline != nil && detections.isEmpty {
             let activeTracked = currentTrackedActors(at: sourceTime)
@@ -409,7 +415,9 @@ actor ActorRecognitionService {
                 )
                 matchedCandidateIDs.insert(candidateId)
                 
+                #if DEBUG
                 print("[ActorRecognition] Face matched to \"\(match.name)\" (dist=\(String(format: "%.3f", match.distance)), conf=\(String(format: "%.2f", match.confidence)), obs=\(tracked.observationCount))")
+                #endif
                 
                 // 2+ frame agreement rule (or instant confirmation on paused still with high confidence)
                 let strictBundledMatch = Self.shouldConfirmBundledMatchOnSingleFrame(
@@ -451,7 +459,9 @@ actor ActorRecognitionService {
             }
         }
         
+        #if DEBUG
         print("[ActorRecognition] Confirmed actors in scene: \(confirmedActors.map(\.name))")
+        #endif
         
         // Clean up ancient tracked entries (> sceneRetentionSeconds + 10 seconds)
         trackedActors = trackedActors.filter { (sourceTime - $0.value.lastSeenTimestamp) <= (Self.sceneRetentionSeconds + 10.0) }

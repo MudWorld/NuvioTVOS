@@ -2909,7 +2909,9 @@ enum ContinueWatchingStore {
             return
         }
 
+        #if DEBUG
         print("[ContinueWatching][Store] save: meta=\(meta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), pos=\(position)/\(duration)")
+        #endif
 
         // Record the raw row before any display rule runs. A finished episode is
         // not "nothing to store" — it is precisely the seed that produces the
@@ -2938,7 +2940,9 @@ enum ContinueWatchingStore {
         )
 
         guard shouldKeep(position: position, duration: duration) else {
+            #if DEBUG
             print("[ContinueWatching][Store] save: shouldKeep=false (pos=\(position)/dur=\(duration) >= \(WatchProgressLedger.completionFraction)) -> removing from store")
+            #endif
             if let season, let episode {
                 removeEpisodeResumePoint(meta: meta, season: season, episode: episode)
             }
@@ -2971,7 +2975,9 @@ enum ContinueWatchingStore {
             released: existing?.released
         )
         let updated = ([item] + items().filter { $0.meta.id != meta.id }).prefix(maxItems)
+        #if DEBUG
         print("[ContinueWatching][Store] save: persisting \(updated.count) items in store")
+        #endif
         persist(Array(updated))
     }
 
@@ -2989,7 +2995,9 @@ enum ContinueWatchingStore {
         episode: Int? = nil
     ) {
         guard duration.isFinite, duration > 0 else { return }
+        #if DEBUG
         print("[ContinueWatching][Store] markPlaybackCompleted: meta=\(meta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), dur=\(duration)")
+        #endif
         ContinueWatchingDismissStore.clear(contentId: meta.id)
         WatchProgressLedger.upsert(
             WatchProgressRecord(
@@ -3030,7 +3038,9 @@ enum ContinueWatchingStore {
         released: String? = nil,
         seedSeason: Int? = nil
     ) {
+        #if DEBUG
         print("[ContinueWatching][Store] saveUpNext: meta=\(meta.id), S\(season)E\(episode), dur=\(duration)")
+        #endif
         let item = ContinueWatchingItem(
             meta: meta,
             streamUrl: "",
@@ -8020,6 +8030,9 @@ enum WatchedStore {
         for activeSource in RemoteTrackingState.activeScrobbleSources(in: settings) {
             targetSourceKeys.insert(activeSource.rawValue)
         }
+        if RemoteTrackingState.isNuvioSyncScrobbleEnabled(in: settings) {
+            targetSourceKeys.insert(TraktWatchProgressSource.nuvioSync.rawValue)
+        }
         for target in completionTargets {
             targetSourceKeys.insert(target.provider.rawValue)
         }
@@ -8173,10 +8186,11 @@ enum WatchedStore {
         ContinueWatchingStore.removeWatched([item])
         let markedAt = item.watchedAt
         Task { @MainActor in
-            TraktProgressService.forgetLocalPlayback(
+            TraktProgressService.forgetLocalPlaybackForCompletion(
                 meta: meta,
                 season: item.season,
                 episode: item.episode,
+                profileId: profileId,
                 recordedNoLaterThan: markedAt,
                 notify: true
             )
@@ -8265,11 +8279,13 @@ enum WatchedStore {
         ContinueWatchingStore.markLedgerWatched(meta: meta, season: season, episode: episode)
         ContinueWatchingStore.removeWatched([item])
         let markedAt = item.watchedAt
+        let completionProfileId = activeProfileId
         Task { @MainActor in
-            TraktProgressService.forgetLocalPlayback(
+            TraktProgressService.forgetLocalPlaybackForCompletion(
                 meta: meta,
                 season: season,
                 episode: episode,
+                profileId: completionProfileId,
                 recordedNoLaterThan: markedAt,
                 notify: true
             )

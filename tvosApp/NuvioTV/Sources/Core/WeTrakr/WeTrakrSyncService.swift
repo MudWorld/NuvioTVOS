@@ -931,14 +931,17 @@ struct WeTrakrProgressService {
         }
 
         return await withAccountLane(accountID) {
-            let isScrobble = RemoteTrackingState.isScrobbleEnabled(for: .wetrakr, in: store, profileScope: profileID)
+            // The account was authenticated through this service's token storage above.
+            // Read the toggle directly so injected token stores follow the same routing.
+            let isScrobble = store.bool(forKey: SettingsKey.wetrakrScrobbleEnabled)
+            let requiresWeTrakrSource = !isScrobble
             guard let context = requestContext(
                 in: store,
                 profileId: profileID,
                 expectedAccountID: expectedAccountID ?? accountID,
-                requiresWeTrakrSource: !isScrobble
+                requiresWeTrakrSource: requiresWeTrakrSource
             ),
-                  contextIsCurrent(context, in: store, profileId: profileID, requiresWeTrakrSource: !isScrobble) else {
+                  contextIsCurrent(context, in: store, profileId: profileID, requiresWeTrakrSource: requiresWeTrakrSource) else {
                 return false
             }
             return await reportPlaybackUnlocked(
@@ -951,6 +954,7 @@ struct WeTrakrProgressService {
                 store: store,
                 profileId: profileID,
                 context: context,
+                requiresWeTrakrSource: requiresWeTrakrSource,
                 playbackID: playbackID
             )
         }
@@ -966,10 +970,11 @@ struct WeTrakrProgressService {
         store: UserDefaults,
         profileId: String?,
         context: WeTrakrRequestContext,
+        requiresWeTrakrSource: Bool,
         playbackID: String? = nil
     ) async -> Bool {
         guard position.isFinite, duration.isFinite, duration > 0,
-              contextIsCurrent(context, in: store, profileId: profileId, requiresWeTrakrSource: true) else {
+              contextIsCurrent(context, in: store, profileId: profileId, requiresWeTrakrSource: requiresWeTrakrSource) else {
             return false
         }
         let ids = wetrakrIDs(for: meta)
@@ -1013,7 +1018,7 @@ struct WeTrakrProgressService {
                 clientID: context.clientID
             )
             _ = try result.valueOrThrow()
-            guard contextIsCurrent(context, in: store, profileId: profileId, requiresWeTrakrSource: true) else {
+            guard contextIsCurrent(context, in: store, profileId: profileId, requiresWeTrakrSource: requiresWeTrakrSource) else {
                 return false
             }
             if let playbackID = playbackID?.trimmingCharacters(in: .whitespacesAndNewlines),

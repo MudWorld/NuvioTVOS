@@ -284,10 +284,11 @@ final class NuvioSyncManager: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.schedulePush(scope: .settings) }
         })
+        // UserDefaults writes can hold a store lock; this Task hops to MainActor without blocking the posting thread.
         observers.append(center.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.isApplyingRemote else { return }
@@ -957,13 +958,14 @@ final class NuvioSyncManager: ObservableObject {
     @discardableResult
     func pushWatchProgressNow(profileId: String? = nil) async -> Bool {
         let resolvedProfileId = profileId ?? profileViewModel?.activeProfile?.id
-        guard let target = await currentSyncTarget(for: resolvedProfileId) else { return false }
-        // Same ownership rule as the debounced push — this path skips
-        // `pushLocalSnapshots` entirely, so it needs the gate of its own.
-        if let resolvedProfileId,
-           !Self.ownsWatchState(for: resolvedProfileId) {
-            return false
-        }
+        // This path bypasses the debounced push gates, so require a resolved
+        // profile that still owns the local watch-state stores and honors both
+        // the master switch and selected-owner/mirror policy.
+        guard let resolvedProfileId,
+              WatchedStore.activeProfileId == resolvedProfileId,
+              Self.watchStateSyncEnabled(for: resolvedProfileId),
+              Self.ownsWatchState(for: resolvedProfileId),
+              let target = await currentSyncTarget(for: resolvedProfileId) else { return false }
         do {
             try await client.pushWatchProgress(
                 session: target.session,
@@ -2058,8 +2060,11 @@ final class NuvioSyncManager: ObservableObject {
     /// that tracker. Only upload watch state Nuvio Sync is actually the source
     /// of. The local store keeps the merged view either way; this gates the
     /// upload, not the merge.
-    private static func ownsWatchState(for profileId: String) -> Bool {
+    static func ownsWatchState(for profileId: String) -> Bool {
         let store = ProfileSettings.store(for: profileId)
+        if RemoteTrackingState.isNuvioSyncScrobbleEnabled(in: store) {
+            return true
+        }
         let source = TraktSettingsStore.watchProgressSource(in: store)
         switch source {
         case .nuvioSync:
@@ -2109,7 +2114,7 @@ final class NuvioSyncManager: ObservableObject {
         }
     }
 
-    private static func watchStateSyncEnabled(for profileId: String) -> Bool {
+    static func watchStateSyncEnabled(for profileId: String) -> Bool {
         let defaults = ProfileSettings.store(for: profileId)
         if let value = defaults.object(forKey: SettingsKey.accountSyncWatchState) as? Bool {
             return value

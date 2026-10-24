@@ -1,8 +1,8 @@
 # Vendored playback dependencies
 
-## AetherEngine (pin 7.46.0)
+## AetherEngine (pin 7.47.0)
 
-Local pin of [AetherEngine 7.46.0](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.46.0), upstream commit `40193cefa7244c097519d219f84af1b9028c181c`, merged from the [7.42.0](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.42.0) base commit `f5af2a389695021af6f3aee86dfd8e485cc2c975`. Imports remain rewritten to the namespaced FFmpeg modules below, and Nuvio's static product, four enabled default traits, local FFmpeg path dependency, and host integration patches are retained. AetherEngine 7.46 uses FFmpegBuild 3.9.0's patched `dca` decoder for DTS:X height channels through the `x_heights` option.
+Local pin of [AetherEngine 7.47.0](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.47.0), upstream commit `a1a70cd63c1fef89cffcf0e8110456807d0fab05`. Imports remain rewritten to the namespaced FFmpeg modules below, and Nuvio's static product, four enabled default traits, local FFmpeg path dependency, and host integration patches are retained. The 7.47 upgrade preserves Nuvio's custom APAC failure reporting and tests, non-Dolby-Vision supplemental-codecs guard, and native-host transport and first-frame behavior. DTS:X height channels still use FFmpegBuild 3.9.0's patched `dca` decoder through the `x_heights` option.
 
 Retain the local spatial-bridge patch that reports persistent APAC encoding failures independently of successful TrueHD decoding, along with its regression tests. The patch is merged with the 7.40 bed-split renderer and its telemetry reporting.
 

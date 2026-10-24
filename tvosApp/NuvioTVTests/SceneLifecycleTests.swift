@@ -1,4 +1,5 @@
 import XCTest
+import AetherEngine
 @testable import NuvioTV
 
 @MainActor
@@ -880,6 +881,161 @@ final class SceneLifecycleTests: XCTestCase {
         coordinator.handleSeek()
         XCTAssertEqual(coordinator.currentSnapshot.actors.count, 3)
         XCTAssertEqual(coordinator.currentSnapshot.actors.map(\.name), ["Yuki Kaji", "Yui Ishikawa", "Marina Inoue"])
+    }
+}
+
+extension SceneLifecycleTests {
+    @MainActor
+    func testSceneCaptureIdentityRejectsNativeItemReplacement() {
+        let player = NSObject()
+        let firstItem = NSObject()
+        let replacementItem = NSObject()
+        let captured = AetherSceneFrameAnalysisIdentity(
+            hostGeneration: 7,
+            engineStartupGeneration: 12,
+            nativePlayer: player,
+            nativeItem: firstItem)
+        let unchanged = AetherSceneFrameAnalysisIdentity(
+            hostGeneration: 7,
+            engineStartupGeneration: 12,
+            nativePlayer: player,
+            nativeItem: firstItem)
+        let itemReplaced = AetherSceneFrameAnalysisIdentity(
+            hostGeneration: 7,
+            engineStartupGeneration: 12,
+            nativePlayer: player,
+            nativeItem: replacementItem)
+
+        XCTAssertTrue(AetherPlaybackController.sceneFrameAnalysisIdentityMatches(captured, current: unchanged))
+        XCTAssertFalse(AetherPlaybackController.sceneFrameAnalysisIdentityMatches(captured, current: itemReplaced))
+    }
+
+    @MainActor
+    func testSceneDV8PrimarySuccessReturnsUnchangedWithoutSourceFallback() async {
+        let image = sceneAnalysisTestImage()
+        let primary = AetherEngine.VideoFrameAnalysisCapture(
+            image: image, sourceTime: 12.5, diagnostics: "route=native-output reason=ok")
+        var fallbackCalls = 0
+        let result = await AetherPlaybackController.resolveSceneCaptureAfterPrimary(
+            primary, sourceDVProfile: 8, sourceEligible: true, targetSeconds: 13,
+            isCurrent: { true },
+            fallback: {
+                fallbackCalls += 1
+                return nil
+            })
+
+        XCTAssertTrue(result.image === image)
+        XCTAssertEqual(result.sourceTime, primary.sourceTime)
+        XCTAssertEqual(result.diagnostics, primary.diagnostics)
+        XCTAssertEqual(fallbackCalls, 0)
+    }
+
+    @MainActor
+    func testSceneDV5ResidentFailurePublishesActualBoundedSourceTimestamp() async {
+        let primary = AetherEngine.VideoFrameAnalysisCapture(
+            image: nil, sourceTime: 40,
+            diagnostics: "route=resident-dovi-rpu sourceDVProfile=5 reason=resident-segment-cache-miss")
+        let image = sceneAnalysisTestImage()
+        var fallbackCalls = 0
+        let result = await AetherPlaybackController.resolveSceneCaptureAfterPrimary(
+            primary, sourceDVProfile: 5, sourceEligible: true, targetSeconds: 42,
+            isCurrent: { true },
+            fallback: {
+                fallbackCalls += 1
+                return BoundedStillFrame(image: image, actualSeconds: 42.25)
+            })
+
+        XCTAssertEqual(fallbackCalls, 1)
+        XCTAssertTrue(result.image === image)
+        XCTAssertEqual(result.sourceTime, 42.25)
+        XCTAssertTrue(result.diagnostics.contains("route=bounded-dovi-source reason=ok"))
+        XCTAssertTrue(result.diagnostics.contains("primary={\(primary.diagnostics)}"))
+    }
+
+    @MainActor
+    func testSceneYieldTraitAndNonDVFailuresNeverUseSourceFallback() async {
+        let image = sceneAnalysisTestImage()
+        let failures = [
+            (5, true, "route=resident-dovi-rpu reason=playback-priority-yield"),
+            (5, true, "route=resident-dovi-rpu reason=dv-reshaping-unavailable"),
+            (8, true, "route=resident-dovi-rpu reason=resident-segment-cache-miss"),
+            (5, false, "route=resident-dovi-rpu reason=resident-segment-cache-miss"),
+        ]
+        for (profile, sourceEligible, diagnostics) in failures {
+            let primary = AetherEngine.VideoFrameAnalysisCapture(
+                image: nil, sourceTime: 42, diagnostics: diagnostics)
+            var fallbackCalls = 0
+            let result = await AetherPlaybackController.resolveSceneCaptureAfterPrimary(
+                primary, sourceDVProfile: profile, sourceEligible: sourceEligible, targetSeconds: 42,
+                isCurrent: { true },
+                fallback: {
+                    fallbackCalls += 1
+                    return BoundedStillFrame(image: image, actualSeconds: 42)
+                })
+            XCTAssertNil(result.image)
+            XCTAssertEqual(result.diagnostics, diagnostics)
+            XCTAssertEqual(fallbackCalls, 0)
+        }
+
+        let recoverablePrimary = AetherEngine.VideoFrameAnalysisCapture(
+            image: nil, sourceTime: 42,
+            diagnostics: "route=resident-dovi-rpu reason=resident-segment-cache-miss")
+        var yieldedFallbackCalls = 0
+        let yielded = await AetherPlaybackController.resolveSceneCaptureAfterPrimary(
+            recoverablePrimary, sourceDVProfile: 5, sourceEligible: true, targetSeconds: 42,
+            shouldYield: { true }, didYield: { true }, isCurrent: { true },
+            fallback: {
+                yieldedFallbackCalls += 1
+                return BoundedStillFrame(image: image, actualSeconds: 42)
+            })
+        XCTAssertNil(yielded.image)
+        XCTAssertTrue(yielded.diagnostics.contains("reason=playback-priority-yield"))
+        XCTAssertEqual(yieldedFallbackCalls, 0)
+    }
+
+    @MainActor
+    func testSceneStaleRequestsAndMissingFallbackNeverReportSuccess() async {
+        let primary = AetherEngine.VideoFrameAnalysisCapture(
+            image: nil, sourceTime: 42,
+            diagnostics: "route=resident-dovi-rpu reason=resident-dv-decode-failed-or-budget-expired")
+        let image = sceneAnalysisTestImage()
+        var fallbackCalls = 0
+        let staleBeforeFallback = await AetherPlaybackController.resolveSceneCaptureAfterPrimary(
+            primary, sourceDVProfile: 5, sourceEligible: true, targetSeconds: 42,
+            isCurrent: { false },
+            fallback: {
+                fallbackCalls += 1
+                return BoundedStillFrame(image: image, actualSeconds: 42)
+            })
+        XCTAssertNil(staleBeforeFallback.image)
+        XCTAssertTrue(staleBeforeFallback.diagnostics.contains("cancelled-or-superseded"))
+        XCTAssertEqual(fallbackCalls, 0)
+
+        var currentChecks = 0
+        let staleAfterFallback = await AetherPlaybackController.resolveSceneCaptureAfterPrimary(
+            primary, sourceDVProfile: 5, sourceEligible: true, targetSeconds: 42,
+            isCurrent: {
+                currentChecks += 1
+                return currentChecks == 1
+            },
+            fallback: { BoundedStillFrame(image: image, actualSeconds: 42) })
+        XCTAssertNil(staleAfterFallback.image)
+        XCTAssertTrue(staleAfterFallback.diagnostics.contains("cancelled-or-superseded"))
+
+        let missingFallback = await AetherPlaybackController.resolveSceneCaptureAfterPrimary(
+            primary, sourceDVProfile: 5, sourceEligible: true, targetSeconds: 42,
+            isCurrent: { true }, fallback: { nil })
+        XCTAssertNil(missingFallback.image)
+        XCTAssertFalse(missingFallback.diagnostics.contains("reason=ok"))
+    }
+
+    private func sceneAnalysisTestImage() -> CGImage {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = CGContext(
+            data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
+            space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        return context.makeImage()!
     }
 }
 

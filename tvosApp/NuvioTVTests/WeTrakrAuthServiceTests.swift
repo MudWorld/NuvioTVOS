@@ -1189,6 +1189,68 @@ final class WeTrakrAuthServiceTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.url?.path == "/sync/tracking" })
     }
 
+    func testSecondaryScrobbleReportsStartAndPauseWhenTraktIsPrimary() async throws {
+        let profileID = prepareWeTrakrProfile()
+        store.set(TraktWatchProgressSource.trakt.rawValue, forKey: SettingsKey.traktWatchProgressSource)
+        RemoteTrackingState.setScrobbleEnabled(true, for: .wetrakr, in: store)
+        WeTrakrFixtureURLProtocol.install { _ in
+            (status: 200, headers: [:], body: Data("{}".utf8))
+        }
+
+        let started = await WeTrakrProgressService.reportPlayback(
+            meta: completionMeta(),
+            position: 20,
+            duration: 100,
+            season: nil,
+            episode: nil,
+            action: .start,
+            expectedAccountID: "account-1",
+            profileId: profileID,
+            store: store
+        )
+        let paused = await WeTrakrProgressService.reportPlayback(
+            meta: completionMeta(),
+            position: 40,
+            duration: 100,
+            season: nil,
+            episode: nil,
+            action: .pause,
+            expectedAccountID: "account-1",
+            profileId: profileID,
+            store: store
+        )
+
+        XCTAssertTrue(started)
+        XCTAssertTrue(paused)
+        XCTAssertEqual(WeTrakrFixtureURLProtocol.capturedRequests().map { $0.url?.path }, [
+            "/scrobble/start",
+            "/scrobble/pause"
+        ])
+    }
+
+    func testDisabledSecondaryScrobbleDoesNotReportWhenTraktIsPrimary() async throws {
+        let profileID = prepareWeTrakrProfile()
+        store.set(TraktWatchProgressSource.trakt.rawValue, forKey: SettingsKey.traktWatchProgressSource)
+        WeTrakrFixtureURLProtocol.install { _ in
+            (status: 200, headers: [:], body: Data("{}".utf8))
+        }
+
+        let reported = await WeTrakrProgressService.reportPlayback(
+            meta: completionMeta(),
+            position: 20,
+            duration: 100,
+            season: nil,
+            episode: nil,
+            action: .start,
+            expectedAccountID: "account-1",
+            profileId: profileID,
+            store: store
+        )
+
+        XCTAssertFalse(reported)
+        XCTAssertTrue(WeTrakrFixtureURLProtocol.capturedRequests().isEmpty)
+    }
+
     func testAccountSwitchDuringCompletionRequestLeavesOriginalEventQueued() async throws {
         let profileID = prepareWeTrakrProfile()
         let meta = completionMeta()

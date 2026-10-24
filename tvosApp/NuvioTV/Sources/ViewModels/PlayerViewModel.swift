@@ -61,6 +61,12 @@ struct PlayerErrorRecoveryProgress {
     }
 }
 
+enum ScenePlaybackPollTransition: Equatable {
+    case none
+    case paused
+    case resumed
+}
+
 struct WatchPartyRoomCreationSnapshot {
     let media: WatchPartyMedia
     let paused: Bool
@@ -192,6 +198,8 @@ class PlayerViewModel: ObservableObject {
             ))
         }
     }
+    private var scenePauseIntentPending = false
+    private var scenePauseAlreadyNotified = false
     private var lastPlaybackIssueReportUptime = -Double.infinity
     var time: PlayerTime = PlayerTime()
     /// High-frequency time/scrub state for HUDs. Mirrors `time` on each tick.
@@ -498,6 +506,22 @@ class PlayerViewModel: ObservableObject {
     /// Segments the user skipped during this playback item. Keep these hidden
     /// even while the asynchronous seek is still reporting the old position.
     private var dismissedSkipIntervalIds: Set<String> = []
+    private var autoSkippedIntervalIds: Set<String> = []
+
+    var autoSkipIntroEnabled: Bool {
+        get { ProfileSettings.current.bool(forKey: SettingsKey.autoSkipIntro) }
+        set { ProfileSettings.current.set(newValue, forKey: SettingsKey.autoSkipIntro) }
+    }
+
+    var autoSkipRecapEnabled: Bool {
+        get { ProfileSettings.current.bool(forKey: SettingsKey.autoSkipRecap) }
+        set { ProfileSettings.current.set(newValue, forKey: SettingsKey.autoSkipRecap) }
+    }
+
+    var autoSkipOutroEnabled: Bool {
+        get { ProfileSettings.current.bool(forKey: SettingsKey.autoSkipOutro) }
+        set { ProfileSettings.current.set(newValue, forKey: SettingsKey.autoSkipOutro) }
+    }
     private var skipSegmentAutoHideDeadline: Date?
     private var skipIntervalLoadTask: Task<Void, Never>?
     private var sourcesFetchTask: Task<Void, Never>?
@@ -519,6 +543,7 @@ class PlayerViewModel: ObservableObject {
     private var lastScrubPublish = Date.distantPast
     private var scrubTimeoutTask: Task<Void, Never>?
     private let suppliedScrubThumbnailProvider: (any ScrubThumbnailProviding)?
+    private let suppliedSceneCoordinator: SceneCoordinator?
     private var scrubThumbnailProvider: (any ScrubThumbnailProviding)? {
         if let supplied = suppliedScrubThumbnailProvider { return supplied }
         switch sessionCoordinator.activeBackend {
@@ -636,10 +661,12 @@ class PlayerViewModel: ObservableObject {
         sessionCoordinator suppliedCoordinator: PlaybackSessionCoordinator? = nil,
         adoptsPictureInPictureSession: Bool = true,
         scrubThumbnailProvider: (any ScrubThumbnailProviding)? = nil,
-        pauseOverlayDelaySeconds: TimeInterval = 15
+        pauseOverlayDelaySeconds: TimeInterval = 15,
+        sceneCoordinator suppliedSceneCoordinator: SceneCoordinator? = nil
     ) {
         self.adoptsPictureInPictureSession = adoptsPictureInPictureSession
         suppliedScrubThumbnailProvider = scrubThumbnailProvider
+        self.suppliedSceneCoordinator = suppliedSceneCoordinator
         self.pauseOverlayDelaySeconds = max(0, pauseOverlayDelaySeconds)
         // A PiP restore creates this view model after the app has already
         // dismissed the original PlayerView. Adopt the retained coordinator
@@ -1272,16 +1299,21 @@ class PlayerViewModel: ObservableObject {
     private static func isLiveStream(meta: NuvioMeta, url: URL?) -> Bool {
         if isLiveContentType(meta.type) { return true }
         let id = meta.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if id.hasPrefix("iptv:") || id.hasPrefix("live:") || id.hasPrefix("channel:") || id.hasPrefix("stream:") {
+        if id.hasPrefix("iptv:") || id.hasPrefix("live:") || id.hasPrefix("channel:") || id.hasPrefix("stream:")
+            || id.hasPrefix("pp-live:") || id.contains("cdnlive") || id.contains("daddylive") || id.contains("streamed.pk") || id.contains("nuvio_sport") {
             return true
         }
-        let name = meta.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var name = meta.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while let first = name.first, !first.isLetter && !first.isNumber && first != "[" && first != "(" {
+            name.removeFirst()
+            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         if name.hasPrefix("now:") || name.hasPrefix("live:") || name.hasPrefix("[live]") || name.hasPrefix("(live)") {
             return true
         }
         // Only the resource path is a live hint. Hostnames, tokens and fragments are not.
         if let path = url?.path.lowercased() {
-            if path.contains("/live/") || path.contains("/iptv/") || path.contains("live.m3u8") {
+            if path.contains("/live/") || path.contains("/iptv/") || path.contains("live.m3u8") || path.contains("cdnlive") {
                 return true
             }
         }
@@ -1510,6 +1542,7 @@ class PlayerViewModel: ObservableObject {
         self.skipSegmentCountdown = nil
         self.autoHiddenSkipIntervalId = nil
         self.dismissedSkipIntervalIds = []
+        self.autoSkippedIntervalIds = []
         self.skipSegmentAutoHideDeadline = nil
         self.showNextEpisodeCard = false
         self.nextEpisodeCountdown = nil
@@ -2050,6 +2083,24 @@ class PlayerViewModel: ObservableObject {
         }
     }
 
+    func shouldAutoSkip(interval: SkipInterval) -> Bool {
+        guard watchPartyPlayerBridge == nil,
+              !isScrubbing,
+              !isHoldingSeek else {
+            return false
+        }
+        if interval.isIntro && autoSkipIntroEnabled {
+            return true
+        }
+        if interval.isRecap && autoSkipRecapEnabled {
+            return true
+        }
+        if interval.isEnding && autoSkipOutroEnabled {
+            return true
+        }
+        return false
+    }
+
     private func updateSkipIntervalState() {
         if !didRefreshIntroDBForKnownDuration,
            time.duration > 0,
@@ -2110,6 +2161,7 @@ class PlayerViewModel: ObservableObject {
         for segment in skipIntervals {
             if current < max(segment.startTime - 0.35, 0) {
                 dismissedSkipIntervalIds.remove(segment.id)
+                autoSkippedIntervalIds.remove(segment.id)
                 if autoHiddenSkipIntervalId == segment.id {
                     autoHiddenSkipIntervalId = nil
                 }
@@ -2124,6 +2176,13 @@ class PlayerViewModel: ObservableObject {
             if activeSkipInterval != nil { activeSkipInterval = nil }
             if skipSegmentCountdown != nil { skipSegmentCountdown = nil }
             skipSegmentAutoHideDeadline = nil
+            return
+        }
+
+        if shouldAutoSkip(interval: interval) &&
+            !autoSkippedIntervalIds.contains(interval.id) &&
+            !dismissedSkipIntervalIds.contains(interval.id) {
+            skipInterval(interval)
             return
         }
 
@@ -2960,6 +3019,22 @@ class PlayerViewModel: ObservableObject {
         tick(engineOverride: controller)
     }
 
+    static func scenePlaybackPollTransition(
+        from previous: PlayerStatus,
+        to latest: PlayerStatus,
+        pauseIntentPending: Bool,
+        pauseAlreadyNotified: Bool,
+        isVerifiedPlaying: Bool
+    ) -> ScenePlaybackPollTransition {
+        if previous == .playing, latest == .paused {
+            return pauseAlreadyNotified ? .none : .paused
+        }
+        if latest == .playing, previous != .playing, !pauseIntentPending, isVerifiedPlaying {
+            return .resumed
+        }
+        return .none
+    }
+
     private func currentLoadPresentationIsConfirmed(
         engineKind: PlayerEngineKind,
         generation: UInt64
@@ -3332,6 +3407,13 @@ class PlayerViewModel: ObservableObject {
             && (engineStatus == .paused || isAwaitingCurrentLoadDispatch || isAwaitingAetherPresentation))
             ? .buffering
             : engineStatus
+        let scenePollTransition = Self.scenePlaybackPollTransition(
+            from: previousStatus,
+            to: latestStatus,
+            pauseIntentPending: scenePauseIntentPending,
+            pauseAlreadyNotified: scenePauseAlreadyNotified,
+            isVerifiedPlaying: c.isPlayerPlaying && !c.isPlayerLoading && !c.isPlayerEnded && !c.isAtEndOfFile
+        )
         if latestStatus == .playing {
             cancelPauseOverlaySchedule()
             showPauseOverlay = false
@@ -3346,6 +3428,26 @@ class PlayerViewModel: ObservableObject {
                 isTimelineFocused = true
                 schedulePauseOverlay()
             }
+        }
+        if showScenePanel {
+            switch scenePollTransition {
+            case .paused:
+                sceneCoordinator.handlePlaybackPaused()
+            case .resumed:
+                sceneCoordinator.handlePlaybackResumed()
+            case .none:
+                break
+            }
+        }
+        switch latestStatus {
+        case .paused:
+            scenePauseIntentPending = false
+            scenePauseAlreadyNotified = false
+        case .playing:
+            if !scenePauseIntentPending { scenePauseAlreadyNotified = false }
+        case .idle, .buffering, .ended, .error(_):
+            scenePauseIntentPending = false
+            scenePauseAlreadyNotified = false
         }
 
         updatePlaybackDebugHUD(from: c)
@@ -3542,6 +3644,9 @@ class PlayerViewModel: ObservableObject {
         }
         recordWatchPartyTransportIntent()
         if routeWatchPartyControl(status == .ended ? .seekAndPlay(0) : .play) { return }
+        let shouldNotifySceneResume = showScenePanel && status == .paused
+        scenePauseIntentPending = false
+        scenePauseAlreadyNotified = false
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] play() called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         if status == .ended {
             if isTrackablePlayback, let activeMeta {
@@ -3565,7 +3670,7 @@ class PlayerViewModel: ObservableObject {
         if showControls {
             scheduleControlsHide()
         }
-        if showScenePanel {
+        if shouldNotifySceneResume {
             sceneCoordinator.handlePlaybackResumed()
         }
     }
@@ -3595,19 +3700,26 @@ class PlayerViewModel: ObservableObject {
             watchPartyControls?.setSuspended(true)
         } else if routeWatchPartyControl(.pause) { return }
         if !forBackground { recordWatchPartyTransportIntent() }
+        let shouldNotifyScenePause = !forBackground && showScenePanel && status == .playing
+        scenePauseIntentPending = true
+        // The explicit or lifecycle path owns this pause edge; the polling observer must not duplicate it.
+        scenePauseAlreadyNotified = shouldNotifyScenePause || (forBackground && showScenePanel)
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] pause(forBackground=\(forBackground)) called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         cancelControlsHideTimer()
         engine.pausePlayback()
         status = .paused
         saveProgress(force: true, eventAction: .pause)
         cancelPauseOverlaySchedule()
-        guard !forBackground else { return }
+        guard !forBackground else {
+            if showScenePanel { sceneCoordinator.handlePlaybackPaused(captureFrame: false) }
+            return
+        }
         showPauseOverlay = false
         // Show progress bar and transport controls when paused
         showControls = true
         isTimelineFocused = true
         schedulePauseOverlay()
-        if showScenePanel {
+        if shouldNotifyScenePause {
             sceneCoordinator.handlePlaybackPaused()
         }
     }
@@ -3809,18 +3921,24 @@ class PlayerViewModel: ObservableObject {
             if let paused {
                 let wasPlaying = engine.isTransportPlaying
                 if paused {
+                    let shouldNotifyScenePause = self.showScenePanel && self.status == .playing
+                    self.scenePauseIntentPending = true
+                    self.scenePauseAlreadyNotified = shouldNotifyScenePause
                     engine.pausePlayback()
                     self.status = .paused
                     if wasPlaying { self.saveProgress(force: true, eventAction: .pause) }
                     self.cancelPauseOverlaySchedule()
-                    if self.showScenePanel { self.sceneCoordinator.handlePlaybackPaused() }
+                    if shouldNotifyScenePause { self.sceneCoordinator.handlePlaybackPaused() }
                 } else {
+                    let shouldNotifySceneResume = self.showScenePanel && self.status == .paused
+                    self.scenePauseIntentPending = false
+                    self.scenePauseAlreadyNotified = false
                     engine.playPlayback()
                     self.status = .playing
                     if !wasPlaying { self.recordPlaybackResumeIfEligible() }
                     self.cancelPauseOverlaySchedule()
                     self.showPauseOverlay = false
-                    if self.showScenePanel { self.sceneCoordinator.handlePlaybackResumed() }
+                    if shouldNotifySceneResume { self.sceneCoordinator.handlePlaybackResumed() }
                 }
             }
             return engine.currentSpeed
@@ -4141,7 +4259,7 @@ class PlayerViewModel: ObservableObject {
             ? min(max(seconds, 0), max(duration - 0.25, 0))
             : max(seconds, 0)
         let prevCurrent = time.current
-        print("[SeekWatchdog][PlayerVM] 👆 User seek to \(String(format: "%.3f", seconds))s (target: \(String(format: "%.3f", target))s, current: \(String(format: "%.3f", time.current))s, duration: \(String(format: "%.3f", duration))s)")
+        seekWatchdogLog("[SeekWatchdog][PlayerVM] 👆 User seek to \(String(format: "%.3f", seconds))s (target: \(String(format: "%.3f", target))s, current: \(String(format: "%.3f", time.current))s, duration: \(String(format: "%.3f", duration))s)")
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] seek(to: \(seconds)) called: target=\(target), prevCurrent=\(time.current), duration=\(duration)")
         engine.seekToMs(Int64(target * 1000))
         recordCommittedSeek(to: target, previous: prevCurrent, duration: duration)
@@ -4217,11 +4335,18 @@ class PlayerViewModel: ObservableObject {
 
     func skipActiveInterval() {
         guard let interval = activeSkipInterval else { return }
+        skipInterval(interval)
+    }
+
+    func skipInterval(_ interval: SkipInterval) {
+        autoSkippedIntervalIds.insert(interval.id)
         dismissedSkipIntervalIds.insert(interval.id)
         autoHiddenSkipIntervalId = interval.id
         skipSegmentCountdown = nil
         skipSegmentAutoHideDeadline = nil
-        activeSkipInterval = nil
+        if activeSkipInterval?.id == interval.id {
+            activeSkipInterval = nil
+        }
         if interval.isEnding {
             postPlayController.showImmediately()
         }
@@ -4231,10 +4356,14 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func handleRewind(from prevCurrent: Double, to target: Double) {
+        if target <= 1.0 {
+            autoSkippedIntervalIds.removeAll()
+        }
         // Reset auto-hidden or dismissed skip intervals only when rewinding before their start
         for segment in skipIntervals {
             if target < max(segment.startTime - 0.35, 0) {
                 dismissedSkipIntervalIds.remove(segment.id)
+                autoSkippedIntervalIds.remove(segment.id)
                 if autoHiddenSkipIntervalId == segment.id {
                     autoHiddenSkipIntervalId = nil
                 }
@@ -6445,14 +6574,19 @@ class PlayerViewModel: ObservableObject {
     }
 
     private(set) lazy var sceneCoordinator: SceneCoordinator = {
-        let frameProvider = DynamicPlayerSceneFrameProvider(
-            activeEngineKindProvider: { [weak self] in self?.activeEngineKind ?? .aether },
-            aetherControllerProvider: { [weak self] in self?.aetherController }
-        )
-        let coordinator = SceneCoordinator(
-            frameProvider: frameProvider,
-            audioTapBroker: sceneAudioTapBroker
-        )
+        let coordinator: SceneCoordinator
+        if let suppliedSceneCoordinator {
+            coordinator = suppliedSceneCoordinator
+        } else {
+            let frameProvider = DynamicPlayerSceneFrameProvider(
+                activeEngineKindProvider: { [weak self] in self?.activeEngineKind ?? .aether },
+                aetherControllerProvider: { [weak self] in self?.aetherController }
+            )
+            coordinator = SceneCoordinator(
+                frameProvider: frameProvider,
+                audioTapBroker: sceneAudioTapBroker
+            )
+        }
         coordinator.setPlaybackProviders(
             isPlaying: { [weak self] in self?.status == .playing },
             sourceTime: { [weak self] in self?.time.current ?? 0 },
@@ -6948,12 +7082,26 @@ class PlayerViewModel: ObservableObject {
             print("[ContinueWatching][Player] saveProgress skipped: sessionCoordinator.isProgressSaveSuspended=true")
             return
         }
+        let playbackProfileID: String?
+        if let tracker = sessionCoordinator.playbackCompletionTracker {
+            playbackProfileID = tracker.profileID
+        } else {
+            playbackProfileID = WatchedStore.activeProfileId
+        }
+        guard Self.isCurrentPlaybackProfile(playbackProfileID) else { return }
+
         let checkpointTime = explicitSeekProgressCheckpoint.flatMap { checkpoint in
             Date().timeIntervalSince(checkpoint.createdAt) < Self.explicitSeekSettleWindow
                 ? checkpoint.time
                 : nil
         }
         let progressTime = checkpointTime ?? lastStablePlaybackTime ?? time
+        let store = ProfileSettings.current
+        let usesRemoteProgress = usesTraktProgress
+        let shouldSaveNuvioSyncProgress = RemoteTrackingState.shouldSaveNuvioSyncPlayback(
+            usesRemoteProgress: usesRemoteProgress,
+            in: store
+        )
         if isPeriodicHeartbeat, !force {
             if let lastSavedProgressPosition,
                abs(progressTime.current - lastSavedProgressPosition) < 2.0 {
@@ -6963,7 +7111,7 @@ class PlayerViewModel: ObservableObject {
         // Nuvio Sync retains the 10-second accidental-playback safeguard. A
         // Trakt start scrobble is the source of its Continue Watching row, so
         // send it once playback has genuinely begun instead of waiting 10+ s.
-        let minimumProgressSeconds: Double = (usesTraktProgress || hasActiveScrobbleServices) ? 1 : WatchProgressLedger.minimumTrackableSeconds
+        let minimumProgressSeconds: Double = (usesRemoteProgress || hasActiveScrobbleServices) ? 1 : WatchProgressLedger.minimumTrackableSeconds
         guard let activeMeta,
               let activeStreamURL,
               progressTime.current.isFinite,
@@ -6983,7 +7131,9 @@ class PlayerViewModel: ObservableObject {
         }
 
         let epString = resolvedEpisodeNumbers.map { "S\($0.season)E\($0.episode)" } ?? "movie"
-        print("[ContinueWatching][Player] saveProgress executing: meta=\(activeMeta.id) (\(activeMeta.name)), ep=\(epString), pos=\(progressTime.current)/\(progressTime.duration) (\(String(format: "%.1f", (progressTime.current / progressTime.duration) * 100))%), force=\(force), heartbeat=\(isPeriodicHeartbeat), usesTraktProgress=\(usesTraktProgress)")
+        #if DEBUG
+        print("[ContinueWatching][Player] saveProgress executing: meta=\(activeMeta.id) (\(activeMeta.name)), ep=\(epString), pos=\(progressTime.current)/\(progressTime.duration) (\(String(format: "%.1f", (progressTime.current / progressTime.duration) * 100))%), force=\(force), heartbeat=\(isPeriodicHeartbeat), usesTraktProgress=\(usesRemoteProgress)")
+        #endif
 
         if !hasClearedDismissalsForCurrentPlaybackSession {
             hasClearedDismissalsForCurrentPlaybackSession = true
@@ -6991,7 +7141,9 @@ class PlayerViewModel: ObservableObject {
         }
 
         if shouldSaveNextUpProgress(at: progressTime), let nextEpisode {
+            #if DEBUG
             print("[ContinueWatching][Player] shouldSaveNextUpProgress triggered for nextEpisode: S\(nextEpisode.season)E\(nextEpisode.episode)")
+            #endif
             markWatchedIfNeeded()
             LastPlaybackStreamStore.remove(
                 metaId: activeMeta.id,
@@ -6999,7 +7151,7 @@ class PlayerViewModel: ObservableObject {
                 episode: resolvedEpisodeNumbers?.episode,
                 profileId: WatchedStore.activeProfileId
             )
-            if !usesTraktProgress {
+            if shouldSaveNuvioSyncProgress {
                 // The card is up because this episode reached its ending, so
                 // retire it in the ledger before suggesting the next one.
                 ContinueWatchingStore.markPlaybackCompleted(
@@ -7026,7 +7178,9 @@ class PlayerViewModel: ObservableObject {
         let season = resolvedEpisodeNumbers?.season
         let episode = resolvedEpisodeNumbers?.episode
         let completesPlayback = shouldMarkAsWatched(at: progressTime)
+        #if DEBUG
         print("[ContinueWatching][Player] completesPlayback=\(completesPlayback) (ep=\(epString))")
+        #endif
         if !completesPlayback && !usesWatchPartySharedSource {
             LastPlaybackStreamStore.save(
                 metaId: activeMeta.id,
@@ -7044,7 +7198,52 @@ class PlayerViewModel: ObservableObject {
                 profileId: WatchedStore.activeProfileId
             )
         }
-        if usesTraktProgress {
+        if shouldSaveNuvioSyncProgress {
+            if completesPlayback {
+                // Record completion, not the raw position. An ending marker fires
+                // during the credits — well before the 90% the ledger needs to call
+                // an episode finished — so saving the literal position left the row
+                // as resume progress ("8m left") that could never seed the following
+                // episode, while the title was simultaneously marked watched.
+                #if DEBUG
+                print("[ContinueWatching][Player] completing playback -> ContinueWatchingStore.markPlaybackCompleted (meta: \(activeMeta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"))")
+                #endif
+                ContinueWatchingStore.markPlaybackCompleted(
+                    meta: activeMeta,
+                    duration: progressTime.duration,
+                    season: season,
+                    episode: episode
+                )
+                if let nextEpisode {
+                    #if DEBUG
+                    print("[ContinueWatching][Player] saving Up Next card for nextEpisode: S\(nextEpisode.season)E\(nextEpisode.episode)")
+                    #endif
+                    ContinueWatchingStore.saveUpNext(
+                        meta: activeMeta,
+                        duration: max(progressTime.duration, 120),
+                        season: nextEpisode.season,
+                        episode: nextEpisode.episode,
+                        released: nextEpisode.released,
+                        seedSeason: season
+                    )
+                }
+            } else {
+                #if DEBUG
+                print("[ContinueWatching][Player] saving active progress -> ContinueWatchingStore.save (meta: \(activeMeta.id), pos: \(progressTime.current)/\(progressTime.duration), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"))")
+                #endif
+                ContinueWatchingStore.save(
+                    meta: activeMeta,
+                    streamUrl: activeStreamURL,
+                    position: progressTime.current,
+                    duration: progressTime.duration,
+                    season: season,
+                    episode: episode,
+                    episodeId: currentEpisodeVideo?.id
+                )
+            }
+        }
+
+        if usesRemoteProgress {
             if completesPlayback {
                 markWatchedIfNeeded()
             } else {
@@ -7057,51 +7256,15 @@ class PlayerViewModel: ObservableObject {
                     isPeriodicHeartbeat: isPeriodicHeartbeat
                 )
             }
-        } else if completesPlayback {
-            // Record completion, not the raw position. An ending marker fires
-            // during the credits — well before the 90% the ledger needs to call
-            // an episode finished — so saving the literal position left the row
-            // as resume progress ("8m left") that could never seed the next
-            // episode, while the title was simultaneously marked watched.
-            print("[ContinueWatching][Player] completing playback -> ContinueWatchingStore.markPlaybackCompleted (meta: \(activeMeta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"))")
-            ContinueWatchingStore.markPlaybackCompleted(
+        } else if !completesPlayback && hasActiveScrobbleServices {
+            print("[ContinueWatching][Player] routing background scrobble to active services (NuvioSync resume)")
+            reportTraktProgress(
                 meta: activeMeta,
-                duration: progressTime.duration,
-                season: season,
-                episode: episode
+                playbackTime: progressTime,
+                action: eventAction,
+                force: force,
+                isPeriodicHeartbeat: isPeriodicHeartbeat
             )
-            if let nextEpisode {
-                print("[ContinueWatching][Player] saving Up Next card for nextEpisode: S\(nextEpisode.season)E\(nextEpisode.episode)")
-                ContinueWatchingStore.saveUpNext(
-                    meta: activeMeta,
-                    duration: max(progressTime.duration, 120),
-                    season: nextEpisode.season,
-                    episode: nextEpisode.episode,
-                    released: nextEpisode.released,
-                    seedSeason: season
-                )
-            }
-        } else {
-            print("[ContinueWatching][Player] saving active progress -> ContinueWatchingStore.save (meta: \(activeMeta.id), pos: \(progressTime.current)/\(progressTime.duration), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"))")
-            ContinueWatchingStore.save(
-                meta: activeMeta,
-                streamUrl: activeStreamURL,
-                position: progressTime.current,
-                duration: progressTime.duration,
-                season: season,
-                episode: episode,
-                episodeId: currentEpisodeVideo?.id
-            )
-            if hasActiveScrobbleServices {
-                print("[ContinueWatching][Player] routing background scrobble to active services (NuvioSync resume)")
-                reportTraktProgress(
-                    meta: activeMeta,
-                    playbackTime: progressTime,
-                    action: eventAction,
-                    force: force,
-                    isPeriodicHeartbeat: isPeriodicHeartbeat
-                )
-            }
         }
         lastSavedProgressPosition = progressTime.current
         lastProgressSave = Date()
@@ -7133,6 +7296,22 @@ class PlayerViewModel: ObservableObject {
         source: TraktWatchProgressSource
     ) -> Bool {
         !(wasRecorded && (source == .trakt || source == .wetrakr))
+    }
+
+    static func scrobbleReportPolicy(
+        action: TraktScrobbleAction?,
+        primarySource: TraktWatchProgressSource,
+        didStartTraktScrobble: Bool,
+        isPeriodicHeartbeat: Bool
+    ) -> (action: TraktScrobbleAction, isPeriodicHeartbeat: Bool) {
+        let effectiveHeartbeat = isPeriodicHeartbeat && action == nil && didStartTraktScrobble
+        let effectiveAction: TraktScrobbleAction
+        if (primarySource == .trakt || primarySource == .wetrakr), action == .stop {
+            effectiveAction = .pause
+        } else {
+            effectiveAction = action ?? .start
+        }
+        return (effectiveAction, effectiveHeartbeat)
     }
 
     /// Trailers use the movie's metadata for artwork and playback, but are not
@@ -7187,22 +7366,22 @@ class PlayerViewModel: ObservableObject {
         let playbackID = tracker?.completionID
         let episodeNumbers = resolvedEpisodeNumbers
 
+        TraktProgressService.recordLocalPlaybackForScrobbleSources(
+            meta: meta,
+            position: playbackTime.current,
+            duration: playbackTime.duration,
+            season: episodeNumbers?.season,
+            episode: episodeNumbers?.episode,
+            primarySource: primarySource,
+            scrobbleSources: activeSources,
+            notify: force && primarySource != .nuvioSync
+        )
+
         if activeSources == [.simkl],
            didStartTraktScrobble,
            action == nil,
            isPeriodicHeartbeat,
            !force {
-            if primarySource != .nuvioSync {
-                TraktProgressService.recordLocalPlayback(
-                    meta: meta,
-                    position: playbackTime.current,
-                    duration: playbackTime.duration,
-                    season: episodeNumbers?.season,
-                    episode: episodeNumbers?.episode,
-                    source: primarySource,
-                    notify: false
-                )
-            }
             return
         }
 
@@ -7211,26 +7390,14 @@ class PlayerViewModel: ObservableObject {
             return
         }
 
-        let scrobbleAction: TraktScrobbleAction
-        if (primarySource == .trakt || primarySource == .wetrakr), action == .stop {
-            scrobbleAction = .pause
-        } else {
-            scrobbleAction = action ?? (didStartTraktScrobble ? .pause : .start)
-        }
+        let reportPolicy = Self.scrobbleReportPolicy(
+            action: action,
+            primarySource: primarySource,
+            didStartTraktScrobble: didStartTraktScrobble,
+            isPeriodicHeartbeat: isPeriodicHeartbeat
+        )
         didStartTraktScrobble = true
         lastTraktProgressReport = now
-
-        if primarySource != .nuvioSync {
-            TraktProgressService.recordLocalPlayback(
-                meta: meta,
-                position: playbackTime.current,
-                duration: playbackTime.duration,
-                season: episodeNumbers?.season,
-                episode: episodeNumbers?.episode,
-                source: primarySource,
-                notify: force
-            )
-        }
 
         let expectedAccountID = tracker?.completionAccounts?[TraktWatchProgressSource.trakt.rawValue]
             ?? tracker?.completionAccounts?[primarySource.rawValue]
@@ -7247,13 +7414,13 @@ class PlayerViewModel: ObservableObject {
                 duration: playbackTime.duration,
                 season: episodeNumbers?.season,
                 episode: episodeNumbers?.episode,
-                action: scrobbleAction,
+                action: reportPolicy.action,
                 store: store,
                 sourceOverride: nil,
                 expectedAccountID: expectedAccountID,
                 playbackID: playbackID,
                 profileId: profileID,
-                isPeriodicHeartbeat: isPeriodicHeartbeat
+                isPeriodicHeartbeat: reportPolicy.isPeriodicHeartbeat
             )
         }
     }

@@ -46,81 +46,109 @@ extension PlayerView {
 
     @ViewBuilder
     var videoSurfaceLayer: some View {
-        // Main video surface (or top-right mini window during post-play recommendations)
-        if !viewModel.postPlayState.isTrailerPlaying &&
-            (!viewModel.postPlayState.isVisible || viewModel.postPlayState.canReturnToPlayer) {
-            ZStack {
-                Group {
-                    switch viewModel.activeEngineKind {
-                    case .aether:
-                        if let controller = viewModel.aetherController {
-                            AetherPlayerSurface(controller: controller)
-                        } else {
-                            Color.black
-                        }
-                    case .mpv:
+        // Keep MPV mounted through trailer/EOF states; hiding this layer must not
+        // tear down the still-live native surface.
+        let shouldShowSurface = !viewModel.postPlayState.isTrailerPlaying &&
+            (!viewModel.postPlayState.isVisible || viewModel.postPlayState.canReturnToPlayer)
+
+        if viewModel.activeEngineKind == .mpv {
+            GeometryReader { geometry in
+                let insets = geometry.safeAreaInsets
+                let viewportSize = CGSize(
+                    width: geometry.size.width + insets.leading + insets.trailing,
+                    height: geometry.size.height + insets.top + insets.bottom
+                )
+                let miniSize = CGSize(width: 580, height: 326)
+                videoSurfaceStack {
+                    StablePlayerSurfacePresentation(
+                        viewportSize: viewportSize,
+                        presentationSize: viewModel.postPlayState.isVisible ? miniSize : viewportSize
+                    ) {
                         MPVVideoSurface(controller: viewModel.playerController)
                     }
                 }
-
-                if viewModel.activeEngineKind == .aether,
-                   let aetherController = viewModel.aetherController {
-                    PlayerSubtitleOverlay(
-                        playback: aetherController.subtitleOverlayState,
-                        translation: aetherController.subtitleTranslationState,
-                        subtitleDelaySeconds: Double(viewModel.subtitleDelayMs) / 1000.0,
-                        videoNaturalSize: viewModel.videoNaturalSize,
-                        aspectMode: viewModel.aspectMode,
-                        style: viewModel.subtitleStyle
-                    )
-                    .offset(y: viewModel.showScenePanel ? -430 : 0)
-                    .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
-                } else {
-                    MPVSubtitleOverlay(
-                        translation: viewModel.playerController.subtitleTranslationState,
-                        videoNaturalSize: viewModel.videoNaturalSize,
-                        aspectMode: viewModel.aspectMode,
-                        style: viewModel.subtitleStyle
-                    )
-                    .offset(y: viewModel.showScenePanel ? -430 : 0)
-                    .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
-                }
-
-                if viewModel.postPlayState.isVisible && viewModel.postPlayState.canReturnToPlayer {
-                    miniPlayerReturnButton
-                }
             }
-            .frame(
-                width: viewModel.postPlayState.isVisible ? 580 : nil,
-                height: viewModel.postPlayState.isVisible ? 326 : nil
-            )
-            .clipShape(RoundedRectangle(cornerRadius: viewModel.postPlayState.isVisible ? 16 : 0))
-            .scaleEffect(viewModel.postPlayState.isVisible && postPlayFocus == .miniPlayer ? 1.05 : 1.0)
-            .animation(.easeOut(duration: 0.16), value: postPlayFocus)
-            .overlay {
-                if viewModel.postPlayState.isVisible {
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(
-                            postPlayFocus == .miniPlayer ? Color.white : Color.white.opacity(0.35),
-                            lineWidth: postPlayFocus == .miniPlayer ? 4 : 2
-                        )
-                        .shadow(
-                            color: postPlayFocus == .miniPlayer ? Color.white.opacity(0.6) : Color.clear,
-                            radius: 12
-                        )
-                }
-            }
-            .shadow(color: Color.black.opacity(viewModel.postPlayState.isVisible ? 0.6 : 0), radius: 16)
-            .frame(
-                maxWidth: .infinity,
-                maxHeight: .infinity,
-                alignment: viewModel.postPlayState.isVisible ? .topTrailing : .center
-            )
-            .padding(.top, viewModel.postPlayState.isVisible ? 50 : 0)
-            .padding(.trailing, viewModel.postPlayState.isVisible ? 60 : 0)
+            // Measure in the parent's safe area for every state, then include
+            // the insets in the stable native viewport and scale only its output.
             .zIndex(viewModel.postPlayState.isVisible ? 5 : 0)
-            .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
+            .opacity(shouldShowSurface ? 1 : 0)
+            .accessibilityHidden(!shouldShowSurface)
+            .allowsHitTesting(shouldShowSurface)
+        } else if shouldShowSurface {
+            videoSurfaceStack {
+                if let controller = viewModel.aetherController {
+                    AetherPlayerSurface(controller: controller)
+                } else {
+                    Color.black
+                }
+            }
         }
+    }
+
+    @ViewBuilder
+    private func videoSurfaceStack<Surface: View>(
+        @ViewBuilder surface: () -> Surface
+    ) -> some View {
+        ZStack {
+            surface()
+
+            if viewModel.activeEngineKind == .aether,
+               let aetherController = viewModel.aetherController {
+                PlayerSubtitleOverlay(
+                    playback: aetherController.subtitleOverlayState,
+                    translation: aetherController.subtitleTranslationState,
+                    subtitleDelaySeconds: Double(viewModel.subtitleDelayMs) / 1000.0,
+                    videoNaturalSize: viewModel.videoNaturalSize,
+                    aspectMode: viewModel.aspectMode,
+                    style: viewModel.subtitleStyle
+                )
+                .offset(y: viewModel.showScenePanel ? -430 : 0)
+                .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
+            } else {
+                MPVSubtitleOverlay(
+                    translation: viewModel.playerController.subtitleTranslationState,
+                    videoNaturalSize: viewModel.videoNaturalSize,
+                    aspectMode: viewModel.aspectMode,
+                    style: viewModel.subtitleStyle
+                )
+                .offset(y: viewModel.showScenePanel ? -430 : 0)
+                .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
+            }
+
+            if viewModel.postPlayState.isVisible && viewModel.postPlayState.canReturnToPlayer {
+                miniPlayerReturnButton
+            }
+        }
+        .frame(
+            width: viewModel.postPlayState.isVisible ? 580 : nil,
+            height: viewModel.postPlayState.isVisible ? 326 : nil
+        )
+        .clipShape(RoundedRectangle(cornerRadius: viewModel.postPlayState.isVisible ? 16 : 0))
+        .scaleEffect(viewModel.postPlayState.isVisible && postPlayFocus == .miniPlayer ? 1.05 : 1.0)
+        .animation(.easeOut(duration: 0.16), value: postPlayFocus)
+        .overlay {
+            if viewModel.postPlayState.isVisible {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(
+                        postPlayFocus == .miniPlayer ? Color.white : Color.white.opacity(0.35),
+                        lineWidth: postPlayFocus == .miniPlayer ? 4 : 2
+                    )
+                    .shadow(
+                        color: postPlayFocus == .miniPlayer ? Color.white.opacity(0.6) : Color.clear,
+                        radius: 12
+                    )
+            }
+        }
+        .shadow(color: Color.black.opacity(viewModel.postPlayState.isVisible ? 0.6 : 0), radius: 16)
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity,
+            alignment: viewModel.postPlayState.isVisible ? .topTrailing : .center
+        )
+        .padding(.top, viewModel.postPlayState.isVisible ? 50 : 0)
+        .padding(.trailing, viewModel.postPlayState.isVisible ? 60 : 0)
+        .zIndex(viewModel.postPlayState.isVisible ? 5 : 0)
+        .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
     }
 
     @ViewBuilder

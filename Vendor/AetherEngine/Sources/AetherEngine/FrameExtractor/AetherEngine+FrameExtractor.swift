@@ -10,6 +10,12 @@ extension AetherEngine {
         public let sourceTime: Double
         /// Immutable route, source format/profile, target, result reason, and per-frame metadata.
         public let diagnostics: String
+
+        public init(image: CGImage?, sourceTime: Double, diagnostics: String) {
+            self.image = image
+            self.sourceTime = sourceTime
+            self.diagnostics = diagnostics
+        }
     }
 }
 
@@ -106,6 +112,18 @@ extension AetherEngine {
         }
     }
 
+    /// Thread-safe playback-priority gate for an external scene-analysis extractor. It uses the same
+    /// weak session snapshot and starvation hysteresis as the engine's own still extractors.
+    /// A yield stays latched for this request, even if playback recovers during decoder teardown.
+    public func frameAnalysisYieldSignal() -> @Sendable () -> Bool {
+        let sourceShouldYield = sessionYieldSignal()
+        let observedYield = ProbeCancellation()
+        return {
+            if sourceShouldYield() { observedYield.cancel() }
+            return observedYield.isCancelled
+        }
+    }
+
     /// Captures the currently displayed video frame directly from the active playback pipeline.
     /// Operates directly on the decoded CVPixelBuffer in presentation memory.
     ///
@@ -188,7 +206,7 @@ extension AetherEngine {
             let itemSeconds = native.avPlayer.currentTime().seconds
             guard itemSeconds.isFinite else { return result(reason: "native-item-time-unavailable") }
             let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-            let shouldYield = sessionYieldSignal()
+            let shouldYield = frameAnalysisYieldSignal()
             guard !shouldYield() else { return result(reason: "playback-priority-yield") }
 
             let source = await BlockingWork.detached(priority: .userInitiated) { [session] in
@@ -242,8 +260,16 @@ extension AetherEngine {
                 requiredDolbyVisionReshaping: true)
             await extractor.shutdown()
             guard requestIsCurrent() else { return result(reason: "cancelled-or-superseded") }
+            let yieldedAfterDecode = shouldYield()
             guard let still else {
-                return result(reason: Task.isCancelled ? "cancelled" : "resident-dv-decode-failed-or-budget-expired",
+                let reason = Task.isCancelled
+                    ? "cancelled"
+                    : yieldedAfterDecode ? "playback-priority-yield" : "resident-dv-decode-failed-or-budget-expired"
+                return result(reason: reason,
+                              detail: "segment=\(source.segmentIndex) firstFrameOffset=\(String(format: "%.3f", firstFrameOffset))")
+            }
+            guard !yieldedAfterDecode else {
+                return result(reason: "playback-priority-yield",
                               detail: "segment=\(source.segmentIndex) firstFrameOffset=\(String(format: "%.3f", firstFrameOffset))")
             }
             return result(

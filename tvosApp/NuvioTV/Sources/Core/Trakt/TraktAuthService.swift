@@ -566,6 +566,19 @@ enum RemoteTrackingState {
         return store.bool(forKey: key)
     }
 
+    static func isNuvioSyncScrobbleEnabled(
+        in store: UserDefaults = ProfileSettings.current
+    ) -> Bool {
+        store.bool(forKey: SettingsKey.nuvioSyncScrobbleEnabled)
+    }
+
+    static func shouldSaveNuvioSyncPlayback(
+        usesRemoteProgress: Bool,
+        in store: UserDefaults = ProfileSettings.current
+    ) -> Bool {
+        !usesRemoteProgress || isNuvioSyncScrobbleEnabled(in: store)
+    }
+
     static func setScrobbleEnabled(
         _ enabled: Bool,
         for source: TraktWatchProgressSource,
@@ -1453,6 +1466,35 @@ struct TraktProgressService {
         }
     }
 
+    /// Retain the measured stream timeline for every provider receiving scrobbles.
+    /// Provider playback lists can otherwise reconstruct seconds from a different runtime.
+    static func recordLocalPlaybackForScrobbleSources(
+        meta: NuvioMeta,
+        position: Double,
+        duration: Double,
+        season: Int?,
+        episode: Int?,
+        primarySource: TraktWatchProgressSource,
+        scrobbleSources: [TraktWatchProgressSource],
+        notify: Bool = false
+    ) {
+        guard position.isFinite, duration.isFinite, position > 0, duration > 0 else { return }
+        let sources = TraktWatchProgressSource.allCases.filter {
+            $0 != .nuvioSync && ($0 == primarySource || scrobbleSources.contains($0))
+        }
+        for source in sources {
+            recordLocalPlayback(
+                meta: meta, position: position, duration: duration,
+                season: season, episode: episode, source: source, notify: false
+            )
+        }
+        if notify, !sources.isEmpty {
+            NotificationCenter.default.post(
+                name: TraktSettingsStore.continueWatchingChangedNotification, object: nil
+            )
+        }
+    }
+
     /// Drops a title from the optimistic layers that sit in front of the
     /// provider's list, so a card the user removed cannot be re-shown by a
     /// checkpoint or the snapshot of the last fetch while the row refreshes.
@@ -1470,8 +1512,41 @@ struct TraktProgressService {
         notify: Bool = false
     ) {
         print("[TraktProgressService] forgetLocalPlayback: meta=\(meta.id) S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), notify=\(notify)")
-        let profileId = ContinueWatchingStore.activeProfileId
-        let source = TraktSettingsStore.watchProgressSource
+        removeLocalPlayback(
+            meta: meta, season: season, episode: episode,
+            profileId: ContinueWatchingStore.activeProfileId,
+            source: TraktSettingsStore.watchProgressSource,
+            recordedNoLaterThan: cutoff, notify: notify
+        )
+    }
+
+    /// A durable watched mark retires all provider checkpoints for that playback,
+    /// including providers that were only background scrobble targets.
+    static func forgetLocalPlaybackForCompletion(
+        meta: NuvioMeta,
+        season: Int? = nil,
+        episode: Int? = nil,
+        profileId: String?,
+        recordedNoLaterThan cutoff: Date? = nil,
+        notify: Bool = false
+    ) {
+        removeLocalPlayback(
+            meta: meta, season: season, episode: episode, profileId: profileId,
+            source: nil, recordedNoLaterThan: cutoff,
+            notify: notify && ContinueWatchingStore.activeProfileId == profileId
+                && ProfileSettings.activeProfileID == profileId
+        )
+    }
+
+    private static func removeLocalPlayback(
+        meta: NuvioMeta,
+        season: Int?,
+        episode: Int?,
+        profileId: String?,
+        source: TraktWatchProgressSource?,
+        recordedNoLaterThan cutoff: Date?,
+        notify: Bool
+    ) {
         let matchesRemoval: (ContinueWatchingItem) -> Bool = { item in
             guard WatchedStore.sameContent(item.meta, meta) else { return false }
             if let cutoff, item.lastWatchedAt > cutoff { return false }
@@ -1483,18 +1558,19 @@ struct TraktProgressService {
         }
 
         let removingCheckpoints = localPlaybackCheckpoints.contains {
-            $0.profileId == profileId && $0.source == source && matchesRemoval($0.item)
+            $0.profileId == profileId && (source == nil || $0.source == source) && matchesRemoval($0.item)
         }
         if removingCheckpoints {
             localPlaybackCheckpoints.removeAll {
-                $0.profileId == profileId && $0.source == source && matchesRemoval($0.item)
+                $0.profileId == profileId && (source == nil || $0.source == source) && matchesRemoval($0.item)
             }
         }
-        let removedFromSnapshot = removeFromContinueWatchingSnapshot(
-            profileId: profileId,
-            source: source,
-            where: matchesRemoval
-        )
+        var removedFromSnapshot = false
+        for target in source.map({ [$0] }) ?? TraktWatchProgressSource.allCases {
+            if removeFromContinueWatchingSnapshot(profileId: profileId, source: target, where: matchesRemoval) {
+                removedFromSnapshot = true
+            }
+        }
 
         // The caller's own store notification has already been posted by now, so
         // a view that reads this layer needs its own signal to look again.
