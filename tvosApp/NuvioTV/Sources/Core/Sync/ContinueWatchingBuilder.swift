@@ -1,5 +1,12 @@
 import Foundation
 
+@inline(__always)
+private func cwLog(_ message: @autoclosure () -> String) {
+    #if DEBUG
+    print(message())
+    #endif
+}
+
 /// Builds the Continue Watching row from the raw `WatchProgressLedger`.
 ///
 /// Metadata resolution lives here rather than in the sync pull, and it is
@@ -221,12 +228,12 @@ enum ContinueWatchingBuilder {
         guard !Task.isCancelled, isCurrentGeneration(expectedGeneration) else { return }
         let rebuildStarted = TVHomeDebugTrace.now()
         TVHomeDebugTrace.log("cw.builder.rebuild.begin reason=\(reason)")
-        print("[ContinueWatchingBuilder] rebuild started: reason=\(reason)")
+        cwLog("[ContinueWatchingBuilder] rebuild started: reason=\(reason)")
         // With Trakt or Simkl driving the row, Home renders that provider's list
         // and this derived one is never shown. Keep syncing rows into the ledger,
         // but do not spend metadata requests rendering something invisible.
         guard !RemoteTrackingState.isProgressSourceAuthenticated else {
-            print("[ContinueWatchingBuilder] rebuild: skipped because remote progress source is authenticated")
+            cwLog("[ContinueWatchingBuilder] rebuild: skipped because remote progress source is authenticated")
             await MainActor.run {
                 diagnostic = "\(reason): skipped, remote progress source active"
             }
@@ -247,9 +254,9 @@ enum ContinueWatchingBuilder {
                 watchedHistorySeeds()
             )
             : []
-        print("[ContinueWatchingBuilder] rebuild: profile=\(profileId ?? "nil"), ledger records=\(ledgerSnapshot.count), candidates=\(candidates.count) (\(candidates.map(\.progressKey))), seeds=\(seeds.count) (\(seeds.map(\.progressKey)))")
+        cwLog("[ContinueWatchingBuilder] rebuild: profile=\(profileId ?? "nil"), ledger records=\(ledgerSnapshot.count), candidates=\(candidates.count) (\(candidates.map(\.progressKey))), seeds=\(seeds.count) (\(seeds.map(\.progressKey)))")
         guard !candidates.isEmpty || !seeds.isEmpty else {
-            print("[ContinueWatchingBuilder] rebuild: ledger empty -> setting empty CW store")
+            cwLog("[ContinueWatchingBuilder] rebuild: ledger empty -> setting empty CW store")
             guard !Task.isCancelled, isCurrentGeneration(expectedGeneration), profileId == WatchProgressLedger.activeProfileId else { return }
             await MainActor.run {
                 guard isCurrentGeneration(expectedGeneration), profileId == WatchProgressLedger.activeProfileId else { return }
@@ -267,7 +274,7 @@ enum ContinueWatchingBuilder {
 
         let currentPlan = planEntries(candidates: candidates, seeds: seeds)
         let existingItems = ContinueWatchingStore.items()
-        print("[ContinueWatchingBuilder] rebuild: plan count=\(currentPlan.count)")
+        cwLog("[ContinueWatchingBuilder] rebuild: plan count=\(currentPlan.count)")
 
         let isUnchanged = await MainActor.run {
             materializedProfileId == profileId
@@ -276,7 +283,7 @@ enum ContinueWatchingBuilder {
                 && existingItems == persistedFirstPageItems
         }
         if isUnchanged {
-            print("[ContinueWatchingBuilder] rebuild: plan and items unchanged, skipping re-materialization")
+            cwLog("[ContinueWatchingBuilder] rebuild: plan and items unchanged, skipping re-materialization")
             return
         }
 
@@ -290,7 +297,7 @@ enum ContinueWatchingBuilder {
             profileId: profileId
         )
         guard !Task.isCancelled, isCurrentGeneration(expectedGeneration), profileId == WatchProgressLedger.activeProfileId else {
-            print("[ContinueWatchingBuilder] rebuild: generation outdated or profile changed -> cancelling this pass")
+            cwLog("[ContinueWatchingBuilder] rebuild: generation outdated or profile changed -> cancelling this pass")
             return
         }
 
@@ -300,7 +307,7 @@ enum ContinueWatchingBuilder {
         // replace the freshly saved card with an empty page. Leave the newer
         // store untouched and derive it again from the completed ledger row.
         guard rebuildInputIsCurrent(ledgerSnapshot, profileId: profileId) else {
-            print("[ContinueWatchingBuilder] rebuild: ledger snapshot changed during materializeSlice! Retrying...")
+            cwLog("[ContinueWatchingBuilder] rebuild: ledger snapshot changed during materializeSlice! Retrying...")
             await MainActor.run {
                 diagnostic = "\(reason): ledger changed while building, retrying"
             }
@@ -308,7 +315,7 @@ enum ContinueWatchingBuilder {
             return
         }
 
-        print("[ContinueWatchingBuilder] rebuild: materialization finished, updating ContinueWatchingStore with \(page.items.count) items (failed lookups: \(page.failedLookups))")
+        cwLog("[ContinueWatchingBuilder] rebuild: materialization finished, updating ContinueWatchingStore with \(page.items.count) items (failed lookups: \(page.failedLookups))")
 
         let diagText = "\(reason): ledger \(WatchProgressLedger.records().count), "
             + "candidates \(candidates.count), seeds \(seeds.count), plan \(currentPlan.count), "
@@ -770,7 +777,7 @@ enum ContinueWatchingBuilder {
                         ? "builder task cancelled before lookup"
                         : "rebuild generation or profile changed before lookup"
                     for request in requests[index...] {
-                        print("[ContinueWatchingBuilder] metadata lookup cancelled: id=\(request.id), type=\(request.type), reason=\(reason)")
+                        cwLog("[ContinueWatchingBuilder] metadata lookup cancelled: id=\(request.id), type=\(request.type), reason=\(reason)")
                     }
                     index = requests.count
                     return
@@ -796,7 +803,7 @@ enum ContinueWatchingBuilder {
                 if let meta { resolved[id] = meta }
                 if let failure {
                     let outcome = wasCancelled ? "cancelled" : "failed"
-                    print("[ContinueWatchingBuilder] metadata lookup \(outcome): id=\(id), type=\(type), reason=\(failure)")
+                    cwLog("[ContinueWatchingBuilder] metadata lookup \(outcome): id=\(id), type=\(type), reason=\(failure)")
                 }
                 if !Task.isCancelled && isCurrentGeneration(currentGeneration) && profileId == WatchProgressLedger.activeProfileId {
                     addNext()
@@ -877,7 +884,7 @@ enum ContinueWatchingBuilder {
                 newestByIdentity[$0].map { $0 >= item.lastWatchedAt } ?? false
             }
             if isSuperseded {
-                print("[ContinueWatchingBuilder] retainingUnwatched: filtered out \(item.meta.id) S\(item.season.map(String.init) ?? "nil")E\(item.episode.map(String.init) ?? "nil") (item lastWatchedAt=\(item.lastWatchedAt) <= watchedAt)")
+                cwLog("[ContinueWatchingBuilder] retainingUnwatched: filtered out \(item.meta.id) S\(item.season.map(String.init) ?? "nil")E\(item.episode.map(String.init) ?? "nil") (item lastWatchedAt=\(item.lastWatchedAt) <= watchedAt)")
             }
             return !isSuperseded
         }
@@ -946,7 +953,7 @@ enum ContinueWatchingBuilder {
             ]
             if let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
                let diagnostic = String(data: data, encoding: .utf8) {
-                print("[ContinueWatchingBuilder] watched fixture inspection: \(diagnostic)")
+                cwLog("[ContinueWatchingBuilder] watched fixture inspection: \(diagnostic)")
             }
         }
         let watched = visibleItems.filter { !isKnownWatchedHistoryFixture($0) }

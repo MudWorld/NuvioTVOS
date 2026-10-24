@@ -42,6 +42,26 @@ struct SkipInterval: Identifiable, Equatable {
         }
     }
 
+    /// Opening / intro / OP
+    var isIntro: Bool {
+        switch type.lowercased() {
+        case "intro", "op", "opening", "mixed-op":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Recap sequence
+    var isRecap: Bool {
+        switch type.lowercased() {
+        case "recap":
+            return true
+        default:
+            return false
+        }
+    }
+
     var label: String {
         switch type.lowercased() {
         case "intro", "op", "opening", "mixed-op":

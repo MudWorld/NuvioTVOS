@@ -90,9 +90,11 @@ final class PlaybackAudioTapBroker {
             for await buffer in engineStream {
                 guard !Task.isCancelled else { break }
                 bufferCount += 1
+                #if DEBUG
                 if bufferCount == 1 || bufferCount % 30 == 0 {
                     print("[AudioTapBroker] Yielded buffer #\(bufferCount): pts=\(String(format: "%.2f", buffer.sourceTime))s, frames=\(buffer.buffer.frameLength), discontinuity=\(buffer.discontinuity)")
                 }
+                #endif
                 await self?.broadcast(buffer: buffer)
             }
             print("[AudioTapBroker] Engine tap stream ended after \(bufferCount) buffer(s)")

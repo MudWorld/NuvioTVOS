@@ -75,10 +75,11 @@ final class ICloudSettingsSyncManager: ObservableObject {
         })
 
         // Outbound local changes
+        // UserDefaults writes can hold a store lock; this Task hops to MainActor without blocking the posting thread.
         observers.append(center.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.isEnabled, !self.isApplyingRemote else { return }

@@ -1861,7 +1861,7 @@ actor PlaybackStreamCacheServer {
         let startChunkIdx = diskCache.chunkIndex(forByteOffset: requestedStart)
         let endChunkIdx = diskCache.chunkIndex(forByteOffset: requestedEnd)
         let isFullyOnDisk = (startChunkIdx...endChunkIdx).allSatisfy { knownDiskChunks.contains($0) }
-        diskCacheLog.info("[DiskCacheWatchdog] 📥 Range: bytes=\(requestedStart)-\(requestedEnd) (\(responseLength)B, chunks [\(startChunkIdx)..\(endChunkIdx)], allOnDisk: \(isFullyOnDisk))")
+        diskCacheLog.debug("[DiskCacheWatchdog] 📥 Range: bytes=\(requestedStart)-\(requestedEnd) (\(responseLength)B, chunks [\(startChunkIdx)..\(endChunkIdx)], allOnDisk: \(isFullyOnDisk))")
 
         var headers = isRangeRequest ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n"
         headers += "Content-Type: video/mp4\r\n"
@@ -1894,7 +1894,7 @@ actor PlaybackStreamCacheServer {
         if method.uppercased() == "HEAD" { return false }
         if let prefetchedTailData {
             try await NetworkIO.send(connection, prefetchedTailData)
-            diskCacheLog.info("[DiskCacheWatchdog] 📤 Served tail range from complete cache or bounded span (\(prefetchedTailData.count)B)")
+            diskCacheLog.debug("[DiskCacheWatchdog] 📤 Served tail range from complete cache or bounded span (\(prefetchedTailData.count)B)")
             return false
         }
 
@@ -1939,7 +1939,7 @@ actor PlaybackStreamCacheServer {
             if !firstChunkDelivered {
                 firstChunkDelivered = true
                 let ttfbMs = (CFAbsoluteTimeGetCurrent() - requestStartTime) * 1000
-                diskCacheLog.info("[DiskCacheWatchdog] ⚡ TTFB: \(String(format: "%.1f", ttfbMs))ms for chunk [\(chunkIdx)] (origin: \(fetchOrigin), chunkFetch: \(String(format: "%.1f", chunkElapsedMs))ms)")
+                diskCacheLog.debug("[DiskCacheWatchdog] ⚡ TTFB: \(String(format: "%.1f", ttfbMs))ms for chunk [\(chunkIdx)] (origin: \(fetchOrigin), chunkFetch: \(String(format: "%.1f", chunkElapsedMs))ms)")
             }
             currentOffset += Int64(bytesToSend.count)
             if tracksPlaybackAnchor {
@@ -1949,7 +1949,7 @@ actor PlaybackStreamCacheServer {
 
         let totalRequestElapsedMs = (CFAbsoluteTimeGetCurrent() - requestStartTime) * 1000
         let totalSentBytes = currentOffset - requestedStart
-        diskCacheLog.info("[DiskCacheWatchdog] 📤 Streamed \(totalSentBytes)/\(responseLength)B in \(String(format: "%.1f", totalRequestElapsedMs))ms (chunks [\(startChunkIdx)..\(self.diskCache.chunkIndex(forByteOffset: max(requestedStart, currentOffset - 1)))])")
+        diskCacheLog.debug("[DiskCacheWatchdog] 📤 Streamed \(totalSentBytes)/\(responseLength)B in \(String(format: "%.1f", totalRequestElapsedMs))ms (chunks [\(startChunkIdx)..\(self.diskCache.chunkIndex(forByteOffset: max(requestedStart, currentOffset - 1)))])")
 
         return false
     }

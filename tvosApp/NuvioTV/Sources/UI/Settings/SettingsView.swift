@@ -192,6 +192,7 @@ enum SettingsKey {
     static let traktContinueWatchingDaysCap = "nuvio.tv.settings.integrations.traktContinueWatchingDaysCap"
     static let traktShowMetaComments = "nuvio.tv.settings.integrations.traktShowMetaComments"
     static let traktWatchProgressSource = "nuvio.tv.settings.integrations.traktWatchProgressSource"
+    static let nuvioSyncScrobbleEnabled = "nuvio.tv.settings.integrations.nuvioSyncScrobbleEnabled"
     static let traktScrobbleEnabled = "nuvio.tv.settings.integrations.traktScrobbleEnabled"
     static let simklScrobbleEnabled = "nuvio.tv.settings.integrations.simklScrobbleEnabled"
     static let mdbListScrobbleEnabled = "nuvio.tv.settings.integrations.mdbListScrobbleEnabled"
@@ -294,6 +295,9 @@ enum SettingsKey {
     static let streamBadgePlacement = "nuvio.tv.settings.playback.streamBadgePlacement"
     static let autoPlayNext = "nuvio.tv.settings.playback.autoPlayNext"
     static let autoPlayNextCountdown = "nuvio.tv.settings.playback.autoPlayNextCountdown"
+    static let autoSkipIntro = "nuvio.tv.settings.playback.autoSkipIntro"
+    static let autoSkipRecap = "nuvio.tv.settings.playback.autoSkipRecap"
+    static let autoSkipOutro = "nuvio.tv.settings.playback.autoSkipOutro"
     static let streamAutoPlayPreferBingeGroup = "nuvio.tv.settings.playback.streamAutoPlayPreferBingeGroup"
     static let streamAutoPlayReuseBingeGroup = "nuvio.tv.settings.playback.streamAutoPlayReuseBingeGroup"
     static let postPlayRecommendationsEnabled = "nuvio.tv.settings.playback.postPlayRecommendationsEnabled"
@@ -360,7 +364,7 @@ enum SettingsKey {
         traktConnected, traktClientID, traktClientSecret,
         traktContinueWatchingDaysCap, traktShowMetaComments,
         traktWatchProgressSource, watchProgressSourceChosenByUser,
-        traktScrobbleEnabled, simklScrobbleEnabled, mdbListScrobbleEnabled, wetrakrScrobbleEnabled,
+        nuvioSyncScrobbleEnabled, traktScrobbleEnabled, simklScrobbleEnabled, mdbListScrobbleEnabled, wetrakrScrobbleEnabled,
         traktLibrarySourceMode, traktMoreLikeThisSource,
         simklClientID, simklAccessToken, simklRefreshToken, simklPlanToWatchHomeCatalogs,
         wetrakrClientID, wetrakrClientSecret, wetrakrAccessToken, wetrakrRefreshToken, wetrakrConnected,
@@ -386,7 +390,7 @@ enum SettingsKey {
         playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, rememberLastSourceFocus, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         backgroundStreamPreFetch,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
-        autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
+        autoPlayNext, autoPlayNextCountdown, autoSkipIntro, autoSkipRecap, autoSkipOutro, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
         focusedPosterBackdropEnabled, focusedPosterBackdropDelay, audioLanguage,
         subtitleLanguages, subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
         forcedSubtitles, subtitleSize, frameRateMatching, networkCache, hybridDiskCacheEnabled, hybridDiskCacheLimitGB, playbackTrackSelections, showAudioLanguages,
@@ -3740,6 +3744,7 @@ private struct IntegrationSettingsView: View {
     @AppStorage private var simklClientID: String
     @AppStorage private var wetrakrClientID: String
     @AppStorage private var wetrakrClientSecret: String
+    @AppStorage private var nuvioSyncScrobbleEnabled: Bool
     @State private var traktClientIDDraft: String
     @State private var traktClientSecretDraft: String
     @State private var simklClientIDDraft: String
@@ -3829,6 +3834,11 @@ private struct IntegrationSettingsView: View {
         _simklClientIDDraft = State(initialValue: storedSimklClientID)
         _wetrakrClientIDDraft = State(initialValue: storedWeTrakrClientID)
         _wetrakrClientSecretDraft = State(initialValue: storedWeTrakrClientSecret)
+        _nuvioSyncScrobbleEnabled = AppStorage(
+            wrappedValue: false,
+            SettingsKey.nuvioSyncScrobbleEnabled,
+            store: profileStore
+        )
         _p2pEnabled = AppStorage(
             wrappedValue: false,
             SettingsKey.p2pEnabled,
@@ -3854,6 +3864,83 @@ private struct IntegrationSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             AddonsSettingsSection(accentColor: accentColor)
+
+            SettingsGroup(
+                title: L10n.string("tvos_settings_watch_progress_title", fallback: "Continue Watching & Scrobbling"),
+                subtitle: L10n.string(
+                    "tvos_settings_watch_progress_subtitle",
+                    fallback: "Choose which service drives Continue Watching on Home, and manage multi-service scrobbling"
+                )
+            ) {
+                SettingsChoiceRow(
+                    title: L10n.string("trakt_continue_watching_source_title", fallback: "Continue Watching Source"),
+                    subtitle: L10n.string(
+                        "tvos_settings_choose_the_source_for_resume_and_continu_53af657c",
+                        fallback: "Choose the service for Resume and Continue Watching on Home"
+                    ),
+                    selection: globalWatchProgressSelection,
+                    options: RemoteTrackingState.availableProgressSources().map(\.label),
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_nuvio_sync_scrobble", fallback: "Nuvio Sync"),
+                    subtitle: L10n.string(
+                        "tvos_settings_nuvio_sync_scrobble_subtitle",
+                        fallback: "Also save playback progress and watched episodes when another source is selected."
+                    ),
+                    isOn: $nuvioSyncScrobbleEnabled,
+                    accentColor: accentColor
+                )
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.trakt, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_trakt_scrobble", fallback: "Trakt Scrobble"),
+                        subtitle: L10n.string("tvos_settings_trakt_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to Trakt"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .trakt) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .trakt) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.simkl, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_simkl_scrobble", fallback: "Simkl Scrobble"),
+                        subtitle: L10n.string("tvos_settings_simkl_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to Simkl"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .simkl) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .simkl) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_mdblist_scrobble", fallback: "MDBList Scrobble"),
+                        subtitle: L10n.string("tvos_settings_mdblist_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to MDBList"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .mdblist) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .mdblist) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
+
+                if RemoteTrackingState.isProgressSourceAuthenticated(.wetrakr, in: ProfileSettings.current) {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_wetrakr_scrobble", fallback: "WeTrakr Scrobble"),
+                        subtitle: L10n.string("tvos_settings_wetrakr_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to WeTrakr"),
+                        isOn: Binding(
+                            get: { RemoteTrackingState.isScrobbleEnabled(for: .wetrakr) },
+                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .wetrakr) }
+                        ),
+                        accentColor: accentColor
+                    )
+                }
+            }
 
             SettingsGroup(
                 title: L10n.string("settings_simkl_title", fallback: "Simkl"),
@@ -3967,73 +4054,6 @@ private struct IntegrationSettingsView: View {
             }
 
             SettingsGroup(
-                title: L10n.string("tvos_settings_watch_progress_title", fallback: "Continue Watching & Scrobbling"),
-                subtitle: L10n.string(
-                    "tvos_settings_watch_progress_subtitle",
-                    fallback: "Choose which service drives Continue Watching on Home, and manage multi-service scrobbling"
-                )
-            ) {
-                SettingsChoiceRow(
-                    title: L10n.string("trakt_continue_watching_source_title", fallback: "Continue Watching Source"),
-                    subtitle: L10n.string(
-                        "tvos_settings_choose_the_source_for_resume_and_continu_53af657c",
-                        fallback: "Choose the service for Resume and Continue Watching on Home"
-                    ),
-                    selection: globalWatchProgressSelection,
-                    options: RemoteTrackingState.availableProgressSources().map(\.label),
-                    accentColor: accentColor
-                )
-
-                if RemoteTrackingState.isProgressSourceAuthenticated(.trakt, in: ProfileSettings.current) {
-                    SettingsToggleRow(
-                        title: L10n.string("tvos_settings_trakt_scrobble", fallback: "Trakt Scrobble"),
-                        subtitle: L10n.string("tvos_settings_trakt_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to Trakt"),
-                        isOn: Binding(
-                            get: { RemoteTrackingState.isScrobbleEnabled(for: .trakt) },
-                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .trakt) }
-                        ),
-                        accentColor: accentColor
-                    )
-                }
-
-                if RemoteTrackingState.isProgressSourceAuthenticated(.simkl, in: ProfileSettings.current) {
-                    SettingsToggleRow(
-                        title: L10n.string("tvos_settings_simkl_scrobble", fallback: "Simkl Scrobble"),
-                        subtitle: L10n.string("tvos_settings_simkl_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to Simkl"),
-                        isOn: Binding(
-                            get: { RemoteTrackingState.isScrobbleEnabled(for: .simkl) },
-                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .simkl) }
-                        ),
-                        accentColor: accentColor
-                    )
-                }
-
-                if RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: ProfileSettings.current) {
-                    SettingsToggleRow(
-                        title: L10n.string("tvos_settings_mdblist_scrobble", fallback: "MDBList Scrobble"),
-                        subtitle: L10n.string("tvos_settings_mdblist_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to MDBList"),
-                        isOn: Binding(
-                            get: { RemoteTrackingState.isScrobbleEnabled(for: .mdblist) },
-                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .mdblist) }
-                        ),
-                        accentColor: accentColor
-                    )
-                }
-
-                if RemoteTrackingState.isProgressSourceAuthenticated(.wetrakr, in: ProfileSettings.current) {
-                    SettingsToggleRow(
-                        title: L10n.string("tvos_settings_wetrakr_scrobble", fallback: "WeTrakr Scrobble"),
-                        subtitle: L10n.string("tvos_settings_wetrakr_scrobble_subtitle", fallback: "Broadcast playback progress and watched updates to WeTrakr"),
-                        isOn: Binding(
-                            get: { RemoteTrackingState.isScrobbleEnabled(for: .wetrakr) },
-                            set: { RemoteTrackingState.setScrobbleEnabled($0, for: .wetrakr) }
-                        ),
-                        accentColor: accentColor
-                    )
-                }
-            }
-
-            SettingsGroup(
                 title: L10n.string("settings_ai_subtitles_title", fallback: "AI Subtitles"),
                 subtitle: L10n.string("tvos_settings_ai_subtitles_integration_subtitle", fallback: "Translate active subtitle cues live with Gemini or OpenRouter")
             ) {
@@ -4085,7 +4105,7 @@ private struct IntegrationSettingsView: View {
                     subtitle: L10n.string("debrid_cloud_library_description", fallback: "Browse and play files already in your connected accounts."),
                     isOn: $cloudLibraryEnabled,
                     accentColor: accentColor,
-                    enabled: hasAnyDebridConnected
+                    isAvailable: hasAnyDebridConnected
                 )
 
                 SettingsToggleRow(
@@ -4093,7 +4113,7 @@ private struct IntegrationSettingsView: View {
                     subtitle: L10n.string("debrid_enable_subtitle", fallback: "Ask a connected service for playable links when a result needs it. This may add the item to that service."),
                     isOn: $debridEnabled,
                     accentColor: accentColor,
-                    enabled: hasAnyDebridConnected
+                    isAvailable: hasAnyDebridConnected
                 )
 
                 if debridEnabled && connectedProviders.count > 1 {
@@ -4226,7 +4246,7 @@ private struct IntegrationSettingsView: View {
             RemoteTrackingState.normalizeWatchProgressSource()
             RemoteTrackingState.normalizeLibrarySource()
         }
-        .sheet(item: $debridAccountToConnect) { provider in
+        .sheet(item: $debridAccountToConnect, onDismiss: refreshDebridCredentials) { provider in
             if provider == .premiumize && !PremiumizeOAuthConfiguration.isDeviceOAuthConfigured {
                 PremiumizeApiKeySheet(
                     isConnected: isConnected(.premiumize),
@@ -4246,7 +4266,6 @@ private struct IntegrationSettingsView: View {
             }
         }) {
             TraktDeviceLoginSheet(viewModel: traktViewModel, accentColor: accentColor)
-                .modifier(ClearPresentationBackgroundIfAvailable())
         }
         .sheet(isPresented: $showingTraktSettings) {
             TraktConnectedSettingsSheet(viewModel: traktViewModel, accentColor: accentColor)
@@ -4258,7 +4277,6 @@ private struct IntegrationSettingsView: View {
             }
         }) {
             SimklPINLoginSheet(viewModel: simklViewModel, accentColor: accentColor)
-                .modifier(ClearPresentationBackgroundIfAvailable())
         }
         .sheet(isPresented: $showingSimklSettings) {
             SimklConnectedSettingsSheet(
@@ -4281,7 +4299,6 @@ private struct IntegrationSettingsView: View {
             }
         }) {
             MdbListDeviceLoginSheet(viewModel: mdbListViewModel, accentColor: accentColor)
-                .modifier(ClearPresentationBackgroundIfAvailable())
         }
         .sheet(isPresented: $showingMdbListSettings) {
             MdbListConnectedSettingsSheet(viewModel: mdbListViewModel, accentColor: accentColor)
@@ -4294,7 +4311,6 @@ private struct IntegrationSettingsView: View {
             }
         }) {
             WeTrakrDeviceLoginSheet(viewModel: wetrakrViewModel, accentColor: accentColor)
-                .modifier(ClearPresentationBackgroundIfAvailable())
         }
         .sheet(isPresented: $showingWeTrakrSettings) {
             WeTrakrConnectedSettingsSheet(viewModel: wetrakrViewModel, accentColor: accentColor)
@@ -4323,6 +4339,12 @@ private struct IntegrationSettingsView: View {
         }
         .onChange(of: wetrakrViewModel.mode) { _, mode in
             if mode == .connected { showingWeTrakrLogin = false }
+        }
+        .onChange(of: debridConnection.state) { _, state in
+            if state == .connected {
+                refreshDebridCredentials()
+                debridAccountToConnect = nil
+            }
         }
         .onChange(of: debridProvider) { _, newKind in
             guard let kind = DebridProviderKind(rawValue: newKind) else { return }
@@ -4402,6 +4424,15 @@ private struct IntegrationSettingsView: View {
 
     private var connectedProviders: [DebridAccountProvider] {
         DebridAccountProvider.allCases.filter { isConnected($0) }
+    }
+
+    private func refreshDebridCredentials() {
+        let store = ProfileSettings.current
+        torboxAccessToken = store.string(forKey: SettingsKey.torboxAccessToken) ?? ""
+        premiumizeAccessToken = store.string(forKey: SettingsKey.premiumizeAccessToken) ?? ""
+        realDebridAccessToken = store.string(forKey: SettingsKey.realDebridAccessToken) ?? ""
+        debridApiKey = store.string(forKey: SettingsKey.debridApiKey) ?? ""
+        debridProvider = store.string(forKey: SettingsKey.debridProvider) ?? "None"
     }
 
     private var tmdbHasApiKey: Bool {
@@ -4542,7 +4573,7 @@ private struct TmdbOptionsSheet: View {
                             subtitle: L10n.string("settings_tmdb_enable_subtitle", fallback: "Use TMDB to enrich add-on metadata"),
                             isOn: $tmdbEnabled,
                             accentColor: accentColor,
-                            enabled: tmdbHasApiKey
+                            isAvailable: tmdbHasApiKey
                         )
                     }
 
@@ -4582,7 +4613,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbApplyToHome,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_trailers", fallback: "Trailers"),
@@ -4592,7 +4623,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseTrailers,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_artwork", fallback: "Artwork"),
@@ -4602,7 +4633,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseArtwork,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_basic_info", fallback: "Basic Info"),
@@ -4612,7 +4643,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseBasicInfo,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_details", fallback: "Details"),
@@ -4622,7 +4653,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseDetails,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_credits", fallback: "Credits"),
@@ -4632,7 +4663,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseCredits,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_production_companies", fallback: "Productions"),
@@ -4642,7 +4673,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseProductions,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_networks", fallback: "Networks"),
@@ -4652,7 +4683,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseNetworks,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_episodes", fallback: "Episodes"),
@@ -4662,7 +4693,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseEpisodes,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_season_posters", fallback: "Season Posters"),
@@ -4672,7 +4703,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseSeasonPosters,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_more_like_this", fallback: "More Like This"),
@@ -4682,7 +4713,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseMoreLikeThis,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                         SettingsToggleRow(
                             title: L10n.string("settings_tmdb_module_collections", fallback: "Collections"),
@@ -4692,7 +4723,7 @@ private struct TmdbOptionsSheet: View {
                             ),
                             isOn: $tmdbUseCollections,
                             accentColor: accentColor,
-                            enabled: tmdbControlsEnabled
+                            isAvailable: tmdbControlsEnabled
                         )
                     }
                 }
@@ -4873,7 +4904,7 @@ private struct MdbListOptionsSheet: View {
                             subtitle: L10n.string("settings_mdblist_enable_ratings_subtitle", fallback: "Show ratings from IMDb, TMDB, Rotten Tomatoes, and more"),
                             isOn: $mdbListEnabled,
                             accentColor: accentColor,
-                            enabled: mdbListHasApiKey
+                            isAvailable: mdbListHasApiKey
                         )
                     }
 
@@ -5147,7 +5178,7 @@ private struct AISubtitleOptionsSheet: View {
                             ),
                             isOn: $isEnabled,
                             accentColor: accentColor,
-                            enabled: hasAPIKey
+                            isAvailable: hasAPIKey
                         )
                     }
 
@@ -5270,7 +5301,6 @@ private struct PremiumizeApiKeySheet: View {
                     .multilineTextAlignment(.center)
 
                 HStack(spacing: 18) {
-                    dialogButton(title: L10n.string("action_cancel", fallback: "Cancel"), isPrimary: false) { dismiss() }
                     dialogButton(title: L10n.string("debrid_disconnect", fallback: "Disconnect"), isPrimary: true) {
                         DebridCredentials.remove(provider: .premiumize, store: ProfileSettings.current)
                         dismiss()
@@ -5308,7 +5338,6 @@ private struct PremiumizeApiKeySheet: View {
                 }
 
                 HStack(spacing: 18) {
-                    dialogButton(title: L10n.string("action_cancel", fallback: "Cancel"), isPrimary: false) { dismiss() }
                     dialogButton(
                         title: isValidating ? L10n.string("tvos_settings_checking", fallback: "Checking…") : L10n.string("action_save", fallback: "Save"),
                         isPrimary: true
@@ -5434,7 +5463,6 @@ private struct DebridDeviceAuthorizationSheet: View {
                     .multilineTextAlignment(.center)
 
                 HStack(spacing: 18) {
-                    dialogButton(title: L10n.string("action_cancel", fallback: "Cancel"), isPrimary: false) { dismiss() }
                     dialogButton(title: L10n.string("debrid_disconnect", fallback: "Disconnect"), isPrimary: true) {
                         DebridCredentials.remove(provider: provider, store: ProfileSettings.current)
                         dismiss()
@@ -5473,14 +5501,12 @@ private struct DebridDeviceAuthorizationSheet: View {
                 }
 
                 statusText
-                dialogButton(title: L10n.string("action_cancel", fallback: "Cancel"), isPrimary: true) { dismiss() }
             } else {
                 Text(viewModel.statusMessage ?? L10n.string("tvos_settings_unable_to_start_account_linking", fallback: "Unable to start account linking."))
                     .font(.system(size: 22, weight: .medium))
                     .foregroundColor(Color(red: 1.0, green: 0.43, blue: 0.43))
                     .multilineTextAlignment(.center)
                 HStack(spacing: 18) {
-                    dialogButton(title: L10n.string("action_cancel", fallback: "Cancel"), isPrimary: false) { dismiss() }
                     dialogButton(title: L10n.string("action_retry", fallback: "Retry"), isPrimary: true) { viewModel.connect(provider) }
                 }
             }
@@ -5488,12 +5514,8 @@ private struct DebridDeviceAuthorizationSheet: View {
         .frame(width: 960)
         .padding(.horizontal, 88)
         .padding(.vertical, 64)
-        .loginGlassPanel()
         .task(id: provider.id) {
             if !isConnected { viewModel.connect(provider) }
-        }
-        .onChange(of: viewModel.state) { _, state in
-            if state == .connected { dismiss() }
         }
         .onDisappear { viewModel.cancel() }
     }
@@ -6131,7 +6153,6 @@ private struct TraktDeviceLoginSheet: View {
         .frame(width: 960)
         .padding(.horizontal, 88)
         .padding(.vertical, 64)
-        .loginGlassPanel()
         .onAppear {
             if viewModel.mode != .connected && viewModel.deviceUserCode == nil {
                 viewModel.connect()
@@ -6657,7 +6678,6 @@ private struct MdbListDeviceLoginSheet: View {
         .frame(width: 960)
         .padding(.horizontal, 88)
         .padding(.vertical, 64)
-        .loginGlassPanel()
         .onAppear {
             viewModel.reload()
             if viewModel.mode == .disconnected && viewModel.deviceUserCode == nil {
@@ -7310,7 +7330,6 @@ private struct SimklPINLoginSheet: View {
         .frame(width: 960)
         .padding(.horizontal, 88)
         .padding(.vertical, 64)
-        .loginGlassPanel()
         .onAppear {
             if viewModel.mode != .connected && viewModel.deviceUserCode == nil {
                 viewModel.connect()
@@ -7584,7 +7603,6 @@ private struct WeTrakrDeviceLoginSheet: View {
         .frame(width: 960)
         .padding(.horizontal, 88)
         .padding(.vertical, 64)
-        .loginGlassPanel()
         .onAppear {
             viewModel.reload()
             if viewModel.mode == .disconnected && viewModel.deviceUserCode == nil {
@@ -7897,6 +7915,9 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.showAddonLogo) private var showAddonLogo = false
     @AppStorage(SettingsKey.streamBadgePlacement) private var streamBadgePlacement = StreamBadgePlacement.bottom.rawValue
     @AppStorage(SettingsKey.autoPlayNext) private var autoPlayNext = true
+    @AppStorage(SettingsKey.autoSkipIntro) private var autoSkipIntro = false
+    @AppStorage(SettingsKey.autoSkipRecap) private var autoSkipRecap = false
+    @AppStorage(SettingsKey.autoSkipOutro) private var autoSkipOutro = false
     @AppStorage(SettingsKey.streamAutoPlayPreferBingeGroup) private var streamAutoPlayPreferBingeGroup = true
     @AppStorage(SettingsKey.streamAutoPlayReuseBingeGroup) private var streamAutoPlayReuseBingeGroup = true
     @AppStorage(SettingsKey.seekPreviewEnabled) private var seekPreviewEnabled = true
@@ -8193,6 +8214,44 @@ private struct PlaybackSettingsView: View {
                     accentColor: accentColor
                 )
 
+            }
+
+            SettingsGroup(
+                title: L10n.string("playback_auto_skip_segments", fallback: "Automatic Skipping"),
+                subtitle: L10n.string(
+                    "playback_auto_skip_segments_sub",
+                    fallback: "Choose which segments skip automatically"
+                )
+            ) {
+                SettingsToggleRow(
+                    title: L10n.string("auto_skip_intro", fallback: "Intro / Opening"),
+                    subtitle: L10n.string(
+                        "auto_skip_intro_sub",
+                        fallback: "Skip intros and anime openings automatically"
+                    ),
+                    isOn: $autoSkipIntro,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("auto_skip_recap", fallback: "Recap"),
+                    subtitle: L10n.string(
+                        "auto_skip_recap_sub",
+                        fallback: "Skip recap segments automatically"
+                    ),
+                    isOn: $autoSkipRecap,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("auto_skip_outro", fallback: "Outro / Ending"),
+                    subtitle: L10n.string(
+                        "auto_skip_outro_sub",
+                        fallback: "Skip outros and anime endings automatically"
+                    ),
+                    isOn: $autoSkipOutro,
+                    accentColor: accentColor
+                )
             }
 
             SettingsGroup(title: L10n.string("tvos_settings_smart_playback", fallback: "Smart Playback"), subtitle: L10n.string("tvos_settings_automatically_choose_streams_and_matchin_9ca69e9f", fallback: "Automatically choose streams and matching subtitles")) {
@@ -14884,12 +14943,16 @@ private struct SettingsToggleRow: View {
     @Binding var isOn: Bool
     let accentColor: Color
     var enabled: Bool = true
+    var isAvailable: Bool = true
 
     @FocusState private var isFocused: Bool
 
+    private var displayedIsOn: Bool { isOn && isAvailable }
+    private var canInteract: Bool { enabled && isAvailable }
+
     var body: some View {
         Button {
-            guard enabled else { return }
+            guard canInteract else { return }
             isOn.toggle()
         } label: {
             SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
@@ -14898,18 +14961,12 @@ private struct SettingsToggleRow: View {
                 Spacer(minLength: 24)
 
                 HStack(spacing: 10) {
-                    Text(isOn ? L10n.string("subtitle_on", fallback: "On") : L10n.string("playback_afr_off", fallback: "Off"))
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(.white.opacity(0.78))
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(minWidth: 34, alignment: .trailing)
-
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(isOn ? accentColor : Color.white.opacity(0.24))
+                        .fill(displayedIsOn ? accentColor : Color.white.opacity(0.24))
                         .frame(width: 54, height: 30)
-                        .overlay(alignment: isOn ? .trailing : .leading) {
+                        .overlay(alignment: displayedIsOn ? .trailing : .leading) {
                             Circle()
-                                .fill(isOn && accentColor == .white ? Color.black : Color.white)
+                                .fill(displayedIsOn && accentColor == .white ? Color.black : Color.white)
                                 .frame(width: 22, height: 22)
                                 .padding(4)
                         }
@@ -14920,8 +14977,9 @@ private struct SettingsToggleRow: View {
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
         .entryLockable()
-        .opacity(enabled ? 1 : 0.46)
-        .disabled(!enabled)
+        .opacity(canInteract ? 1 : 0.46)
+        .disabled(!canInteract)
+        .accessibilityValue(displayedIsOn ? L10n.string("subtitle_on", fallback: "On") : L10n.string("playback_afr_off", fallback: "Off"))
     }
 }
 

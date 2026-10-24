@@ -42,7 +42,15 @@ struct WatchPartyLobbyView: View {
             VStack(alignment: .leading, spacing: 30) {
                 if !canUseAccount {
                     header
-                    accountGateCard
+                    HStack(alignment: .top, spacing: 22) {
+                        accountGateCard
+                            .padding(.horizontal, 28)
+                            .frame(maxWidth: .infinity)
+
+                        Color.clear
+                            .frame(maxWidth: .infinity)
+                            .accessibilityHidden(true)
+                    }
                 } else if let room = service.session, let party = room.party {
                     roomContent(room, party: party)
                 } else {
@@ -739,36 +747,12 @@ struct WatchPartyLobbyView: View {
 
     private var accountGateCard: some View {
         Button(action: onOpenProfile) {
-            HStack(alignment: .top, spacing: 20) {
-                Image(systemName: "person.crop.circle.badge.checkmark")
-                    .font(.system(size: 32, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 64, height: 64)
-                    .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Choose a profile to continue")
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text("Sign in and choose a profile to create or join a Watch Party.")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                Spacer(minLength: 12)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.72))
-            }
-            .padding(30)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .modifier(LiquidGlassSurface(cornerRadius: 28, prominent: true))
-            .overlay {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .strokeBorder(accountGateFocused ? AppFocusOutline.color : Color.clear,
-                                  lineWidth: accountGateFocused ? AppFocusOutline.width : 0)
-            }
-            .scaleEffect(accountGateFocused ? 1.025 : 1)
-            .animation(.easeOut(duration: 0.14), value: accountGateFocused)
+            primaryActionLabel(
+                symbol: "person.crop.circle.badge.checkmark",
+                title: "Choose a profile to continue",
+                subtitle: "Sign in to create or join a Watch Party.",
+                isFocused: accountGateFocused
+            )
         }
         .buttonStyle(PosterCardButtonStyle())
         .focusEffectDisabledIfAvailable()
@@ -1507,7 +1491,6 @@ private struct WatchPartyLobbyInvitation: View {
         }
         .padding(44)
         .frame(width: 760)
-        .background(Color.black.ignoresSafeArea())
         .onAppear { doneFocused = true }
         .onExitCommand { dismiss() }
     }

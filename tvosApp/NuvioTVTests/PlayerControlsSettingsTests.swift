@@ -61,6 +61,28 @@ private final class PlayerControlsTestEngine: PlaybackEngineControlling {
 }
 
 @MainActor
+private final class PollingSceneFrameProvider: SceneFrameProviding {
+    let isSupported = true
+    let capabilityMessage: String? = nil
+    private(set) var captureCount = 0
+    var onCapture: ((Int) -> Void)?
+
+    func captureCurrentFrame(maxWidth: Int, context: SceneContext) async -> SceneFrame? {
+        captureCount += 1
+        onCapture?(captureCount)
+        return nil
+    }
+}
+
+private struct EmptyPlaybackSceneCastProvider: SceneCastProviding {
+    func fetchCast(context: SceneContext) async throws -> [SceneCastCandidate] { [] }
+}
+
+private struct EmptyPlaybackSceneSoundtrackProvider: SceneSoundtrackProviding {
+    func fetchSoundtrack(context: SceneContext) async throws -> [SceneTimelineInterval] { [] }
+}
+
+@MainActor
 private final class DeferredNextStreamResolver {
     var onStart: (() -> Void)?
     private var continuation: CheckedContinuation<PreparedNextStream?, Never>?
@@ -237,11 +259,15 @@ final class ActionPlaybackSessionTests: XCTestCase {
     func testLiveIDAndNameHintsRemainRecognizedWithGenericMetadataTypes() {
         for item in [
             NuvioMeta(id: "iptv:news", name: "News", type: "movie"),
-            NuvioMeta(id: "addon-news", name: "[Live] News", type: "series")
+            NuvioMeta(id: "addon-news", name: "[Live] News", type: "series"),
+            NuvioMeta(id: "pp-live:cdnlive~2558809", name: "🔴 LIVE: UFC 333 Volkanovski vs Evloev", type: "tv"),
+            NuvioMeta(id: "custom:123", name: "🔴 [LIVE] Sports", type: "tv"),
+            NuvioMeta(id: "addon-channel", name: "Live: Match", type: "movie"),
+            NuvioMeta(id: "tv:daddylive~456", name: "Stream", type: "tv")
         ] {
             let model = makeModel(playbackMeta: item, resumeFrom: nil)
             defer { model.shutdown() }
-            XCTAssertTrue(model.isLiveStream)
+            XCTAssertTrue(model.isLiveStream, "Failed for \(item.id) / \(item.name)")
         }
     }
 
@@ -2889,6 +2915,127 @@ final class ExternalPlayerTests: XCTestCase {
 
         // Audio delay should have reset to 0!
         XCTAssertEqual(model.audioDelayMs, 0)
+    }
+}
+
+extension PlayerControlsSettingsTests {
+    @MainActor
+    func testPlaybackPollNotifiesSceneOnObservedPauseAndResumeOnce() async {
+        let frameProvider = PollingSceneFrameProvider()
+        let scene = SceneCoordinator(
+            frameProvider: frameProvider,
+            castProvider: EmptyPlaybackSceneCastProvider(),
+            soundtrackProvider: EmptyPlaybackSceneSoundtrackProvider())
+        let session = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let model = PlayerViewModel(sessionCoordinator: session, sceneCoordinator: scene)
+        defer { scene.closePanel(); model.shutdown() }
+
+        let context = SceneContext(canonicalId: "poll-pause-transition", mediaType: "movie", title: "Pause Transition")
+        model.status = .playing
+        model.showScenePanel = true
+        model.sceneCoordinator.updateContext(context)
+        let firstCapture = expectation(description: "Panel begins its playing capture loop")
+        let pausedCapture = expectation(description: "Observed engine pause captures one frozen frame")
+        let explicitPauseCapture = expectation(description: "Explicit pause captures one frozen frame")
+        frameProvider.onCapture = { count in
+            if count == 1 { firstCapture.fulfill() }
+            if count == 2 { pausedCapture.fulfill() }
+            if count == 3 { explicitPauseCapture.fulfill() }
+        }
+        model.sceneCoordinator.openPanel()
+        await fulfillment(of: [firstCapture], timeout: 2)
+        XCTAssertTrue(scene.isFrameSamplingActive)
+
+        let engine = PlayerControlsTestEngine()
+        engine.isPlayerPlaying = true
+        engine.isTransportPlaying = true
+        engine.hasCoherentTimeSample = true
+        engine.durationMs = 120_000
+        engine.positionMs = 20_000
+        model.pollForTesting(using: engine)
+
+        engine.isPlayerPlaying = false
+        engine.isTransportPlaying = false
+        model.pollForTesting(using: engine)
+        await fulfillment(of: [pausedCapture], timeout: 2)
+        XCTAssertEqual(model.status, .paused)
+        XCTAssertFalse(scene.isFrameSamplingActive, "Paused Insight should retain only its one-shot frame")
+
+        model.pollForTesting(using: engine)
+        XCTAssertEqual(frameProvider.captureCount, 2, "Repeated paused polls must not capture another frame")
+
+        engine.isPlayerPlaying = true
+        engine.isTransportPlaying = true
+        model.pollForTesting(using: engine)
+        XCTAssertEqual(model.status, .playing)
+        XCTAssertTrue(scene.isFrameSamplingActive, "The observed resume should restart scene sampling")
+
+        model.pause()
+        await fulfillment(of: [explicitPauseCapture], timeout: 2)
+        engine.isPlayerPlaying = false
+        engine.isTransportPlaying = false
+        model.pollForTesting(using: engine)
+        XCTAssertEqual(frameProvider.captureCount, 3, "Polling must not duplicate the explicit pause capture")
+        XCTAssertFalse(scene.isFrameSamplingActive)
+    }
+
+    @MainActor
+    func testPausedOpenAndSeekAreOneShotAndBufferingDoesNotResumeSceneScan() async {
+        let frameProvider = PollingSceneFrameProvider()
+        let scene = SceneCoordinator(
+            frameProvider: frameProvider,
+            castProvider: EmptyPlaybackSceneCastProvider(),
+            soundtrackProvider: EmptyPlaybackSceneSoundtrackProvider())
+        let session = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let model = PlayerViewModel(sessionCoordinator: session, sceneCoordinator: scene)
+        defer { scene.closePanel(); model.shutdown() }
+
+        let context = SceneContext(canonicalId: "paused-one-shot", mediaType: "movie", title: "Paused")
+        model.status = .paused
+        model.showScenePanel = true
+        model.sceneCoordinator.updateContext(context)
+        let openCapture = expectation(description: "Paused open captures one frame")
+        let seekCapture = expectation(description: "Paused seek captures one new frame")
+        let resumedCapture = expectation(description: "Playback resumes Insight sampling after buffering")
+        frameProvider.onCapture = { count in
+            if count == 1 { openCapture.fulfill() }
+            if count == 2 { seekCapture.fulfill() }
+            if count == 3 { resumedCapture.fulfill() }
+        }
+        model.sceneCoordinator.openPanel()
+        await fulfillment(of: [openCapture], timeout: 2)
+        XCTAssertFalse(scene.isFrameSamplingActive)
+
+        scene.handleSeek()
+        await fulfillment(of: [seekCapture], timeout: 2)
+        XCTAssertFalse(scene.isFrameSamplingActive, "Paused seek should not leave a polling task armed")
+
+        let engine = PlayerControlsTestEngine()
+        engine.isPlayerLoading = true
+        engine.isPlayerPlaying = false
+        engine.isTransportPlaying = false
+        engine.durationMs = 120_000
+        engine.positionMs = 20_000
+        model.pollForTesting(using: engine)
+        XCTAssertEqual(model.status, .buffering)
+        XCTAssertFalse(scene.isFrameSamplingActive)
+        XCTAssertEqual(frameProvider.captureCount, 2)
+
+        engine.isPlayerLoading = false
+        engine.isPlayerPlaying = true
+        engine.isTransportPlaying = true
+        model.pollForTesting(using: engine)
+        await fulfillment(of: [resumedCapture], timeout: 2)
+        XCTAssertEqual(model.status, .playing)
+        XCTAssertTrue(scene.isFrameSamplingActive)
+
+        model.sceneCoordinator.closePanel()
+        model.showScenePanel = false
+        engine.isPlayerPlaying = false
+        engine.isTransportPlaying = false
+        model.pollForTesting(using: engine)
+        XCTAssertEqual(frameProvider.captureCount, 3, "Closed Insight must not capture from the poll path")
+        XCTAssertFalse(scene.isFrameSamplingActive)
     }
 }
 

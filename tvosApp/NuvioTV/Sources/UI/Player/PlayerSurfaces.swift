@@ -12,6 +12,37 @@ struct MPVVideoSurface: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: MPVPlayerViewController, context: Context) {}
 }
 
+/// Keeps the native player surface at its viewport size while presenting a
+/// compositor-scaled version in the post-play mini window.
+struct StablePlayerSurfacePresentation<Content: View>: View {
+    let viewportSize: CGSize
+    let presentationSize: CGSize
+    private let content: Content
+
+    init(
+        viewportSize: CGSize,
+        presentationSize: CGSize,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.viewportSize = viewportSize
+        self.presentationSize = presentationSize
+        self.content = content()
+    }
+
+    private var fitScale: CGFloat {
+        guard viewportSize.width > 0, viewportSize.height > 0 else { return 1 }
+        return min(presentationSize.width / viewportSize.width, presentationSize.height / viewportSize.height)
+    }
+
+    var body: some View {
+        content
+            .frame(width: viewportSize.width, height: viewportSize.height)
+            .scaleEffect(fitScale)
+            .frame(width: presentationSize.width, height: presentationSize.height)
+            .clipped()
+    }
+}
+
 /// Hosts AetherEngine's `AetherPlayerView` for native / software decode.
 struct AetherPlayerSurface: UIViewControllerRepresentable {
     let controller: AetherPlaybackController

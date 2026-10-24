@@ -6,6 +6,24 @@ import Darwin
 import Libmpv
 #endif
 
+private final class PlaybackThumbnailYieldCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    func shouldYieldOnFourthCheck() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        calls += 1
+        return calls == 4
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+}
+
 final class PlaybackStreamCacheTests: XCTestCase {
 
     override func setUp() async throws {
@@ -706,6 +724,21 @@ extension PlaybackStreamCacheTests {
         let sharedFrame = try XCTUnwrap(sharedStill)
         XCTAssertEqual(try XCTUnwrap(sharedFrame.actualSeconds), 1, accuracy: 0.05)
         XCTAssertEqual(sharedFrame.image.width, sourceFrame.image.width)
+
+        let requiredRPUStill = await PlaybackThumbnailSourceFallback.boundedSnapshot(
+            sourceContext: context, atSeconds: 1, maxWidth: 32,
+            cancellation: PlaybackThumbnailRequestCancellation(), isCurrent: { true },
+            requiredDolbyVisionReshaping: true)
+        XCTAssertNil(requiredRPUStill, "The scene-analysis DV5 path must not accept a non-Dolby-Vision fallback frame")
+
+        let yieldCounter = PlaybackThumbnailYieldCounter()
+        let yieldedStill = await PlaybackThumbnailSourceFallback.boundedSnapshot(
+            sourceContext: context, atSeconds: 1, maxWidth: 32,
+            cancellation: PlaybackThumbnailRequestCancellation(), isCurrent: { true },
+            yieldWhile: { yieldCounter.shouldYieldOnFourthCheck() })
+        XCTAssertNil(yieldedStill)
+        XCTAssertEqual(yieldCounter.callCount, 5,
+                       "The frame extractor must receive and poll the engine's playback-priority gate")
     }
 
     private func thumbnailSource(

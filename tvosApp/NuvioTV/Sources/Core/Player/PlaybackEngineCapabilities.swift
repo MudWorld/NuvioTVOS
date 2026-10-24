@@ -9,6 +9,7 @@ struct PlaybackEngineCapabilities: Equatable {
     var supportsHostSubtitleOverlay: Bool
     var supportsHTTPHeaders: Bool
     var supportsDirectHTTPS: Bool
+    var supportsRemoteHLS: Bool
 
     static let aether = PlaybackEngineCapabilities(
         supportsSeparateAudioURL: false,
@@ -17,7 +18,8 @@ struct PlaybackEngineCapabilities: Equatable {
         supportsAuthoredASS: false,
         supportsHostSubtitleOverlay: true,
         supportsHTTPHeaders: true,
-        supportsDirectHTTPS: true
+        supportsDirectHTTPS: true,
+        supportsRemoteHLS: true
     )
 
     static let mpv = PlaybackEngineCapabilities(
@@ -27,9 +29,9 @@ struct PlaybackEngineCapabilities: Equatable {
         supportsAuthoredASS: true,
         supportsHostSubtitleOverlay: false,
         supportsHTTPHeaders: true,
-        // MPVKit ships FFmpeg with network protocols and TLS enabled. The
-        // old false value forced every remote session back to AetherEngine,
-        // which made the ASS-capable player impossible to select.
-        supportsDirectHTTPS: true
+        // URLSession bridges top-level HTTPS media. FFmpeg's HLS demuxer opens
+        // child playlists/segments itself, outside that bridge, without TLS support.
+        supportsDirectHTTPS: true,
+        supportsRemoteHLS: false
     )
 }

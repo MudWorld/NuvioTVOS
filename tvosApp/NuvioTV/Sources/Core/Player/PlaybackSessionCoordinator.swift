@@ -398,6 +398,10 @@ final class PlaybackSessionCoordinator: ObservableObject {
         guard !userStopped else { return }
         guard let request = lastRequest else { return }
         guard activeBackend == .aether else { return }
+        guard mpvSupportsRequest(request) else {
+            print("[PlaybackCoordinator] MPV handoff suppressed: remote HLS requires native playback")
+            return
+        }
         guard !didFallbackForCurrentURL else {
             print("[PlaybackCoordinator] fallback already used for \(currentURLString ?? "?")")
             return
@@ -467,8 +471,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
               !aetherController.isTransportPlaying else {
             return false
         }
-        guard !PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
-                || PlaybackEngineCapabilities.mpv.supportsDirectHTTPS else {
+        guard mpvSupportsRequest(request) else {
             return false
         }
 
@@ -554,6 +557,15 @@ final class PlaybackSessionCoordinator: ObservableObject {
         }
     }
 
+    private func mpvSupportsRequest(_ request: PlaybackLoadRequest) -> Bool {
+        guard PlaybackBackendPolicy.mpvSupportsURL(request.videoURL.absoluteString),
+              request.httpHeaderSourceURL.map({ PlaybackBackendPolicy.mpvSupportsURL($0.absoluteString) }) ?? true
+        else { return false }
+        // Extensionless playlists may only be identified after the native engine opens them.
+        return PlaybackEngineCapabilities.mpv.supportsRemoteHLS
+            || aetherController?.engine.videoRoute != .remoteBypass
+    }
+
     private func handleAetherTerminalError(_ message: String) {
         guard !userStopped, !isHandoffInProgress else { return }
         guard activeBackend == .aether else { return }
@@ -562,9 +574,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
             lastLoadError = message
             return
         }
-        if let url = lastRequest?.videoURL,
-           PlaybackBackendPolicy.isRemoteHTTP(url.absoluteString),
-           !PlaybackEngineCapabilities.mpv.supportsDirectHTTPS {
+        if let request = lastRequest, !mpvSupportsRequest(request) {
             print("[PlaybackCoordinator] terminal Aether error on remote stream; suppressing MPV fallback: \(message)")
             lastLoadError = message
             return

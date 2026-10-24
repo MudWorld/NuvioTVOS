@@ -2213,7 +2213,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "استخدم WeTrakr للاستئناف ومواصلة المشاهدة وتسجيل المشاهدة",
     "tvos_settings_wetrakr_watch_stats_subtitle": "نشاط المشاهدة الذي يعيده حساب WeTrakr الخاص بك",
     "watched_accessibility": "تمت مشاهدته",
-    "watched_repeat_count_accessibility": "تمت مشاهدته %d مرات"
+    "watched_repeat_count_accessibility": "تمت مشاهدته %d مرات",
+    "auto_skip_intro": "المقدمة",
+    "auto_skip_intro_sub": "تخطي شارات البداية تلقائياً.",
+    "auto_skip_recap": "الملخص",
+    "auto_skip_recap_sub": "تخطي فقرات ملخص الاحداث تلقائياً.",
+    "auto_skip_outro": "الخاتمة",
+    "auto_skip_outro_sub": "تخطي شارات النهاية تلقائياً."
   },
   "bg": {
     "sidebar_genres_title": "Жанрове",
@@ -4429,7 +4435,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Използвайте WeTrakr за продължаване, Продължи да гледаш и скроблинг",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Гледана активност, върната от вашия акаунт в WeTrakr",
     "watched_accessibility": "Гледано",
-    "watched_repeat_count_accessibility": "Гледано %d пъти"
+    "watched_repeat_count_accessibility": "Гледано %d пъти",
+    "auto_skip_intro": "Интро / Отваряне",
+    "auto_skip_intro_sub": "Автоматично пропускане на интро и аниме отваряния.",
+    "auto_skip_recap": "Резюме",
+    "auto_skip_recap_sub": "Автоматично пропускане на сегменти с резюме.",
+    "auto_skip_outro": "Аутро / Край",
+    "auto_skip_outro_sub": "Автоматично пропускане на аутро и аниме завършвания."
   },
   "bs": {
     "sidebar_genres_title": "Žanrovi",
@@ -6645,7 +6657,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Koristite WeTrakr za nastavak, Nastavi gledanje i scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Aktivnost gledanja koju vraća vaš WeTrakr nalog",
     "watched_accessibility": "Gledano",
-    "watched_repeat_count_accessibility": "Gledano %d puta"
+    "watched_repeat_count_accessibility": "Gledano %d puta",
+    "auto_skip_intro": "Uvod / Špica",
+    "auto_skip_intro_sub": "Automatski preskoči uvod i anime uvodne špice.",
+    "auto_skip_recap": "Sažetak",
+    "auto_skip_recap_sub": "Automatski preskoči sažetke prethodnih epizoda.",
+    "auto_skip_outro": "Završetak / Odjavna špica",
+    "auto_skip_outro_sub": "Automatski preskoči odjavne špice i anime završetke."
   },
   "cs": {
     "sidebar_genres_title": "Žánry",
@@ -8861,7 +8879,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Používat WeTrakr pro Pokračovat, Pokračovat ve sledování a scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Sledovaná aktivita vrácená z vašeho účtu WeTrakr",
     "watched_accessibility": "Zhlédnuto",
-    "watched_repeat_count_accessibility": "Zhlédnuto %d krát"
+    "watched_repeat_count_accessibility": "Zhlédnuto %d krát",
+    "auto_skip_intro": "Intro / Zahájení",
+    "auto_skip_intro_sub": "Přeskakovat intra a anime zahájení automaticky.",
+    "auto_skip_recap": "Rekapitulace",
+    "auto_skip_recap_sub": "Přeskakovat segmenty rekapitulace automaticky.",
+    "auto_skip_outro": "Outro / Ukončení",
+    "auto_skip_outro_sub": "Přeskakovat outra a anime ukončení automaticky."
   },
   "da": {
     "sidebar_genres_title": "Genrer",
@@ -11077,7 +11101,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Brug WeTrakr til Fortsæt, Se videre og scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Visningsaktivitet fra din WeTrakr-konto",
     "watched_accessibility": "Set",
-    "watched_repeat_count_accessibility": "Set %d gange"
+    "watched_repeat_count_accessibility": "Set %d gange",
+    "auto_skip_intro": "Intro / Åbning",
+    "auto_skip_intro_sub": "Spring intros og anime-åbninger over automatisk.",
+    "auto_skip_recap": "Recap",
+    "auto_skip_recap_sub": "Spring recap-segmenter over automatisk.",
+    "auto_skip_outro": "Outro / Afslutning",
+    "auto_skip_outro_sub": "Spring outros og anime-afslutninger over automatisk."
   },
   "de": {
     "sidebar_genres_title": "Genres",
@@ -11902,7 +11932,7 @@
     "playback_afr_open": "Offen",
     "playback_auto_frame_rate": "Automatische Bildfrequenz",
     "playback_auto_skip_segments": "Automatisches Überspringen",
-    "playback_auto_skip_segments_sub": "Wählen Sie, welche Segmente automatisch übersprungen werden.",
+    "playback_auto_skip_segments_sub": "Wähle, welche Segemente automatisch übersprungen werden sollen.",
     "playback_auto_switch_internal_player_on_error": "Auto-switch engine on startup error",
     "playback_auto_switch_internal_player_on_error_sub": "If stream startup fails, switch between ExoPlayer and libmpv automatically.",
     "playback_buffer_after_rebuffer": "Puffer nach Rebuffer",
@@ -13293,7 +13323,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "WeTrakr für Fortsetzen, Weiterschauen und Scrobbling verwenden",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Vom WeTrakr-Konto zurückgegebene Sehaktivität",
     "watched_accessibility": "Gesehen",
-    "watched_repeat_count_accessibility": "%d-mal gesehen"
+    "watched_repeat_count_accessibility": "%d-mal gesehen",
+    "auto_skip_intro": "Intro / Opening",
+    "auto_skip_intro_sub": "Intros und Anime-Intros automatisch überspringen.",
+    "auto_skip_recap": "Zusammenfassungen",
+    "auto_skip_recap_sub": "Zusammenfassungen automatisch überspringen.",
+    "auto_skip_outro": "Outro / Ending",
+    "auto_skip_outro_sub": "Outros und Anime-Outros automatisch überspringen."
   },
   "el": {
     "sidebar_genres_title": "Είδη",
@@ -15509,7 +15545,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Χρήση του WeTrakr για Συνέχεια, Συνέχεια παρακολούθησης και scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Δραστηριότητα παρακολούθησης από τον λογαριασμό σας WeTrakr",
     "watched_accessibility": "Παρακολουθήθηκε",
-    "watched_repeat_count_accessibility": "Παρακολουθήθηκε %d φορές"
+    "watched_repeat_count_accessibility": "Παρακολουθήθηκε %d φορές",
+    "auto_skip_intro": "Εισαγωγή / Άνοιγμα",
+    "auto_skip_intro_sub": "Αυτόματη παράλειψη εισαγωγών και anime openings.",
+    "auto_skip_recap": "Ανασκόπηση",
+    "auto_skip_recap_sub": "Αυτόματη παράλειψη τμημάτων ανασκόπησης.",
+    "auto_skip_outro": "Επίλογος / Τέλος",
+    "auto_skip_outro_sub": "Αυτόματη παράλειψη επιλόγων και anime endings."
   },
   "en": {
     "sidebar_genres_title": "Genres",
@@ -17725,7 +17767,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Use WeTrakr for Resume, Continue Watching, and scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Watched activity returned from your WeTrakr account",
     "watched_accessibility": "Watched",
-    "watched_repeat_count_accessibility": "Watched %d times"
+    "watched_repeat_count_accessibility": "Watched %d times",
+    "auto_skip_intro": "Intro / Opening",
+    "auto_skip_intro_sub": "Skip intros and anime openings automatically.",
+    "auto_skip_recap": "Recap",
+    "auto_skip_recap_sub": "Skip recap segments automatically.",
+    "auto_skip_outro": "Outro / Ending",
+    "auto_skip_outro_sub": "Skip outros and anime endings automatically."
   },
   "es": {
     "sidebar_genres_title": "Géneros",
@@ -19941,7 +19989,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Usa WeTrakr para Reanudar, Seguir viendo y el scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Actividad de visualización proporcionada por tu cuenta de WeTrakr",
     "watched_accessibility": "Visto",
-    "watched_repeat_count_accessibility": "Visto %d veces"
+    "watched_repeat_count_accessibility": "Visto %d veces",
+    "auto_skip_intro": "Intro / Opening",
+    "auto_skip_intro_sub": "Omitir automáticamente intros y openings de anime.",
+    "auto_skip_recap": "Resumen",
+    "auto_skip_recap_sub": "Omitir automáticamente los segmentos de resumen.",
+    "auto_skip_outro": "Outro / Ending",
+    "auto_skip_outro_sub": "Omitir automáticamente outros y endings de anime."
   },
   "es-419": {
     "sidebar_genres_title": "Géneros",
@@ -22157,7 +22211,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Usa WeTrakr para Reanudar, Seguir viendo y el scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Actividad de visualización proporcionada por tu cuenta de WeTrakr",
     "watched_accessibility": "Visto",
-    "watched_repeat_count_accessibility": "Visto %d veces"
+    "watched_repeat_count_accessibility": "Visto %d veces",
+    "auto_skip_intro": "Intro / Opening",
+    "auto_skip_intro_sub": "Omitir automáticamente intros y openings de anime.",
+    "auto_skip_recap": "Resumen",
+    "auto_skip_recap_sub": "Omitir automáticamente los segmentos de resumen.",
+    "auto_skip_outro": "Outro / Ending",
+    "auto_skip_outro_sub": "Omitir automáticamente outros y endings de anime."
   },
   "fr": {
     "sidebar_genres_title": "Genres",
@@ -24373,7 +24433,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Utiliser WeTrakr pour Reprendre, Continuer à regarder et le scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Activité de visionnage renvoyée par votre compte WeTrakr",
     "watched_accessibility": "Vu",
-    "watched_repeat_count_accessibility": "Vu %d fois"
+    "watched_repeat_count_accessibility": "Vu %d fois",
+    "auto_skip_intro": "Intro / Générique de début",
+    "auto_skip_intro_sub": "Passer automatiquement les intros et les génériques d’anime.",
+    "auto_skip_recap": "Résumé",
+    "auto_skip_recap_sub": "Passer automatiquement les segments de résumé.",
+    "auto_skip_outro": "Outro / Générique de fin",
+    "auto_skip_outro_sub": "Passer automatiquement les outros et les génériques de fin d’anime."
   },
   "he": {
     "sidebar_genres_title": "ז׳אנרים",
@@ -26589,7 +26655,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "השתמש ב-WeTrakr להמשך ניגון, להמשך צפייה ולדיווח צפייה",
     "tvos_settings_wetrakr_watch_stats_subtitle": "פעילות צפייה שמוחזרת מחשבון ה-WeTrakr שלך",
     "watched_accessibility": "נצפה",
-    "watched_repeat_count_accessibility": "נצפה %d פעמים"
+    "watched_repeat_count_accessibility": "נצפה %d פעמים",
+    "auto_skip_intro": "Intro / Opening",
+    "auto_skip_intro_sub": "Skip intros and anime openings automatically.",
+    "auto_skip_recap": "תקציר",
+    "auto_skip_recap_sub": "דלג אוטומטית על קטעי תקציר.",
+    "auto_skip_outro": "קטע סיום",
+    "auto_skip_outro_sub": "Skip outros and anime endings automatically."
   },
   "hi": {
     "sidebar_genres_title": "शैलियाँ",
@@ -28805,7 +28877,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "फिर से शुरू करने, देखना जारी रखने और स्क्रॉबलिंग के लिए WeTrakr का उपयोग करें",
     "tvos_settings_wetrakr_watch_stats_subtitle": "आपके WeTrakr खाते से देखी गई गतिविधि",
     "watched_accessibility": "देखा गया",
-    "watched_repeat_count_accessibility": "%d बार देखा गया"
+    "watched_repeat_count_accessibility": "%d बार देखा गया",
+    "auto_skip_intro": "इंट्रो / ओपनिंग",
+    "auto_skip_intro_sub": "इंट्रो और एनीमे ओपनिंग अपने आप छोड़ें।",
+    "auto_skip_recap": "रीकैप",
+    "auto_skip_recap_sub": "रीकैप सेगमेंट अपने आप छोड़ें।",
+    "auto_skip_outro": "आउट्रो / एंडिंग",
+    "auto_skip_outro_sub": "आउट्रो और एनीमे एंडिंग अपने आप छोड़ें।"
   },
   "hu": {
     "sidebar_genres_title": "Műfajok",
@@ -31021,7 +31099,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "A WeTrakr használata a Folytatáshoz, a Nézés folytatásához és a scrobblinghoz",
     "tvos_settings_wetrakr_watch_stats_subtitle": "A WeTrakr-fiókjából visszaadott megtekintési tevékenység",
     "watched_accessibility": "Megtekintve",
-    "watched_repeat_count_accessibility": "Megtekintve %d alkalommal"
+    "watched_repeat_count_accessibility": "Megtekintve %d alkalommal",
+    "auto_skip_intro": "Intro / Főcím",
+    "auto_skip_intro_sub": "Intrók és anime nyitányok automatikus átugrása.",
+    "auto_skip_recap": "Összefoglaló",
+    "auto_skip_recap_sub": "Összefoglaló részek automatikus átugrása.",
+    "auto_skip_outro": "Outro / Stáblista",
+    "auto_skip_outro_sub": "Outrók és anime zárások automatikus átugrása."
   },
   "in": {
     "sidebar_genres_title": "Genre",
@@ -33237,7 +33321,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Gunakan WeTrakr untuk Lanjutkan, Lanjutkan Menonton, dan pencatatan tontonan otomatis",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Aktivitas tontonan yang dikembalikan dari akun WeTrakr Anda",
     "watched_accessibility": "Ditonton",
-    "watched_repeat_count_accessibility": "Ditonton %d kali"
+    "watched_repeat_count_accessibility": "Ditonton %d kali",
+    "auto_skip_intro": "Intro / Pembuka",
+    "auto_skip_intro_sub": "Lewati intro dan pembuka anime secara otomatis.",
+    "auto_skip_recap": "Rekap",
+    "auto_skip_recap_sub": "Lewati segmen rekap secara otomatis.",
+    "auto_skip_outro": "Outro / Penutup",
+    "auto_skip_outro_sub": "Lewati outro dan penutup anime secara otomatis."
   },
   "it": {
     "sidebar_genres_title": "Generi",
@@ -35453,7 +35543,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Usa WeTrakr per Riprendi, Continua a guardare e scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Attività di visione restituita dal tuo account WeTrakr",
     "watched_accessibility": "Visto",
-    "watched_repeat_count_accessibility": "Visto %d volte"
+    "watched_repeat_count_accessibility": "Visto %d volte",
+    "auto_skip_intro": "Intro / Sigla iniziale",
+    "auto_skip_intro_sub": "Salta automaticamente le intro e le sigle degli anime.",
+    "auto_skip_recap": "Riassunto",
+    "auto_skip_recap_sub": "Salta automaticamente i riassunti degli episodi precedenti.",
+    "auto_skip_outro": "Outro / Sigla finale",
+    "auto_skip_outro_sub": "Salta automaticamente le outro e le sigle finali degli anime."
   },
   "ja": {
     "sidebar_genres_title": "ジャンル",
@@ -37669,7 +37765,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "再開、視聴を続ける、スクロブリングに WeTrakr を使用",
     "tvos_settings_wetrakr_watch_stats_subtitle": "WeTrakr アカウントから返された視聴アクティビティ",
     "watched_accessibility": "視聴済み",
-    "watched_repeat_count_accessibility": "%d回視聴済み"
+    "watched_repeat_count_accessibility": "%d回視聴済み",
+    "auto_skip_intro": "イントロ / オープニング",
+    "auto_skip_intro_sub": "イントロとアニメのオープニングを自動スキップ",
+    "auto_skip_recap": "リキャップ",
+    "auto_skip_recap_sub": "リキャップセグメントを自動スキップ",
+    "auto_skip_outro": "アウトロ / エンディング",
+    "auto_skip_outro_sub": "アウトロとアニメのエンディングを自動スキップ"
   },
   "lt": {
     "sidebar_genres_title": "Žanrai",
@@ -39885,7 +39987,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Naudoti WeTrakr tęsimui, tolesniam žiūrėjimui ir scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Žiūrėjimo veikla iš jūsų WeTrakr paskyros",
     "watched_accessibility": "Žiūrėta",
-    "watched_repeat_count_accessibility": "Žiūrėta %d kartus"
+    "watched_repeat_count_accessibility": "Žiūrėta %d kartus",
+    "auto_skip_intro": "Įžanga / Pradžia",
+    "auto_skip_intro_sub": "Automatiškai praleisti įžangas ir anime pradžias.",
+    "auto_skip_recap": "Santrauka",
+    "auto_skip_recap_sub": "Automatiškai praleisti santraukų fragmentus.",
+    "auto_skip_outro": "Pabaiga / Pabaigos titrai",
+    "auto_skip_outro_sub": "Automatiškai praleisti pabaigos dalis ir anime pabaigas."
   },
   "nl": {
     "sidebar_genres_title": "Genres",
@@ -42101,7 +42209,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Gebruik WeTrakr voor Hervatten, Verder kijken en scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Kijkactiviteit van je WeTrakr-account",
     "watched_accessibility": "Gezien",
-    "watched_repeat_count_accessibility": "%d keer gezien"
+    "watched_repeat_count_accessibility": "%d keer gezien",
+    "auto_skip_intro": "Intro / Opening",
+    "auto_skip_intro_sub": "Intro’s en anime-openings automatisch overslaan.",
+    "auto_skip_recap": "Samenvatting",
+    "auto_skip_recap_sub": "Samenvattingssegmenten automatisch overslaan.",
+    "auto_skip_outro": "Outro / Eindscène",
+    "auto_skip_outro_sub": "Outro’s en anime-eindes automatisch overslaan."
   },
   "no": {
     "sidebar_genres_title": "Sjangre",
@@ -44317,7 +44431,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Bruk WeTrakr for Fortsett, Se videre og scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Seeraktivitet fra WeTrakr-kontoen din",
     "watched_accessibility": "Sett",
-    "watched_repeat_count_accessibility": "Sett %d ganger"
+    "watched_repeat_count_accessibility": "Sett %d ganger",
+    "auto_skip_intro": "Intro / Åpning",
+    "auto_skip_intro_sub": "Hopp over introer og anime-åpninger automatisk.",
+    "auto_skip_recap": "Oppsummering",
+    "auto_skip_recap_sub": "Hopp over oppsummeringer automatisk.",
+    "auto_skip_outro": "Outro / Sluttsekvens",
+    "auto_skip_outro_sub": "Hopp over outroer og anime-avslutninger automatisk."
   },
   "pl": {
     "sidebar_genres_title": "Gatunki",
@@ -46533,7 +46653,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Używaj WeTrakr do wznawiania, kontynuowania oglądania i scrobblingu",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Aktywność oglądania zwrócona z Twojego konta WeTrakr",
     "watched_accessibility": "Obejrzano",
-    "watched_repeat_count_accessibility": "Obejrzano %d razy"
+    "watched_repeat_count_accessibility": "Obejrzano %d razy",
+    "auto_skip_intro": "Intro / Opening",
+    "auto_skip_intro_sub": "Automatycznie pomijaj intra i openingi anime.",
+    "auto_skip_recap": "Podsumowanie",
+    "auto_skip_recap_sub": "Automatycznie pomijaj segmenty podsumowań.",
+    "auto_skip_outro": "Outro / Ending",
+    "auto_skip_outro_sub": "Automatycznie pomijaj outra i endingi anime."
   },
   "pt-BR": {
     "sidebar_genres_title": "Gêneros",
@@ -48749,7 +48875,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Use o WeTrakr para Retomar, Continuar assistindo e scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Atividade de visualização retornada da sua conta do WeTrakr",
     "watched_accessibility": "Assistido",
-    "watched_repeat_count_accessibility": "Assistido %d vezes"
+    "watched_repeat_count_accessibility": "Assistido %d vezes",
+    "auto_skip_intro": "Aberturas",
+    "auto_skip_intro_sub": "Pula aberturas e intros automaticamente",
+    "auto_skip_recap": "Resumo anterior",
+    "auto_skip_recap_sub": "Pula o resumo do episódio anterior",
+    "auto_skip_outro": "Encerramentos (Créditos)",
+    "auto_skip_outro_sub": "Pula os encerramentos automaticamente"
   },
   "pt-PT": {
     "sidebar_genres_title": "Géneros",
@@ -50965,7 +51097,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Usar o WeTrakr para Retomar, Continuar a ver e scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Atividade de visualização devolvida pela sua conta WeTrakr",
     "watched_accessibility": "Visto",
-    "watched_repeat_count_accessibility": "Visto %d vezes"
+    "watched_repeat_count_accessibility": "Visto %d vezes",
+    "auto_skip_intro": "Introdução / Abertura",
+    "auto_skip_intro_sub": "Saltar introduções e aberturas de anime automaticamente.",
+    "auto_skip_recap": "Resumo",
+    "auto_skip_recap_sub": "Saltar resumos de episódios automaticamente.",
+    "auto_skip_outro": "Encerramento / Créditos finais",
+    "auto_skip_outro_sub": "Saltar encerramentos e créditos de anime automaticamente."
   },
   "ro": {
     "sidebar_genres_title": "Genuri",
@@ -53181,7 +53319,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Folosiți WeTrakr pentru reluare, continuarea vizionării și scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Activitatea de vizionare returnată din contul dvs. WeTrakr",
     "watched_accessibility": "Vizionat",
-    "watched_repeat_count_accessibility": "Vizionat de %d ori"
+    "watched_repeat_count_accessibility": "Vizionat de %d ori",
+    "auto_skip_intro": "Introducere / Deschidere",
+    "auto_skip_intro_sub": "Sari automat peste introduceri și deschideri anime.",
+    "auto_skip_recap": "Recapitulare",
+    "auto_skip_recap_sub": "Sari automat peste segmentele de recapitulare.",
+    "auto_skip_outro": "Outro / Încheiere",
+    "auto_skip_outro_sub": "Sari automat peste outro-uri și finaluri anime."
   },
   "ru": {
     "sidebar_genres_title": "Жанры",
@@ -55397,7 +55541,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Использовать WeTrakr для продолжения, «Продолжить просмотр» и скробблинга",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Активность просмотра, полученная из вашего аккаунта WeTrakr",
     "watched_accessibility": "Просмотрено",
-    "watched_repeat_count_accessibility": "Просмотрено %d раз"
+    "watched_repeat_count_accessibility": "Просмотрено %d раз",
+    "auto_skip_intro": "Вступление / Опенинг",
+    "auto_skip_intro_sub": "Автоматически пропускать вступления и опенинги аниме.",
+    "auto_skip_recap": "Рекап",
+    "auto_skip_recap_sub": "Автоматически пропускать рекап-сегменты.",
+    "auto_skip_outro": "Аутро / Эндинг",
+    "auto_skip_outro_sub": "Автоматически пропускать аутро и эндинги аниме."
   },
   "sk": {
     "sidebar_genres_title": "Žánre",
@@ -57613,7 +57763,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Používať WeTrakr na Pokračovať, Pokračovať v sledovaní a scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Sledovaná aktivita vrátená z vášho účtu WeTrakr",
     "watched_accessibility": "Zhliadnuté",
-    "watched_repeat_count_accessibility": "Zhliadnuté %d-krát"
+    "watched_repeat_count_accessibility": "Zhliadnuté %d-krát",
+    "auto_skip_intro": "Intro / Úvod",
+    "auto_skip_intro_sub": "Automaticky preskočiť intrá a anime úvody.",
+    "auto_skip_recap": "Rekapitulácia",
+    "auto_skip_recap_sub": "Automaticky preskočiť segmenty rekapitulácie.",
+    "auto_skip_outro": "Outro / Záver",
+    "auto_skip_outro_sub": "Automaticky preskočiť outrá a anime závery."
   },
   "sl": {
     "sidebar_genres_title": "Žanri",
@@ -59829,7 +59985,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Uporabite WeTrakr za nadaljevanje, Nadaljujte z gledanjem in scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Dejavnost ogleda, ki jo vrne vaš račun WeTrakr",
     "watched_accessibility": "Ogledano",
-    "watched_repeat_count_accessibility": "Ogledano %d-krat"
+    "watched_repeat_count_accessibility": "Ogledano %d-krat",
+    "auto_skip_intro": "Uvod / Uvodna špica",
+    "auto_skip_intro_sub": "Samodejno preskoči uvode in anime uvodne špice.",
+    "auto_skip_recap": "Povzetek",
+    "auto_skip_recap_sub": "Samodejno preskoči segmente s povzetki.",
+    "auto_skip_outro": "Odjava / Odjavna špica",
+    "auto_skip_outro_sub": "Samodejno preskoči odjave in anime odjavne špice."
   },
   "sv": {
     "sidebar_genres_title": "Genrer",
@@ -62045,7 +62207,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Använd WeTrakr för Fortsätt, Fortsätt titta och scrobbling",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Tittaraktivitet från ditt WeTrakr-konto",
     "watched_accessibility": "Sedd",
-    "watched_repeat_count_accessibility": "Sedd %d gånger"
+    "watched_repeat_count_accessibility": "Sedd %d gånger",
+    "auto_skip_intro": "Intro / Öppning",
+    "auto_skip_intro_sub": "Hoppa över intron och anime-öppningar automatiskt.",
+    "auto_skip_recap": "Sammanfattning",
+    "auto_skip_recap_sub": "Hoppa över sammanfattningssegment automatiskt.",
+    "auto_skip_outro": "Outro / Slut",
+    "auto_skip_outro_sub": "Hoppa över outron och anime-slut automatiskt."
   },
   "ta": {
     "sidebar_genres_title": "வகைகள்",
@@ -64261,7 +64429,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "தொடர்ந்து இயக்க, தொடர்ந்து பார்க்க மற்றும் பார்வையைப் பதிவு செய்ய WeTrakrஐப் பயன்படுத்தவும்",
     "tvos_settings_wetrakr_watch_stats_subtitle": "உங்கள் WeTrakr கணக்கிலிருந்து வழங்கப்பட்ட பார்வைச் செயல்பாடு",
     "watched_accessibility": "பார்த்தது",
-    "watched_repeat_count_accessibility": "%d முறை பார்த்தது"
+    "watched_repeat_count_accessibility": "%d முறை பார்த்தது",
+    "auto_skip_intro": "அறிமுகம் / தொடக்கம்",
+    "auto_skip_intro_sub": "அறிமுகங்கள் மற்றும் anime தொடக்கங்களை தானாக தாவு.",
+    "auto_skip_recap": "மீள்பார்வு",
+    "auto_skip_recap_sub": "மீள்பார்வு பகுதிகளை தானாக தாவு.",
+    "auto_skip_outro": "முடிவு / நிறைவு",
+    "auto_skip_outro_sub": "முடிவு மற்றும் anime நிறைவுகளை தானாக தாவு."
   },
   "tr": {
     "sidebar_genres_title": "Türler",
@@ -66477,7 +66651,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Devam etme, İzlemeye Devam Et ve otomatik izleme kaydı için WeTrakr'ı kullanın",
     "tvos_settings_wetrakr_watch_stats_subtitle": "WeTrakr hesabınızdan döndürülen izleme etkinliği",
     "watched_accessibility": "İzlendi",
-    "watched_repeat_count_accessibility": "%d kez izlendi"
+    "watched_repeat_count_accessibility": "%d kez izlendi",
+    "auto_skip_intro": "Jenerik / Açılış",
+    "auto_skip_intro_sub": "Jenerik ve anime açılışlarını otomatik atla.",
+    "auto_skip_recap": "Özet",
+    "auto_skip_recap_sub": "Özet bölümlerini otomatik atla.",
+    "auto_skip_outro": "Jenerik / Kapanış",
+    "auto_skip_outro_sub": "Jenerik ve anime kapanışlarını otomatik atla."
   },
   "uk": {
     "sidebar_genres_title": "Жанри",
@@ -68693,7 +68873,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Використовувати WeTrakr для продовження, «Продовжити перегляд» і скроблінгу",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Активність перегляду, надана вашим обліковим записом WeTrakr",
     "watched_accessibility": "Переглянуто",
-    "watched_repeat_count_accessibility": "Переглянуто %d разів"
+    "watched_repeat_count_accessibility": "Переглянуто %d разів",
+    "auto_skip_intro": "Вступ / Опенінг",
+    "auto_skip_intro_sub": "Автоматично пропускати вступи та опенінги аніме.",
+    "auto_skip_recap": "Рекап",
+    "auto_skip_recap_sub": "Автоматично пропускати рекап-сегменти.",
+    "auto_skip_outro": "Аутро / Ендінг",
+    "auto_skip_outro_sub": "Автоматично пропускати аутро та ендінги аніме."
   },
   "vi": {
     "sidebar_genres_title": "Thể loại",
@@ -70909,7 +71095,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "Dùng WeTrakr cho Tiếp tục, Tiếp tục xem và ghi nhận lượt xem tự động",
     "tvos_settings_wetrakr_watch_stats_subtitle": "Hoạt động đã xem do tài khoản WeTrakr của bạn trả về",
     "watched_accessibility": "Đã xem",
-    "watched_repeat_count_accessibility": "Đã xem %d lần"
+    "watched_repeat_count_accessibility": "Đã xem %d lần",
+    "auto_skip_intro": "Mở đầu / Intro",
+    "auto_skip_intro_sub": "Tự động bỏ qua đoạn mở đầu và opening anime.",
+    "auto_skip_recap": "Tóm tắt",
+    "auto_skip_recap_sub": "Tự động bỏ qua các phân đoạn tóm tắt.",
+    "auto_skip_outro": "Kết thúc / Outro",
+    "auto_skip_outro_sub": "Tự động bỏ qua phần kết thúc và ending anime."
   },
   "zh-CN": {
     "sidebar_genres_title": "类型",
@@ -73125,7 +73317,13 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "使用 WeTrakr 处理续播、继续观看和观看记录同步",
     "tvos_settings_wetrakr_watch_stats_subtitle": "您的 WeTrakr 账户返回的观看活动",
     "watched_accessibility": "已观看",
-    "watched_repeat_count_accessibility": "已观看 %d 次"
+    "watched_repeat_count_accessibility": "已观看 %d 次",
+    "auto_skip_intro": "片头／开场",
+    "auto_skip_intro_sub": "自动跳过片头和动画开场。",
+    "auto_skip_recap": "前情提要",
+    "auto_skip_recap_sub": "自动跳过前情提要片段。",
+    "auto_skip_outro": "片尾／结尾",
+    "auto_skip_outro_sub": "自动跳过片尾和动画结尾。"
   },
   "zh-TW": {
     "sidebar_genres_title": "類型",
@@ -75341,6 +75539,12 @@
     "tvos_settings_wetrakr_watch_progress_subtitle": "使用 WeTrakr 處理續播、繼續觀看和觀看記錄同步",
     "tvos_settings_wetrakr_watch_stats_subtitle": "您的 WeTrakr 帳號傳回的觀看活動",
     "watched_accessibility": "已觀看",
-    "watched_repeat_count_accessibility": "已觀看 %d 次"
+    "watched_repeat_count_accessibility": "已觀看 %d 次",
+    "auto_skip_intro": "片頭／開場",
+    "auto_skip_intro_sub": "自動跳過片頭和動畫開場。",
+    "auto_skip_recap": "前情提要",
+    "auto_skip_recap_sub": "自動跳過前情提要片段。",
+    "auto_skip_outro": "片尾／結尾",
+    "auto_skip_outro_sub": "自動跳過片尾和動畫結尾。"
   }
 }

@@ -12,6 +12,7 @@ final class SceneCoordinator: ObservableObject {
     @Published private(set) var currentSnapshot: SceneSnapshot = .empty
     @Published private(set) var castCandidates: [SceneCastCandidate] = []
     @Published private(set) var isPanelOpen: Bool = false
+    var isFrameSamplingActive: Bool { samplingTask != nil }
     
     private let frameProvider: any SceneFrameProviding
     private let castProvider: any SceneCastProviding
@@ -231,13 +232,14 @@ final class SceneCoordinator: ObservableObject {
         }
     }
     
-    func handlePlaybackPaused() {
+    func handlePlaybackPaused(captureFrame: Bool = true) {
+        stopSampling()
         Task {
             await musicRecognition.reportPlaybackPaused()
         }
         guard isPanelOpen else { return }
         evaluateActiveSong(at: sourceTimeProvider())
-        if !isAnime {
+        if captureFrame, !isAnime {
             captureAndAnalyzeCurrentFrame(forGeneration: currentGeneration)
         }
     }
@@ -440,16 +442,20 @@ final class SceneCoordinator: ObservableObject {
     
     private func startFrameSampling(generation: UInt64) {
         samplingTask?.cancel()
+        samplingTask = nil
         
         // Initial immediate sample & song check
         evaluateActiveSong(at: sourceTimeProvider())
+        let isPlaying = isPlayingProvider()
         if !isAnime {
-            if isAnalyzingFrame, !isPlayingProvider() {
+            if isAnalyzingFrame, !isPlaying {
                 pendingPausedFrameGeneration = generation
             } else {
                 captureAndAnalyzeCurrentFrame(forGeneration: generation)
             }
         }
+        // A paused open/seek needs a settled one-shot frame, never a polling task.
+        guard isPlaying else { return }
         
         samplingTask = Task { [weak self] in
             while !Task.isCancelled {
