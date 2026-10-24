@@ -6,9 +6,16 @@
 
 > 🎉 **Thank you for 300+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping reach 300+ stars on GitHub! Your feedback, issue reports, and testing make this possible.
 
-### AetherEngine 7.47.0 & Video/Audio Core Upgrade
+### In-App Update Notices & Remote Announcements
+
+- **Automated Release Update Notices:** Integrated `ReleaseUpdateService` to detect new official releases directly within the app, displaying non-intrusive update banners with instant QR code download links, version comparison, and skip options.
+- **Broadcast Announcements:** Added `AnnouncementService` with support for remote broadcast notices and release highlights (`announcements.json`) with focus-safe dismissals and persistent acknowledgement tracking.
+- **Update Settings & Privacy:** Added customizable release update toggles in Settings allowing users to configure or disable update checking at any time.
+
+### AetherEngine 7.47.0 & Live HLS Stream Recovery
 
 - **AetherEngine 7.47.0 Integration:** Upgraded core playback engine to version 7.47.0 with native live HLS starvation recovery policies (`NativeLiveHLSStarvationPolicy`) and live join keyframe alignment.
+- **Origin HOLD-BACK & Loop Elimination:** Restored origin HOLD-BACK for live HLS playback, eliminating buffer exhaustion and screen refresh loops on unstable streams.
 - **Stereo Video Signal Support:** Added `StereoVideoSignal` structures and pipeline interfaces for enhanced 3D/spatial video readiness.
 - **Audio Host Rebuffering & Spatial Audio:** Hardened `AudioAVPlayerHost` rebuffering resilience and object audio renderer tracking for immersive Atmos and DTS:X streams.
 
