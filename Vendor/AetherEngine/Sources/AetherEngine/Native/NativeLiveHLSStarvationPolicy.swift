@@ -7,8 +7,15 @@ struct NativeLiveHLSStarvationPolicy {
 
     static let intervalSeconds = 1.0
     static let starvationSeconds = 6.0
-    static let lowBufferSeconds = 1.5
+    /// Cushion threshold for proactive re-buffering: re-join before buffer drains to 0.
+    static let lowBufferSeconds = 3.5
+    /// Minimum time without frontier growth when cushion is low before initiating re-join.
+    static let lowBufferStarvationSeconds = 2.0
+    /// Emergency threshold: buffer is critically close to running out (< 1.5s).
+    static let criticalBufferSeconds = 1.5
     static let maximumRejoins = 2
+    /// Playback duration without starvation required to replenish the retry budget.
+    static let recoveryBudgetCooldownSeconds = 30.0
 
     private(set) var rejoinCount = 0
     private var highestBufferFrontier: Double?
@@ -16,9 +23,11 @@ struct NativeLiveHLSStarvationPolicy {
     private var previousClock: Double?
     private var previousBufferedEnd: Double?
     private var lastClockAdvanceAt: Double?
+    private var lastRejoinUptime: Double?
 
     mutating func resetForNewSession() {
         rejoinCount = 0
+        lastRejoinUptime = nil
         resetObservation()
     }
 
@@ -52,6 +61,13 @@ struct NativeLiveHLSStarvationPolicy {
         guard uptime.isFinite, renderedTime.isFinite, bufferedEnd.isFinite else {
             resetObservation()
             return .none
+        }
+
+        // Replenish rejoin budget after sustained healthy playback
+        if rejoinCount > 0, let lastRejoin = lastRejoinUptime,
+           uptime - lastRejoin >= Self.recoveryBudgetCooldownSeconds {
+            rejoinCount = 0
+            lastRejoinUptime = nil
         }
 
         if let previousClock, let previousBufferedEnd,
@@ -89,17 +105,31 @@ struct NativeLiveHLSStarvationPolicy {
         previousClock = renderedTime
         previousBufferedEnd = bufferedEnd
 
-        guard let lastFrontierGrowthAt,
-              uptime - lastFrontierGrowthAt >= Self.starvationSeconds else { return .none }
+        guard let lastFrontierGrowthAt else { return .none }
 
-        let bufferIsLow = bufferedEnd - renderedTime <= Self.lowBufferSeconds
+        let cushion = max(0, bufferedEnd - renderedTime)
+        let growthStallSeconds = uptime - lastFrontierGrowthAt
+
+        // 1. Critical cushion: buffer is about to run out (< 1.5s). Trigger immediately if growth stalled for 1s.
+        if cushion <= Self.criticalBufferSeconds && growthStallSeconds >= 1.0 {
+            return reserveRejoin(uptime: uptime)
+        }
+
+        // 2. Proactive low-buffer re-join: buffer has dropped into danger zone (<= 3.5s).
+        // Trigger while buffer is still playing to complete re-join BEFORE buffer hits 0.
+        if cushion <= Self.lowBufferSeconds && growthStallSeconds >= Self.lowBufferStarvationSeconds {
+            return reserveRejoin(uptime: uptime)
+        }
+
+        // 3. Stalled / frozen transport: player is paused/waiting and clock has frozen.
         let clockIsFrozen = lastClockAdvanceAt.map {
             uptime - $0 >= Self.starvationSeconds
         } ?? false
-        // Rejoin before a live buffer drains completely, even while the player is still moving.
-        // A larger stale cushion only qualifies when transport is stalled and its clock is frozen.
-        guard bufferIsLow || (transportIsStalled && clockIsFrozen) else { return .none }
-        return reserveRejoin()
+        if transportIsStalled && clockIsFrozen && growthStallSeconds >= Self.starvationSeconds {
+            return reserveRejoin(uptime: uptime)
+        }
+
+        return .none
     }
 
     mutating func confirmedFailure() -> Decision {
@@ -107,9 +137,10 @@ struct NativeLiveHLSStarvationPolicy {
         return reserveRejoin()
     }
 
-    private mutating func reserveRejoin() -> Decision {
+    private mutating func reserveRejoin(uptime: Double? = nil) -> Decision {
         guard rejoinCount < Self.maximumRejoins else { return .exhausted }
         rejoinCount += 1
+        if let uptime { lastRejoinUptime = uptime }
         return .rejoin
     }
 }

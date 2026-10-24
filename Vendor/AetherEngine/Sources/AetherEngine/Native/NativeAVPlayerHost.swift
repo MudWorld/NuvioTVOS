@@ -1110,7 +1110,11 @@ final class NativeAVPlayerHost {
                 case .none:
                     continue
                 case .rejoin:
-                    guard self.performLiveHLSRejoin(item: item, reason: "sustained starvation") else {
+                    let cushion = max(0, bufferedEnd - clock)
+                    let reason = cushion > 0
+                        ? "proactive low buffer recovery (cushion=\(String(format: "%.2f", cushion))s)"
+                        : "sustained starvation"
+                    guard self.performLiveHLSRejoin(item: item, reason: reason) else {
                         self.publishLiveHLSRecoveryExhausted(item: item)
                         return
                     }
