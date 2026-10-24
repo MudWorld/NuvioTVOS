@@ -7853,12 +7853,21 @@ private struct WeTrakrConnectedStatsStrip: View {
     }
 }
 
-private struct ProviderLoginGlassButton: View {
+struct ProviderLoginGlassButton: View {
     let title: String
     let isPrimary: Bool
+    var focusBinding: FocusState<Bool>.Binding? = nil
     let action: () -> Void
 
-    @FocusState private var isFocused: Bool
+    @FocusState private var internalIsFocused: Bool
+
+    private var resolvedFocusBinding: FocusState<Bool>.Binding {
+        focusBinding ?? $internalIsFocused
+    }
+
+    private var isFocused: Bool {
+        focusBinding?.wrappedValue ?? internalIsFocused
+    }
 
     var body: some View {
         Button(action: action) {
@@ -7874,7 +7883,7 @@ private struct ProviderLoginGlassButton: View {
                 .scaleEffect(isFocused ? 1.04 : 1)
         }
         .buttonStyle(PosterCardButtonStyle())
-        .focused($isFocused)
+        .focused(resolvedFocusBinding)
         .focusEffectDisabledIfAvailable()
         .animation(.easeOut(duration: 0.12), value: isFocused)
     }
@@ -9472,15 +9481,88 @@ private struct AdvancedSettingsView: View {
 
 private struct AboutSettingsView: View {
     let accentColor: Color
+    @EnvironmentObject private var releaseUpdateService: ReleaseUpdateService
+    @EnvironmentObject private var announcementService: AnnouncementService
     @State private var showingLicenses = false
+    @State private var showingReleaseQR = false
+    @State private var selectedAnnouncement: Announcement?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             SettingsGroup(title: L10n.string("tvos_settings_nuviotv", fallback: "NuvioTV"), subtitle: L10n.string("tvos_settings_build_and_runtime_information", fallback: "Build and runtime information")) {
                 SettingsInfoRow(title: L10n.string("tvos_settings_app_version", fallback: "App Version"), value: appVersion)
+                SettingsInfoRow(
+                    title: L10n.string("release_update_latest_version", fallback: "Latest Version"),
+                    value: releaseUpdateService.latestStatus
+                )
+                SettingsToggleRow(
+                    title: L10n.string("release_update_check_toggle", fallback: "Check for Updates"),
+                    subtitle: L10n.string("release_update_check_toggle_subtitle", fallback: "Check GitHub for a newer NuvioTV release"),
+                    isOn: Binding(
+                        get: { releaseUpdateService.isEnabled },
+                        set: {
+                            releaseUpdateService.setEnabled($0)
+                            if $0 {
+                                Task { await releaseUpdateService.checkIfNeeded() }
+                            }
+                        }
+                    ),
+                    accentColor: accentColor
+                )
+                .settingsEntryAnchor()
+                if let release = releaseUpdateService.latestRelease {
+                    SettingsActionRow(
+                        title: L10n.string("release_update_details", fallback: "Release Details"),
+                        subtitle: L10n.string("release_update_details_subtitle", fallback: "View version \(release.displayVersion) release notes and QR code"),
+                        value: L10n.string("tvos_settings_view", fallback: "View"),
+                        accentColor: accentColor
+                    ) {
+                        showingReleaseQR = true
+                    }
+                    .sheet(isPresented: $showingReleaseQR) {
+                        ReleaseQRCodeSheet(release: release)
+                    }
+                }
                 SettingsInfoRow(title: L10n.string("tvos_settings_engine_core", fallback: "Engine Core"), value: L10n.string("tvos_settings_pure_swift", fallback: "Pure Swift"))
                 SettingsInfoRow(title: L10n.string("tvos_settings_playback_stack", fallback: "Playback Stack"), value: "AetherEngine / MPVKit")
                 SettingsInfoRow(title: L10n.string("tvos_settings_catalog_protocol", fallback: "Catalog Protocol"), value: L10n.string("tvos_settings_stremio_compatible", fallback: "Stremio compatible"))
+            }
+
+            SettingsGroup(
+                title: L10n.string("announcements_title", fallback: "Announcements"),
+                subtitle: L10n.string("announcements_settings_subtitle", fallback: "Messages from the NuvioTV maintainers")
+            ) {
+                SettingsInfoRow(
+                    title: L10n.string("announcements_status", fallback: "Message Status"),
+                    value: announcementService.status
+                )
+                SettingsToggleRow(
+                    title: L10n.string("announcements_check_toggle", fallback: "Check for Announcements"),
+                    subtitle: L10n.string("announcements_check_toggle_subtitle", fallback: "Check for notices from the NuvioTV maintainers"),
+                    isOn: Binding(
+                        get: { announcementService.isEnabled },
+                        set: {
+                            announcementService.setEnabled($0)
+                            if $0 {
+                                Task { await announcementService.checkIfNeeded() }
+                            }
+                        }
+                    ),
+                    accentColor: accentColor
+                )
+                if let announcement = announcementService.firstActiveAnnouncement {
+                    SettingsActionRow(
+                        title: L10n.string("announcement_read_message", fallback: "Read Message"),
+                        subtitle: announcement.title,
+                        value: L10n.string("tvos_settings_view", fallback: "View"),
+                        accentColor: accentColor
+                    ) {
+                        selectedAnnouncement = announcement
+                    }
+                }
+            }
+            .sheet(item: $selectedAnnouncement) { announcement in
+                AppNoticeDetailsSheet(notice: .announcement(announcement))
             }
 
             SettingsGroup(
@@ -9506,7 +9588,6 @@ private struct AboutSettingsView: View {
                 ) {
                     showingLicenses = true
                 }
-                .settingsEntryAnchor()
             }
         }
         .sheet(isPresented: $showingLicenses) {

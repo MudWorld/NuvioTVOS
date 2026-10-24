@@ -423,6 +423,8 @@ struct ContentView: View {
     @State private var detailsBackStack: [(id: String, type: String)] = []
     @State private var nextDetailsPlaybackRequestID: UInt = 0
     @State private var pendingDetailsPlaybackRequestID: UInt?
+    @State private var presentedAppNoticeDetails: AppNotice?
+    @State private var appNoticeFocusRequestGeneration: UInt = 0
     /// Where the root Details screen should return. This is normally Home, but
     /// a title opened from a collection must return to that collection.
     @State private var detailsReturnDestination: DetailsReturnDestination = .main
@@ -441,6 +443,8 @@ struct ContentView: View {
     @StateObject private var searchViewModel = SearchViewModel()
     @StateObject private var netflixSearchViewModel = NetflixSearchViewModel()
     @StateObject private var libraryViewModel = LibraryViewModel()
+    @StateObject private var releaseUpdateService = ReleaseUpdateService()
+    @StateObject private var announcementService = AnnouncementService()
     // Owned here (not inside TVHomeView) so the Home catalog + focused card
     // survive the details/player push, which tears TVHomeView down. Returning
     // then restores the exact card instead of reloading and jumping to the top.
@@ -550,11 +554,32 @@ struct ContentView: View {
                 .transition(.asymmetric(insertion: .identity, removal: .opacity))
                 .zIndex(999)
             }
+
+            if let notice = visibleAppNotice {
+                AppNoticeBanner(
+                    notice: notice,
+                    currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0",
+                    accentColor: AppFocusOutline.color,
+                    focusRequestGeneration: appNoticeFocusRequestGeneration,
+                    isDetailsPresented: presentedAppNoticeDetails != nil,
+                    onShowDetails: { presentedAppNoticeDetails = notice },
+                    onDismiss: { dismissAppNotice(notice) },
+                    onSkip: { skipAppNotice(notice) }
+                )
+                .id(notice.id)
+                .padding(.trailing, 52)
+                .padding(.bottom, 42)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(10)
+            }
         }
         // Resolve every @AppStorage in the app against the active profile's
         // settings suite, so each profile keeps its own theme, layout, playback
         // preferences, etc. Falls back to the shared store before a profile is picked.
         .defaultAppStorage(ProfileSettings.store(for: profileViewModel.activeProfile?.id))
+        .environmentObject(releaseUpdateService)
+        .environmentObject(announcementService)
         // Apply selected app language (locale + L10n catalog) and refresh UI on change.
         .appliesAppLocale()
         .onChange(of: profileViewModel.activeProfile?.id) { _, _ in
@@ -582,6 +607,9 @@ struct ContentView: View {
                 partyLaunchID = UUID(); partyLaunchTask?.cancel(); partyLaunchTask = nil
             }
         }
+        .onChange(of: visibleAppNotice?.id) { _, noticeID in
+            if noticeID != nil { appNoticeFocusRequestGeneration &+= 1 }
+        }
         .overlay {
             if partyLaunchTask != nil {
                 VStack(spacing: 24) {
@@ -604,7 +632,14 @@ struct ContentView: View {
         // catches those stray presses and dismisses the overlay instead. When
         // focus is settled inside Details/Player their own handler fires first,
         // so this only kicks in for the in-between frames.
-        .onExitCommand(perform: isOverlayPresented ? dismissOverlay : nil)
+        .onExitCommand(perform: visibleAppNotice != nil
+            ? dismissVisibleAppNotice
+            : (isOverlayPresented ? dismissOverlay : nil))
+        .sheet(item: $presentedAppNoticeDetails, onDismiss: {
+            appNoticeFocusRequestGeneration &+= 1
+        }) {
+            AppNoticeDetailsSheet(notice: $0)
+        }
         .onChange(of: watchPartyOwner.presentation?.id) { old, new in
             if old == nil, let new, activeScreen.isPlayer, playbackPartyID == nil {
                 // InSight adopted the already-playing PlayerViewModel. Keep its view identity stable.
@@ -635,6 +670,8 @@ struct ContentView: View {
             watchPartyOwner.resumeAfterForeground()
         }
         .onAppear {
+            Task { await releaseUpdateService.checkIfNeeded() }
+            Task { await announcementService.checkIfNeeded() }
             if WatchPartyConfiguration.isEnabled {
                 watchPartyOwner.attach(authManager: authManager, profiles: profileViewModel)
             }
@@ -726,6 +763,12 @@ struct ContentView: View {
                 backgroundedAt = Date()
                 syncManager.flushPendingPushes()
             case .active:
+                if backgroundedAt != nil {
+                    releaseUpdateService.beginForegroundSession()
+                    announcementService.beginForegroundSession()
+                }
+                Task { await releaseUpdateService.checkIfNeeded() }
+                Task { await announcementService.checkIfNeeded() }
                 syncManager.refreshAccountIfIdle()
                 presentProfileSelectionAfterBackgroundIfNeeded()
                 watchPartyOwner.resumeAfterForeground()
@@ -810,13 +853,61 @@ struct ContentView: View {
         return fullScreenOverlayPresented
     }
 
+    private var selectedAppNotice: AppNotice? {
+        AppNotice.select(
+            release: releaseUpdateService.latestRelease,
+            releaseIsAvailable: releaseUpdateService.shouldShowNotice,
+            announcementsEnabled: announcementService.isEnabled,
+            activeAnnouncements: announcementService.activeAnnouncements,
+            skippedAnnouncementIDs: announcementService.skippedAnnouncementIDs,
+            dismissedAnnouncementIDs: announcementService.dismissedAnnouncementIDs
+        )
+    }
+
+    private var visibleAppNotice: AppNotice? {
+        guard resolvedInitialScreen,
+              activeScreen == .main,
+              !isPreparingProfile,
+              !isOverlayPresented,
+              partyLaunchTask == nil,
+              selectedTab == .home else {
+            return nil
+        }
+        return selectedAppNotice
+    }
+
+    private func dismissVisibleAppNotice() {
+        guard let visibleAppNotice else { return }
+        dismissAppNotice(visibleAppNotice)
+    }
+
+    private func dismissAppNotice(_ notice: AppNotice) {
+        switch notice {
+        case .release(let release):
+            releaseUpdateService.dismissNotice(tag: release.tagName)
+        case .announcement(let announcement):
+            announcementService.dismiss(id: announcement.id)
+        }
+    }
+
+    private func skipAppNotice(_ notice: AppNotice) {
+        switch notice {
+        case .release(let release):
+            releaseUpdateService.skipCurrentVersion(tag: release.tagName)
+        case .announcement(let announcement):
+            announcementService.skip(id: announcement.id)
+        }
+    }
+
     /// Full-screen overlays already hide Home with alpha zero. Propagating
     /// `.disabled` through that hidden tree changes `isEnabled` for every
     /// resident card and forces the shelves to lay themselves out again while
     /// Details is entering. Keep the environment lock for visible menus, where
     /// Home still needs to stay on screen but must not receive focus.
     private var shouldDisableHomeContent: Bool {
-        isOverlayPresented && !fullScreenOverlayPresented
+        visibleAppNotice != nil
+            || presentedAppNoticeDetails != nil
+            || (isOverlayPresented && !fullScreenOverlayPresented)
     }
 
     /// Details/Player fully replace Home, so the tab view fades to black under
