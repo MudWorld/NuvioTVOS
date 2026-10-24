@@ -48,22 +48,22 @@ Download the latest Apple TV `.ipa` from [Releases](https://github.com/bobsupra/
 ## Latest tvOS Beta
 
 <!-- BEGIN LATEST_BETA -->
-**Beta 3.4.6** is the latest tvOS release.
+**Beta 3.4.7** is the latest tvOS release.
 
-[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.6/NuvioTV-3.4.6-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.6) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
+[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.7/NuvioTV-3.4.7-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.7) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
 <!-- END LATEST_BETA -->
 
 > 🎉 **Thank you for 300+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 300+ stars!
 
 The IPA requires a compatible tvOS development or sideloading signing workflow before installation.
 
-### New in Beta 3.4.6
+### New in Beta 3.4.7
 
-- **Watch Party on tvOS (Beta):** Dedicated sidebar space (`TVTab.party`) for joining and hosting rooms, Scene/Insight menu room creation, real-time incoming chat messages from mobile and desktop members, guest shared-source playback, and frame-accurate sync ("Watch the new Cyberpunk: Edgerunners Season 2 with your chooms").
-- **Independent Multi-Service Scrobble:** Simultaneously sync playback progress and completion history across Trakt, Simkl, WeTrakr, and MDBList without cross-service collisions, strictly scoped per profile.
-- **AetherEngine 7.46.0 & MPVKit Update:** Upgraded AetherEngine to 7.46.0 with FFmpegBuild 3.9.0 (DTS:X height channels via patched `dca` decoder), vendored MPVKit with MoltenVK 1.4.2, and hardened live stream startup and recovery.
-- **Scene Menu Frame Capture & UI Enhancements:** Active playback frame capture in Scene panel, preferred-language trailer resolution, expanded custom poster pattern recognition, and Jellyfin library grouping.
-- **Comprehensive Native Translations:** Complete native translations and terminology alignments across European Portuguese, Traditional Chinese, Simplified Chinese, French, Spanish, German, and Arabic.
+- **In-App Update Notices & Remote Announcements:** Direct in-app detection of new official releases (`ReleaseUpdateService`) with focus-safe update prompts, QR code download links, and customizable update notification toggles in Settings. Added `AnnouncementService` with support for remote broadcast alerts and release highlights (`announcements.json`).
+- **AetherEngine 7.47.0 & Live HLS Stream Recovery:** Upgraded core playback engine to version 7.47.0 with native live HLS starvation recovery (`NativeLiveHLSStarvationPolicy`), origin HOLD-BACK restoration to eliminate buffer loops, tuned live edge cushion, and keyframe-aligned live joins.
+- **Performance Optimization & Zero-Allocation Diagnostics:** Zero-allocation `@autoclosure` string tracing in `HomeView`, eliminated startup benchmark logging and table formatting in Release builds, and silenced hot-path loop diagnostics (scrub watchdogs, tap brokers, face detection, continue-watching store heartbeats).
+- **Watch Party Polish & Multi-Service Scrobble:** Streamlined sign-in flow directly from the Party tab for expired sessions, hardened cross-platform chat toast layouts, and unified simultaneous scrobbling across Trakt, Simkl, and WeTrakr.
+- **Localization Polish:** Refined translations and terminology across European Portuguese, Traditional Chinese, Simplified Chinese, French, Spanish, German, and Arabic.
 
 ### Built-in Player
 

@@ -4572,9 +4572,9 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         resetAISubtitleStartupHold()
         loadGeneration = generation
         let isRemote = PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
-        let isRemoteHLS = request.videoURL.pathExtension.lowercased() == "m3u8"
+        let isRemoteHLS = PlaybackBackendPolicy.isHLS(request.videoURL.absoluteString)
+            || request.videoURL.pathExtension.lowercased() == "m3u8"
             || request.videoURL.absoluteString.contains(".m3u8")
-            || request.videoURL.absoluteString.contains("manifest.googlevideo.com")
             || request.videoURL.host?.contains("googlevideo.com") == true
             || request.streamDescription == PlaybackMarkers.trailerSubtitle
         // The hybrid cache is a local HTTP range server on 127.0.0.1.
@@ -4704,7 +4704,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             // Read the active profile for each load; unsupported sources keep the normal bridge.
             objectAudioRendering: SpatialAudioSettings.rendering(),
             isLive: isLive,
-            liveEdgeCushionSeconds: isLive ? 15.0 : nil,
+            liveEdgeCushionSeconds: isLive ? 3.0 : nil,
             liveJoinStartsImmediately: true,
             nativeRemoteHLS: isRemoteHLS,
             // AetherEngine honors this for ASS/SSA codec tracks only; other text
