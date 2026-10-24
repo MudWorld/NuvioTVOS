@@ -9484,10 +9484,12 @@ private struct AdvancedSettingsView: View {
 private struct AboutSettingsView: View {
     let accentColor: Color
     @EnvironmentObject private var releaseUpdateService: ReleaseUpdateService
+    @EnvironmentObject private var atvloadlyService: AtvloadlyService
     @EnvironmentObject private var announcementService: AnnouncementService
     @State private var showingLicenses = false
     @State private var showingReleaseQR = false
     @State private var selectedAnnouncement: Announcement?
+    @State private var showingSideloadUpdates = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -9497,6 +9499,22 @@ private struct AboutSettingsView: View {
                     title: L10n.string("release_update_latest_version", fallback: "Latest Version"),
                     value: releaseUpdateService.latestStatus
                 )
+                if releaseUpdateService.isEnabled {
+                    SettingsActionRow(
+                        title: L10n.string("release_update_check_now", fallback: "Check Now"),
+                        subtitle: atvloadlyService.isEnabled
+                            ? L10n.string("release_update_check_now_atvloadly_subtitle", fallback: "Check GitHub now and install a newer version with atvloadly")
+                            : L10n.string("release_update_check_now_subtitle", fallback: "Check GitHub for a newer version now"),
+                        value: releaseUpdateService.isChecking
+                            ? L10n.string("atvloadly_status_checking", fallback: "Checking…")
+                            : L10n.string("release_update_check_now_value", fallback: "Check"),
+                        accentColor: accentColor
+                    ) {
+                        Task { await checkNow() }
+                    }
+                    // The first focusable row of the pane when it's shown.
+                    .settingsEntryAnchor()
+                }
                 SettingsToggleRow(
                     title: L10n.string("release_update_check_toggle", fallback: "Check for Updates"),
                     subtitle: L10n.string("release_update_check_toggle_subtitle", fallback: "Check GitHub for a newer NuvioTV release"),
@@ -9511,7 +9529,22 @@ private struct AboutSettingsView: View {
                     ),
                     accentColor: accentColor
                 )
-                .settingsEntryAnchor()
+                .settingsEntryAnchor(!releaseUpdateService.isEnabled)
+                SettingsActionRow(
+                    title: L10n.string("sideload_updates_title", fallback: "Sideload Updates"),
+                    subtitle: L10n.string("sideload_updates_row_subtitle", fallback: "Install new versions with atvloadly on your network"),
+                    value: atvloadlyService.isEnabled
+                        ? L10n.string("sideload_updates_on", fallback: "atvloadly · On")
+                        : L10n.string("sideload_updates_off", fallback: "Off"),
+                    accentColor: accentColor
+                ) {
+                    showingSideloadUpdates = true
+                }
+                .sheet(isPresented: $showingSideloadUpdates) {
+                    SideloadUpdatesSheet(accentColor: accentColor)
+                        .environmentObject(atvloadlyService)
+                        .modifier(ClearPresentationBackgroundIfAvailable())
+                }
                 if let release = releaseUpdateService.latestRelease {
                     SettingsActionRow(
                         title: L10n.string("release_update_details", fallback: "Release Details"),
@@ -9598,6 +9631,18 @@ private struct AboutSettingsView: View {
         }
     }
 
+    /// Checks GitHub right away. A newer version is installed with atvloadly
+    /// when it's on; otherwise its release page and QR code are shown.
+    private func checkNow() async {
+        await releaseUpdateService.checkIfNeeded(force: true)
+        guard releaseUpdateService.isUpdateAvailable, let release = releaseUpdateService.latestRelease else { return }
+        if atvloadlyService.isEnabled {
+            await atvloadlyService.install(release: release)
+        } else {
+            showingReleaseQR = true
+        }
+    }
+
     private var appVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
@@ -9606,6 +9651,129 @@ private struct AboutSettingsView: View {
 }
 
 /// Local attributions for components this tvOS build actually ships with.
+/// Settings → About → Sideload Updates: installing NuvioTV updates with the
+/// user's atvloadly server, the self-hosted signer many Apple TV users
+/// sideload with. Everything here is off until "Use atvloadly" is turned on.
+private struct SideloadUpdatesSheet: View {
+    let accentColor: Color
+
+    @EnvironmentObject private var atvloadlyService: AtvloadlyService
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @State private var serverDraft = ""
+    @State private var showingDevices = false
+
+    var body: some View {
+        ZStack {
+            Color.nuvioBackground(amoled: amoled, body: bodyColor)
+                .ignoresSafeArea()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(L10n.string("sideload_updates_title", fallback: "Sideload Updates"))
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(.white)
+
+                        Text(L10n.string(
+                            "sideload_updates_description",
+                            fallback: "Install new NuvioTV versions with atvloadly, the self-hosted signer on your network. NuvioTV has to be linked to a source there (More → Track updates)."
+                        ))
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.white.opacity(0.62))
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    SettingsGroup(
+                        title: "atvloadly",
+                        subtitle: L10n.string("atvloadly_settings_subtitle", fallback: "Your atvloadly server and how updates are installed")
+                    ) {
+                        SettingsToggleRow(
+                            title: L10n.string("atvloadly_use", fallback: "Use atvloadly"),
+                            subtitle: L10n.string("atvloadly_use_subtitle", fallback: "Show Install on the update notice and install from Check Now"),
+                            isOn: Binding(
+                                get: { atvloadlyService.isEnabled },
+                                set: { atvloadlyService.setEnabled($0) }
+                            ),
+                            accentColor: accentColor
+                        )
+                        if atvloadlyService.isEnabled {
+                            SettingsTextFieldRow(
+                                title: L10n.string("atvloadly_server", fallback: "Server"),
+                                subtitle: L10n.string("atvloadly_server_subtitle", fallback: "The address of your atvloadly"),
+                                placeholder: "http://192.168.1.10:9000",
+                                text: $serverDraft,
+                                fieldWidth: 420,
+                                onCommit: {
+                                    atvloadlyService.setServerAddress(serverDraft)
+                                    Task { await atvloadlyService.refresh() }
+                                }
+                            )
+                            SettingsToggleRow(
+                                title: L10n.string("atvloadly_auto_install", fallback: "Install Updates Automatically"),
+                                subtitle: L10n.string(
+                                    "atvloadly_auto_install_subtitle",
+                                    fallback: "Off by default. Installs a new version from the Home screen after a 10-second countdown, never during playback. NuvioTV closes while it updates."
+                                ),
+                                isOn: Binding(
+                                    get: { atvloadlyService.installsAutomatically },
+                                    set: { atvloadlyService.setInstallsAutomatically($0) }
+                                ),
+                                accentColor: accentColor
+                            )
+                            if atvloadlyService.entries.count > 1 {
+                                SettingsActionRow(
+                                    title: L10n.string("atvloadly_device", fallback: "Apple TV"),
+                                    subtitle: L10n.string("atvloadly_device_subtitle", fallback: "atvloadly has NuvioTV for several Apple TVs"),
+                                    value: atvloadlyService.selectedEntry?.deviceLabel
+                                        ?? L10n.string("atvloadly_device_choose", fallback: "Choose"),
+                                    accentColor: accentColor
+                                ) {
+                                    showingDevices = true
+                                }
+                                .confirmationDialog(
+                                    L10n.string("atvloadly_device", fallback: "Apple TV"),
+                                    isPresented: $showingDevices
+                                ) {
+                                    ForEach(atvloadlyService.entries) { entry in
+                                        Button("\(entry.deviceLabel) · \(entry.version)") {
+                                            atvloadlyService.selectApp(id: entry.id)
+                                        }
+                                    }
+                                }
+                            }
+                            SettingsActionRow(
+                                title: L10n.string("atvloadly_status", fallback: "Status"),
+                                subtitle: atvloadlyService.statusText,
+                                value: L10n.string("atvloadly_status_refresh", fallback: "Refresh"),
+                                accentColor: accentColor
+                            ) {
+                                Task { await atvloadlyService.refresh() }
+                            }
+                        }
+                    }
+                }
+                .frame(width: 1_000, alignment: .leading)
+                .padding(.horizontal, 52)
+                .padding(.vertical, 38)
+            }
+            .focusSection()
+        }
+        .onExitCommand { dismiss() }
+        .onAppear {
+            serverDraft = atvloadlyService.serverAddress
+            if atvloadlyService.isEnabled {
+                Task { await atvloadlyService.refresh() }
+            }
+        }
+        // Kept even if the keyboard is closed without Done.
+        .onChange(of: serverDraft) { _, text in
+            atvloadlyService.setServerAddress(text)
+        }
+    }
+}
+
 private struct LicensesAttributionsSheet: View {
     let accentColor: Color
     @Environment(\.dismiss) private var dismiss

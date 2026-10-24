@@ -41,9 +41,13 @@ struct NuvioTVApp: App {
         #endif
     }
 
+    /// Injected here rather than in ContentView's long modifier chain.
+    @StateObject private var atvloadlyService = AtvloadlyService()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(atvloadlyService)
         }
     }
 }
@@ -444,6 +448,7 @@ struct ContentView: View {
     @StateObject private var netflixSearchViewModel = NetflixSearchViewModel()
     @StateObject private var libraryViewModel = LibraryViewModel()
     @StateObject private var releaseUpdateService = ReleaseUpdateService()
+    @EnvironmentObject private var atvloadlyService: AtvloadlyService
     @StateObject private var announcementService = AnnouncementService()
     // Owned here (not inside TVHomeView) so the Home catalog + focused card
     // survive the details/player push, which tears TVHomeView down. Returning
@@ -564,7 +569,8 @@ struct ContentView: View {
                     isDetailsPresented: presentedAppNoticeDetails != nil,
                     onShowDetails: { presentedAppNoticeDetails = notice },
                     onDismiss: { dismissAppNotice(notice) },
-                    onSkip: { skipAppNotice(notice) }
+                    onSkip: { skipAppNotice(notice) },
+                    installAction: atvloadlyInstallAction(for: notice)
                 )
                 .id(notice.id)
                 .padding(.trailing, 52)
@@ -573,6 +579,8 @@ struct ContentView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .zIndex(10)
             }
+
+            AtvloadlyNoticeCountdownDriver(release: atvloadlyNoticeRelease)
         }
         // Resolve every @AppStorage in the app against the active profile's
         // settings suite, so each profile keeps its own theme, layout, playback
@@ -881,9 +889,30 @@ struct ContentView: View {
         dismissAppNotice(visibleAppNotice)
     }
 
+    /// The release notice while it is on screen with nothing over it (Home,
+    /// nothing playing): the only time an automatic atvloadly install may
+    /// count down.
+    private var atvloadlyNoticeRelease: ReleaseUpdateMetadata? {
+        guard scenePhase == .active, presentedAppNoticeDetails == nil,
+              case .release(let release)? = visibleAppNotice else { return nil }
+        return release
+    }
+
+    private func atvloadlyInstallAction(for notice: AppNotice) -> AppNoticeInstallAction? {
+        guard atvloadlyService.isEnabled, case .release(let release) = notice else { return nil }
+        return AppNoticeInstallAction(
+            title: L10n.string("atvloadly_install", fallback: "Install"),
+            message: atvloadlyService.noticeMessage(for: release),
+            isCountingDown: atvloadlyService.isCountingDown,
+            perform: { Task { await atvloadlyService.install(release: release) } },
+            cancelCountdown: { atvloadlyService.cancelCountdown() }
+        )
+    }
+
     private func dismissAppNotice(_ notice: AppNotice) {
         switch notice {
         case .release(let release):
+            atvloadlyService.noticeDismissed(tag: release.tagName)
             releaseUpdateService.dismissNotice(tag: release.tagName)
         case .announcement(let announcement):
             announcementService.dismiss(id: announcement.id)
@@ -893,6 +922,7 @@ struct ContentView: View {
     private func skipAppNotice(_ notice: AppNotice) {
         switch notice {
         case .release(let release):
+            atvloadlyService.noticeDismissed(tag: release.tagName)
             releaseUpdateService.skipCurrentVersion(tag: release.tagName)
         case .announcement(let announcement):
             announcementService.skip(id: announcement.id)

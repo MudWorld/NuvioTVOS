@@ -146,7 +146,8 @@ final class ReleaseUpdateService: ObservableObject {
         isChecking = false
     }
 
-    func checkIfNeeded() async {
+    /// `force` is Settings → Check Now: it skips the once-a-day limit.
+    func checkIfNeeded(force: Bool = false) async {
         guard isEnabled else { return }
         if let inFlightTask {
             await inFlightTask.value
@@ -154,7 +155,8 @@ final class ReleaseUpdateService: ObservableObject {
         }
 
         let attemptDate = now()
-        if let lastAttempt = defaults.object(forKey: Self.lastAttemptKey) as? Date,
+        if !force,
+           let lastAttempt = defaults.object(forKey: Self.lastAttemptKey) as? Date,
            attemptDate.timeIntervalSince(lastAttempt) < 24 * 60 * 60 {
             return
         }

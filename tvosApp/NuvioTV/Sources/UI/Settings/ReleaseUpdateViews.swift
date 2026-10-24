@@ -1,8 +1,40 @@
 import SwiftUI
 import UIKit
 
+/// The release notice's "Install with atvloadly" button and what it shows
+/// while counting down, installing or after a failure.
+struct AppNoticeInstallAction {
+    let title: String
+    /// Replaces the notice's message when set.
+    let message: String?
+    /// While counting down, Dismiss becomes Cancel: it stops the countdown
+    /// and keeps the notice.
+    let isCountingDown: Bool
+    let perform: () -> Void
+    let cancelCountdown: () -> Void
+}
+
+/// Tells the atvloadly service when the release notice is on screen with
+/// nothing over it, so an automatic install counts down only then. A view of
+/// its own keeps ContentView's modifier chain short enough to type-check.
+struct AtvloadlyNoticeCountdownDriver: View {
+    @EnvironmentObject private var atvloadlyService: AtvloadlyService
+    let release: ReleaseUpdateMetadata?
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onChange(of: release?.tagName, initial: true) { _, _ in
+                atvloadlyService.releaseNoticeChanged(release)
+            }
+    }
+}
+
 struct AppNoticeBanner: View {
     private enum Action: Hashable {
+        case install
         case viewRelease
         case dismiss
         case skip
@@ -16,6 +48,8 @@ struct AppNoticeBanner: View {
     let onShowDetails: () -> Void
     let onDismiss: () -> Void
     let onSkip: () -> Void
+    /// Set for release notices when the user installs updates with atvloadly.
+    var installAction: AppNoticeInstallAction? = nil
 
     @FocusState private var focusedAction: Action?
     @State private var appliedFocusRequestGeneration: UInt?
@@ -34,10 +68,18 @@ struct AppNoticeBanner: View {
         return false
     }
 
+    /// Install takes focus only while it counts down, so pressing Select on a
+    /// fresh notice still opens the release instead of closing the app.
+    private var primaryFocus: Action {
+        installAction?.isCountingDown == true ? .install : .viewRelease
+    }
+
+    private var isCountingDown: Bool { installAction?.isCountingDown == true }
+
     private var message: String {
         switch notice {
         case .release:
-            L10n.string("release_update_available_subtitle", fallback: "You’re using version \(currentVersion). View the release or scan its QR code.")
+            installAction?.message ?? L10n.string("release_update_available_subtitle", fallback: "You’re using version \(currentVersion). View the release or scan its QR code.")
         case .announcement(let announcement):
             announcement.message
         }
@@ -113,6 +155,15 @@ struct AppNoticeBanner: View {
             }
 
             HStack(spacing: 12) {
+                if let installAction {
+                    actionButton(
+                        installAction.title,
+                        systemImage: "arrow.down.app",
+                        focus: .install,
+                        accessibilityIdentifier: "release-notice-install-atvloadly",
+                        action: installAction.perform
+                    )
+                }
                 actionButton(
                     primaryTitle,
                     systemImage: primarySystemImage,
@@ -122,10 +173,12 @@ struct AppNoticeBanner: View {
                 )
                 Spacer(minLength: 8)
                 actionButton(
-                    L10n.string("action_dismiss", fallback: "Dismiss"),
+                    isCountingDown
+                        ? L10n.string("action_cancel", fallback: "Cancel")
+                        : L10n.string("action_dismiss", fallback: "Dismiss"),
                     focus: .dismiss,
                     accessibilityIdentifier: dismissAccessibilityIdentifier,
-                    action: onDismiss
+                    action: isCountingDown ? (installAction?.cancelCountdown ?? onDismiss) : onDismiss
                 )
                 actionButton(
                     skipTitle,
@@ -136,11 +189,11 @@ struct AppNoticeBanner: View {
             }
         }
         .padding(24)
-        .frame(width: 860, alignment: .leading)
+        .frame(width: installAction == nil ? 860 : 1040, alignment: .leading)
         .loginGlassPanel()
         .accessibilityElement(children: .contain)
         .focusSection()
-        .defaultFocus($focusedAction, .viewRelease, priority: .userInitiated)
+        .defaultFocus($focusedAction, primaryFocus, priority: .userInitiated)
         .task(id: focusRequestIdentity) {
             await requestViewReleaseFocusIfNeeded()
         }
@@ -167,7 +220,7 @@ struct AppNoticeBanner: View {
             focusedAction = nil
             await Task.yield()
             guard !Task.isCancelled, !isDetailsPresented else { return }
-            focusedAction = .viewRelease
+            focusedAction = primaryFocus
         }
 
         requestViewReleaseFocusIfNil()
@@ -181,7 +234,7 @@ struct AppNoticeBanner: View {
 
     private func requestViewReleaseFocusIfNil() {
         guard focusedAction == nil, !isDetailsPresented else { return }
-        focusedAction = .viewRelease
+        focusedAction = primaryFocus
     }
 
     private func actionButton(
