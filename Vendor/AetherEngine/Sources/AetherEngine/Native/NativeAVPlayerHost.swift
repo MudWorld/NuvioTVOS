@@ -617,8 +617,7 @@ final class NativeAVPlayerHost {
         // 4s default matches loopback HLS segment cadence; raising it for live makes AVPlayer race to the edge and stall at the transcode warm-up gap.
         // Remote-HLS passes 0 (system adaptive): 4s forced a 3-4s black screen on bandwidth-limited Jellyfin live transcodes.
         item.preferredForwardBufferDuration = forwardBufferDuration
-        if sessionContract.isLive {
-            let offset = sessionContract.liveEdgeOffsetSeconds ?? 15.0
+        if sessionContract.isLive, let offset = sessionContract.liveEdgeOffsetSeconds {
             item.configuredTimeOffsetFromLive = CMTime(seconds: offset, preferredTimescale: 1000)
             item.automaticallyPreservesTimeOffsetFromLive = true
             // The origin's HOLD-BACK is only known once its playlist is read, and a shallower cushion
@@ -1110,11 +1109,7 @@ final class NativeAVPlayerHost {
                 case .none:
                     continue
                 case .rejoin:
-                    let cushion = max(0, bufferedEnd - clock)
-                    let reason = cushion > 0
-                        ? "proactive low buffer recovery (cushion=\(String(format: "%.2f", cushion))s)"
-                        : "sustained starvation"
-                    guard self.performLiveHLSRejoin(item: item, reason: reason) else {
+                    guard self.performLiveHLSRejoin(item: item, reason: "sustained starvation") else {
                         self.publishLiveHLSRecoveryExhausted(item: item)
                         return
                     }

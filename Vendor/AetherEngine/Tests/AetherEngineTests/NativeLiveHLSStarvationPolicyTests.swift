@@ -3,24 +3,21 @@ import Testing
 
 @Suite("Native remote-HLS starvation recovery")
 struct NativeLiveHLSStarvationPolicyTests {
-    @Test("proactive low live cushion rejoins before buffer drains to zero")
+    @Test("low live cushion rejoins after six seconds without producer frontier growth")
     func lowCushionCountdown() {
         var policy = NativeLiveHLSStarvationPolicy()
-        // At T=0, cushion is 18 - 10 = 8.0s (healthy)
         #expect(sample(&policy, at: 0, clock: 10, end: 18) == .none)
-        // At T=3.0, cushion is 18 - 14.0 = 4.0s (still > lowBufferSeconds 3.5s)
-        #expect(sample(&policy, at: 3.0, clock: 14.0, end: 18) == .none)
-        // At T=5.0, cushion is 18 - 15.5 = 2.5s (<= 3.5s, no growth for 5.0s >= 2.0s) -> proactive rejoin while 2.5s remains
-        #expect(sample(&policy, at: 5.0, clock: 15.5, end: 18) == .rejoin)
+        #expect(sample(&policy, at: 5.9, clock: 16.4, end: 18) == .none)
+        #expect(sample(&policy, at: 6.1, clock: 16.6, end: 18) == .rejoin)
     }
 
     @Test("a transient refill restarts the six-second countdown")
     func transientRefill() {
         var policy = NativeLiveHLSStarvationPolicy()
         #expect(sample(&policy, at: 0, clock: 10, end: 11) == .none)
-        #expect(sample(&policy, at: 5, clock: 15, end: 20) == .none)
-        #expect(sample(&policy, at: 10.9, clock: 15, end: 20, stalled: true) == .none)
-        #expect(sample(&policy, at: 11.1, clock: 15, end: 20, stalled: true) == .rejoin)
+        #expect(sample(&policy, at: 5, clock: 15, end: 17) == .none)
+        #expect(sample(&policy, at: 10.9, clock: 15, end: 17, stalled: true) == .none)
+        #expect(sample(&policy, at: 11.1, clock: 15, end: 17, stalled: true) == .rejoin)
     }
 
     @Test("a frozen rollback rejoins with stale buffer still ahead of the playhead")
@@ -100,19 +97,6 @@ struct NativeLiveHLSStarvationPolicyTests {
         #expect(policy.confirmedFailure() == .rejoin)
         #expect(sample(&policy, at: 0, clock: 10, end: 11) == .none)
         #expect(sample(&policy, at: 6.1, clock: 10, end: 11) == .exhausted)
-    }
-
-    @Test("sustained healthy playback replenishes the recovery budget")
-    func recoveryBudgetReplenishedAfterCooldown() {
-        var policy = NativeLiveHLSStarvationPolicy()
-        #expect(policy.confirmedFailure() == .rejoin)
-        #expect(policy.rejoinCount == 1)
-        policy.resetObservation()
-        // Simulate healthy playback past the cooldown
-        #expect(sample(&policy, at: 0, clock: 10, end: 18) == .none)
-        #expect(sample(&policy, at: 35, clock: 45, end: 55) == .none)
-        // The budget should be replenished back to 0 spent
-        #expect(policy.rejoinCount == 0)
     }
 
     private func sample(
