@@ -677,6 +677,43 @@ final class UsenetSourceTests: XCTestCase {
         XCTAssertEqual(later.take(1_000_000, now: start + .seconds(1)), .seconds(0.5))
     }
 
+    func testTokenBucketRefundsCancelledReadAhead() {
+        let start = ContinuousClock.Instant.now
+        var bucket = UsenetTokenBucket(megabitsPerSecond: 8, now: start) // 1 MB/s, 1 MiB burst
+        _ = bucket.take(1_048_576, now: start)
+        XCTAssertEqual(bucket.take(1_000_000, now: start), .seconds(1))
+        // The read-ahead was cancelled by a seek: the next request doesn't queue behind it.
+        bucket.refund(1_000_000)
+        XCTAssertEqual(bucket.take(1_000_000, now: start), .seconds(1))
+        // A refund never fills the bucket beyond its burst.
+        bucket.refund(10_000_000)
+        XCTAssertEqual(bucket.tokens, bucket.capacity)
+    }
+
+    func testWaitQueuePutsPlaybackFirst() {
+        var queue = UsenetWaitQueue<Int>()
+        XCTAssertTrue(queue.isEmpty)
+        queue.append(1, urgent: false)
+        queue.append(2, urgent: true)
+        queue.append(3, urgent: false)
+        queue.append(4, urgent: true)
+        XCTAssertEqual(queue.popFirst(), 2)
+        XCTAssertEqual(queue.popFirst(), 4)
+        XCTAssertEqual(queue.popFirst(), 1)
+        queue.append(5, urgent: true)
+        XCTAssertEqual(queue.removeAll(), [5, 3])
+        XCTAssertTrue(queue.isEmpty)
+        XCTAssertNil(queue.popFirst())
+    }
+
+    func testReadAheadNextToThePlayheadIsNotPaced() {
+        XCTAssertEqual(UsenetStreamSession.priority(of: 11, playhead: 10), .next)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 10 + UsenetStreamSession.nextArticles, playhead: 10), .next)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 11 + UsenetStreamSession.nextArticles, playhead: 10), .readAhead)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 10, playhead: 10), .readAhead)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 5, playhead: 10), .readAhead)
+    }
+
     func testSpeedLimitSetting() {
         let store = UserDefaults(suiteName: "usenet-speed-\(UUID().uuidString)")!
         XCTAssertEqual(UsenetSettings.speedLimitMbps(store: store), 0)

@@ -28,6 +28,11 @@ struct UsenetTokenBucket {
         guard tokens < 0 else { return .zero }
         return .seconds(-tokens / bytesPerSecond)
     }
+
+    /// Gives back bytes that were taken but never downloaded.
+    mutating func refund(_ bytes: Int) {
+        tokens = min(capacity, tokens + Double(bytes))
+    }
 }
 
 /// The speed cap shared by every connection of one stream.
@@ -39,9 +44,53 @@ actor UsenetRateLimiter {
         bucket = UsenetTokenBucket(megabitsPerSecond: megabitsPerSecond, now: .now)
     }
 
+    /// Waits until `bytes` fit under the cap. A wait cut short by a seek
+    /// gives its bytes back, so it doesn't slow the reads after the seek.
     func consume(_ bytes: Int) async throws {
         let wait = bucket.take(bytes, now: .now)
-        if wait > .zero { try await Task.sleep(for: wait) }
+        guard wait > .zero else { return }
+        do {
+            try await Task.sleep(for: wait)
+        } catch {
+            bucket.refund(bytes)
+            throw error
+        }
+    }
+
+    /// Counts bytes without waiting: the player is waiting for them, and the
+    /// read-ahead after them still keeps to the cap.
+    func charge(_ bytes: Int) {
+        _ = bucket.take(bytes, now: .now)
+    }
+
+    func refund(_ bytes: Int) {
+        bucket.refund(bytes)
+    }
+}
+
+/// Fetches waiting for a connection: what the player waits for goes first.
+struct UsenetWaitQueue<Element> {
+    private var urgent: [Element] = []
+    private var normal: [Element] = []
+
+    var isEmpty: Bool { urgent.isEmpty && normal.isEmpty }
+
+    mutating func append(_ element: Element, urgent isUrgent: Bool) {
+        if isUrgent { urgent.append(element) } else { normal.append(element) }
+    }
+
+    mutating func popFirst() -> Element? {
+        if !urgent.isEmpty { return urgent.removeFirst() }
+        if !normal.isEmpty { return normal.removeFirst() }
+        return nil
+    }
+
+    mutating func removeAll() -> [Element] {
+        defer {
+            urgent = []
+            normal = []
+        }
+        return urgent + normal
     }
 }
 
@@ -55,7 +104,9 @@ actor UsenetConnectionPool {
         let config: UsenetServerConfig
         var idle: [UsenetNNTPConnection] = []
         var open = 0
-        var waiters: [CheckedContinuation<Void, Never>] = []
+        /// Each waiter is handed a released connection directly, or nil when
+        /// a slot frees up (or the pool closes) and it should try again.
+        var waiters = UsenetWaitQueue<CheckedContinuation<UsenetNNTPConnection?, Never>>()
     }
 
     private var servers: [ServerState]
@@ -80,21 +131,64 @@ actor UsenetConnectionPool {
         case missing
     }
 
+    /// Who an article is for, which decides its place in line and the speed cap.
+    enum FetchPriority: Sendable {
+        /// Working out the release before playback: not limited.
+        case startup
+        /// The player is waiting for it: first in line for a connection,
+        /// counted towards the cap but never held back by it.
+        case playback
+        /// Read-ahead right after the playhead, needed in a moment: counted
+        /// towards the cap but never held back by it.
+        case next
+        /// The rest of the read-ahead: waits for the cap.
+        case readAhead
+    }
+
+    /// How far a fetch got, for callers that may want to move it up.
+    enum FetchProgress: Sendable {
+        /// Past the speed cap, now waiting for a connection.
+        case passedCap
+        /// Has a connection (or is opening one): it will download.
+        case connected
+    }
+
     /// Fetches an article body, trying every server before giving up.
-    /// `paced` fetches (playback) wait for the speed cap; start-up fetches don't.
-    func fetch(messageID: String, expectedBytes: Int = 0, paced: Bool = false) async throws -> FetchOutcome {
-        if paced, let limiter, expectedBytes > 0 {
-            try await limiter.consume(expectedBytes)
+    func fetch(messageID: String, expectedBytes: Int = 0, priority: FetchPriority = .startup,
+               onProgress: (@Sendable (FetchProgress) -> Void)? = nil) async throws -> FetchOutcome {
+        var charged = 0
+        if let limiter, expectedBytes > 0 {
+            switch priority {
+            case .startup:
+                break
+            case .playback, .next:
+                await limiter.charge(expectedBytes)
+                charged = expectedBytes
+            case .readAhead:
+                try await limiter.consume(expectedBytes)
+                charged = expectedBytes
+            }
         }
-        switch try await run(messageID: messageID, statOnly: false) {
-        case .body(let body): return .body(body)
-        case .exists, .missing: return .missing
+        onProgress?(.passedCap)
+        var onConnected: (@Sendable () -> Void)?
+        if let onProgress { onConnected = { @Sendable in onProgress(.connected) } }
+        do {
+            switch try await run(messageID: messageID, statOnly: false, urgent: priority == .playback,
+                                 onConnected: onConnected) {
+            case .body(let body): return .body(body)
+            case .exists, .missing: return .missing
+            }
+        } catch is CancellationError {
+            // Cancelled before it got a connection (the player seeked away):
+            // nothing was downloaded, so give the bytes back.
+            if charged > 0 { await limiter?.refund(charged) }
+            throw CancellationError()
         }
     }
 
     /// Whether any server still has the article (`STAT`, nothing downloaded).
     func exists(messageID: String) async throws -> Bool {
-        switch try await run(messageID: messageID, statOnly: true) {
+        switch try await run(messageID: messageID, statOnly: true, urgent: false) {
         case .exists, .body: return true
         case .missing: return false
         }
@@ -129,7 +223,8 @@ actor UsenetConnectionPool {
         case missing
     }
 
-    private func run(messageID: String, statOnly: Bool) async throws -> Answer {
+    private func run(messageID: String, statOnly: Bool, urgent: Bool,
+                     onConnected: (@Sendable () -> Void)? = nil) async throws -> Answer {
         var authError: UsenetNNTPError?
         for index in servers.indices {
             var attempt = 0
@@ -138,7 +233,7 @@ actor UsenetConnectionPool {
                 try Task.checkCancellation()
                 let connection: UsenetNNTPConnection
                 do {
-                    connection = try await acquire(index)
+                    connection = try await acquire(index, urgent: urgent, onConnected: onConnected)
                 } catch let error as UsenetNNTPError {
                     if case .authenticationFailed = error { authError = error; break }
                     if error.isTransient, attempt < 3 { continue }
@@ -187,16 +282,18 @@ actor UsenetConnectionPool {
             let connections = servers[index].idle
             servers[index].idle = []
             servers[index].open = 0
-            let waiters = servers[index].waiters
-            servers[index].waiters = []
-            waiters.forEach { $0.resume() }
+            let waiters = servers[index].waiters.removeAll()
+            waiters.forEach { $0.resume(returning: nil) }
             Task { for connection in connections { await connection.close() } }
         }
     }
 
     // MARK: - Connections
 
-    private func acquire(_ index: Int) async throws -> UsenetNNTPConnection {
+    /// `onConnected` runs as soon as the fetch has a connection or a slot to
+    /// open one: from then on it will download and isn't worth moving up.
+    private func acquire(_ index: Int, urgent: Bool,
+                         onConnected: (@Sendable () -> Void)? = nil) async throws -> UsenetNNTPConnection {
         while true {
             guard !closed else { throw CancellationError() }
             if let connection = servers[index].idle.popLast() {
@@ -204,10 +301,12 @@ actor UsenetConnectionPool {
                     servers[index].open -= 1
                     continue
                 }
+                onConnected?()
                 return connection
             }
             if servers[index].open < servers[index].config.maxConnections {
                 servers[index].open += 1
+                onConnected?()
                 let connection = UsenetNNTPConnection(config: servers[index].config)
                 do {
                     try await connection.open()
@@ -218,19 +317,37 @@ actor UsenetConnectionPool {
                     throw error
                 }
             }
-            await withCheckedContinuation { continuation in
-                servers[index].waiters.append(continuation)
+            let handed = await withCheckedContinuation { (continuation: CheckedContinuation<UsenetNNTPConnection?, Never>) in
+                servers[index].waiters.append(continuation, urgent: urgent)
             }
+            // A read-ahead cancelled while it waited (the player seeked away)
+            // passes its turn on instead of downloading.
+            if Task.isCancelled {
+                if let handed { release(handed, to: index) } else { wakeOne(index) }
+                throw CancellationError()
+            }
+            guard let handed else { continue }      // a slot freed up: try again
+            if await handed.isClosed {
+                servers[index].open -= 1
+                continue
+            }
+            onConnected?()
+            return handed
         }
     }
 
+    /// Hands a finished connection straight to the first waiter, so a fetch
+    /// arriving meanwhile can't take it from the player's read.
     private func release(_ connection: UsenetNNTPConnection, to index: Int) {
         guard !closed else {
             Task { await connection.close() }
             return
         }
-        servers[index].idle.append(connection)
-        wakeOne(index)
+        if let waiter = servers[index].waiters.popFirst() {
+            waiter.resume(returning: connection)
+        } else {
+            servers[index].idle.append(connection)
+        }
     }
 
     private func discard(_ connection: UsenetNNTPConnection, from index: Int) {
@@ -239,9 +356,10 @@ actor UsenetConnectionPool {
         wakeOne(index)
     }
 
+    /// A slot freed up (a connection closed or failed to open): the first
+    /// waiter may open a new one.
     private func wakeOne(_ index: Int) {
-        guard !servers[index].waiters.isEmpty else { return }
-        servers[index].waiters.removeFirst().resume()
+        servers[index].waiters.popFirst()?.resume(returning: nil)
     }
 
     static func describe(_ error: UsenetNNTPError) -> String {
