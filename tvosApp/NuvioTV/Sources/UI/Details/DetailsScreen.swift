@@ -105,6 +105,12 @@ struct DetailsScreen: View {
     @State private var preFetchDebridTask: Task<Void, Never>? = nil
     @State private var preResolvedDuration: TimeInterval? = nil
     @State private var streamDiscoveryDuration: TimeInterval? = nil
+    @State private var playbackPrewarmer: DetailsPlaybackPrewarmer
+    @State private var isDetailsPlaybackContextActive = false
+    @State private var didHandOffPlayback = false
+    @State private var preResolutionIdentity: DetailsBackgroundResolutionIdentity?
+    @State private var preResolutionGeneration: UInt64 = 0
+    @State private var prewarmedSavedTarget: DetailsSavedPlaybackTarget?
     /// True while a torrent stream is being resolved through the debrid provider,
     /// so the picker can keep its spinner up instead of appearing to hang.
     @State private var isResolvingDebrid = false
@@ -172,6 +178,7 @@ struct DetailsScreen: View {
         self.creatingWatchPartyRoom = creatingWatchPartyRoom
         self.onWatchPartyMediaSelected = onWatchPartyMediaSelected
         _isPreparingInitialPlayback = State(initialValue: initialPlaybackRequestID != nil)
+        _playbackPrewarmer = State(initialValue: DetailsPlaybackPrewarmer.engineBacked())
         _viewModel = StateObject(wrappedValue: DetailsViewModel(repository: repository))
         TVHomeDebugTrace.log("details.init id=\(id) type=\(type)")
     }
@@ -298,7 +305,7 @@ struct DetailsScreen: View {
                     onPlayClick: {
                         if let url = viewModel.uiState.streams.first?.url,
                            let meta = viewModel.uiState.meta {
-                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil, nil, nil, false)
+                            dispatchPlayback(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil, nil, nil, false)
                         }
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
@@ -436,6 +443,9 @@ struct DetailsScreen: View {
             }
         }
         .onAppear {
+            isDetailsPlaybackContextActive = true
+            didHandOffPlayback = false
+            playbackPrewarmer.activateContext()
             cancelStartupRequest()
             isSmartPlaybackPending = false
             isResolvingDebrid = false
@@ -453,15 +463,22 @@ struct DetailsScreen: View {
             } else if viewModel.uiState.meta == nil || viewModel.uiState.meta?.id != id {
                 viewModel.loadDetails(id: id, type: type)
             } else {
-                if let meta = viewModel.uiState.meta, !meta.isSeries {
-                    onWatchPartyMovieReady?(meta)
+                if let meta = viewModel.uiState.meta {
+                    if !meta.isSeries {
+                        onWatchPartyMovieReady?(meta)
+                    }
+                    if viewModel.prefetchedStreamId == nil, pendingEpisode == nil {
+                        viewModel.triggerStreamPreFetch(for: meta)
+                    }
                 }
                 viewModel.refreshWatchlistAndWatchedStatus()
             }
             presentInitialStreamPickerIfNeeded()
+            performBackgroundAutoSelectionAndPreResolution()
         }
         .onDisappear {
             TVHomeDebugTrace.log("details.disappear id=\(id) type=\(type)")
+            isDetailsPlaybackContextActive = false
             cancelStartupRequest()
             cleanupPreFetchedResources()
             if let requestID = pendingInitialPlaybackRequestID {
@@ -479,6 +496,7 @@ struct DetailsScreen: View {
     /// Waiting for onDisappear is too late: enrichment can still publish
     /// updates while the opacity transition is trying to tear Details down.
     private func handleBack() {
+        isDetailsPlaybackContextActive = false
         cancelStartupRequest()
         cleanupPreFetchedResources()
         TVHomeDebugTrace.log("details.back.cancelTasks id=\(id)")
@@ -616,49 +634,117 @@ struct DetailsScreen: View {
         }
     }
 
+    private func savedPlaybackTarget(
+        for meta: NuvioMeta,
+        episode: NuvioVideo?,
+        profileID: String?,
+        manualPicker: Bool
+    ) -> DetailsSavedPlaybackTarget? {
+        DetailsSavedPlaybackTargetResolver.resolve(
+            metaID: meta.id,
+            episode: episode,
+            profileID: profileID,
+            reuseEnabled: reuseLastLink,
+            manualPicker: manualPicker,
+            lookup: { metaID, season, episodeNumber, profileID in
+                LastPlaybackStreamStore.load(
+                    metaId: metaID,
+                    season: season,
+                    episode: episodeNumber,
+                    profileId: profileID
+                )
+            }
+        )
+    }
+
+    private func dispatchPlayback(
+        _ streamUrl: String,
+        _ httpHeaders: [String: String],
+        _ meta: NuvioMeta,
+        _ subtitle: String,
+        _ externalSubtitles: [NuvioSubtitle],
+        _ currentEpisode: NuvioVideo?,
+        _ episodes: [NuvioVideo],
+        _ player: ExternalPlayer?,
+        _ cacheFileIdentity: PlaybackCacheFileIdentity?,
+        _ filename: String?,
+        _ videoSize: Int64?,
+        _ videoHash: String?,
+        _ resumeFrom: Double?,
+        _ startupBenchmarkToken: UUID?,
+        _ sourceID: String?,
+        _ isActionPlaybackSession: Bool
+    ) {
+        isDetailsPlaybackContextActive = false
+        didHandOffPlayback = true
+        _ = playbackPrewarmer.handOff(
+            urlString: streamUrl,
+            headers: httpHeaders,
+            retainOnlyIf: effectivePlayer(for: player) == .builtIn
+        )
+        resetPreResolutionCandidate()
+        onPlayClick(
+            streamUrl,
+            httpHeaders,
+            meta,
+            subtitle,
+            externalSubtitles,
+            currentEpisode,
+            episodes,
+            player,
+            cacheFileIdentity,
+            filename,
+            videoSize,
+            videoHash,
+            resumeFrom,
+            startupBenchmarkToken,
+            sourceID,
+            isActionPlaybackSession
+        )
+    }
+
     private func startStreamFlow(streamId: String, type: String, reload: Bool, forceManualPicker: Bool = false) {
         guard let meta = viewModel.uiState.meta else { return }
         streamPickerAvailabilityMessage = nil
 
         let activeProfileId = ProfileSettings.activeProfileID
 
-        if !forceManualPicker, reuseLastLink {
-            let season = pendingEpisode?.season
-            let episode = pendingEpisode?.episode
-            if let storedStream = LastPlaybackStreamStore.load(
-                metaId: meta.id,
-                season: season,
-                episode: episode,
-                profileId: activeProfileId
-            ), let url = URL(string: storedStream.url) {
-                let startupToken = ensureStartupRequest(title: meta.name)
-                isStreamPickerPresented = false
-                isPreparingPlayback = true
-                isSmartPlaybackPending = false
+        if let storedTarget = savedPlaybackTarget(
+            for: meta,
+            episode: pendingEpisode,
+            profileID: activeProfileId,
+            manualPicker: forceManualPicker
+        ) {
+            let startupToken = ensureStartupRequest(title: meta.name)
+            isStreamPickerPresented = false
+            isPreparingPlayback = true
+            isSmartPlaybackPending = false
 
-                onPlayClick(
-                    url.absoluteString,
-                    storedStream.httpHeaders,
-                    meta,
-                    pendingEpisodeSubtitle.isEmpty ? (pendingEpisode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? "") : pendingEpisodeSubtitle,
-                    [],
-                    pendingEpisode,
-                    orderedEpisodes(for: meta),
-                    nil,
-                    nil,
-                    nil,
-                    nil,
-                    nil,
-                    nil,
-                    startupToken,
-                    nil,
-                    false
-                )
-                return
-            }
+            dispatchPlayback(
+                storedTarget.url.absoluteString,
+                storedTarget.httpHeaders,
+                meta,
+                pendingEpisodeSubtitle.isEmpty ? (pendingEpisode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? "") : pendingEpisodeSubtitle,
+                [],
+                pendingEpisode,
+                orderedEpisodes(for: meta),
+                nil,
+                nil,
+                nil,
+                nil,
+                nil,
+                nil,
+                startupToken,
+                nil,
+                false
+            )
+            return
         }
 
         if forceManualPicker || !smartStreamSelection {
+            if forceManualPicker {
+                resetPreResolutionCandidate()
+            }
             cancelStartupRequest()
             isSmartPlaybackPending = false
             isResolvingDebrid = false
@@ -711,7 +797,7 @@ struct DetailsScreen: View {
                 BingeGroupStore.save(seriesId: meta.id, stream: preStream, profileId: activeProfileId)
             }
 
-            onPlayClick(
+            dispatchPlayback(
                 preURL.absoluteString,
                 preStream.httpHeaders ?? [:],
                 meta,
@@ -876,11 +962,19 @@ struct DetailsScreen: View {
     }
 
     private func cleanupPreFetchedResources() {
+        playbackPrewarmer.endContext()
         if preFetchDebridTask != nil || preResolvedURL != nil {
             print("[PreFetch] 🛑 Details view dismissed — cancelled pending background pre-resolution tasks and cleaned up pre-loaded resources.")
         }
+        resetPreResolutionCandidate()
+        streamDiscoveryDuration = nil
+    }
+
+    private func resetPreResolutionCandidate() {
+        preResolutionGeneration &+= 1
         preFetchDebridTask?.cancel()
         preFetchDebridTask = nil
+        preResolutionIdentity = nil
         preResolvedStream = nil
         preResolvedURL = nil
         preResolvedFilename = nil
@@ -889,7 +983,8 @@ struct DetailsScreen: View {
         preResolvedEpisode = nil
         preResolvedEpisodeSubtitle = ""
         preResolvedDuration = nil
-        streamDiscoveryDuration = nil
+        prewarmedSavedTarget = nil
+        playbackPrewarmer.discardCurrent()
     }
 
     @ViewBuilder
@@ -917,13 +1012,48 @@ struct DetailsScreen: View {
     }
 
     private func performBackgroundAutoSelectionAndPreResolution() {
+        guard isDetailsPlaybackContextActive, !didHandOffPlayback else { return }
         let prefetchEnabled = (ProfileSettings.current.object(forKey: SettingsKey.backgroundStreamPreFetch) as? Bool) ?? true
-        guard prefetchEnabled else { return }
-        guard let meta = viewModel.uiState.meta else { return }
+        guard prefetchEnabled else {
+            resetPreResolutionCandidate()
+            return
+        }
+        guard let meta = viewModel.uiState.meta else {
+            resetPreResolutionCandidate()
+            return
+        }
+        let savedEpisode = pendingEpisode ?? viewModel.prefetchedEpisode
+        if let savedTarget = savedPlaybackTarget(
+            for: meta,
+            episode: savedEpisode,
+            profileID: ProfileSettings.activeProfileID,
+            manualPicker: isStreamPickerPresented
+        ) {
+            let savedStreamID = savedEpisode.map { canonicalEpisodeStreamId(for: $0, meta: meta) } ?? meta.streamId
+            if viewModel.requestedStreamId == nil || viewModel.requestedStreamId == savedStreamID {
+                if prewarmedSavedTarget != savedTarget {
+                    resetPreResolutionCandidate()
+                    prewarmedSavedTarget = savedTarget
+                    print("[PreFetch] 🔗 Preparing saved playback target for \(savedEpisode == nil ? "movie" : "episode").")
+                }
+                maybeWarmSavedPlaybackTarget(savedTarget, meta: meta, episode: savedEpisode)
+                return
+            }
+        }
+        if prewarmedSavedTarget != nil {
+            resetPreResolutionCandidate()
+        }
         let streams = viewModel.uiState.streams
-        guard !streams.isEmpty else { return }
+        guard !streams.isEmpty else {
+            resetPreResolutionCandidate()
+            return
+        }
 
-        let currentStreamId = viewModel.prefetchedStreamId ?? meta.streamId
+        guard let currentStreamId = viewModel.prefetchedStreamId,
+              viewModel.requestedStreamId == currentStreamId else {
+            resetPreResolutionCandidate()
+            return
+        }
         let currentEpisode = viewModel.prefetchedEpisode
 
         if streamDiscoveryDuration == nil, let start = viewModel.prefetchStartTime {
@@ -995,7 +1125,10 @@ struct DetailsScreen: View {
             )
         }
 
-        guard let candidate = candidateStream else { return }
+        guard let candidate = candidateStream else {
+            resetPreResolutionCandidate()
+            return
+        }
 
         let isIdealMatch: Bool = {
             if candidate.isNotPlayable { return false }
@@ -1026,12 +1159,45 @@ struct DetailsScreen: View {
             return res >= targetRes
         }()
 
-        guard isIdealMatch else { return }
-
-        // If this stream was already selected and resolved, don't re-resolve
-        if preResolvedStream == candidate && preResolvedURL != nil && preResolvedStreamId == currentStreamId {
+        guard isIdealMatch else {
+            resetPreResolutionCandidate()
             return
         }
+
+        let identity = DetailsBackgroundResolutionIdentity(
+            streamID: currentStreamId,
+            episodeID: currentEpisode?.id,
+            candidate: candidate
+        )
+        if preResolutionIdentity != identity {
+            resetPreResolutionCandidate()
+        }
+        // Keep the latest stream payload even when its transport identity did
+        // not change (for example, when subtitle results arrive later).
+        preResolutionIdentity = identity
+
+        if let resolvedURL = preResolvedURL,
+           let resolvedStream = preResolvedStream,
+           let resolvedStreamId = preResolvedStreamId {
+            let resolvedIdentity = DetailsBackgroundResolutionIdentity(
+                streamID: resolvedStreamId,
+                episodeID: preResolvedEpisode?.id,
+                candidate: resolvedStream
+            )
+            if resolvedIdentity == identity {
+                if resolvedStream != candidate {
+                    print("[PreFetch] ♻️ Retained prepared source after stream metadata update (subtitles=\(candidate.subtitles.count)).")
+                }
+                preResolvedStream = candidate
+                preResolvedEpisode = currentEpisode
+                preResolvedEpisodeSubtitle = currentEpisode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? ""
+                maybeWarmPreResolvedURL(resolvedURL, candidate: candidate, meta: meta, episode: currentEpisode)
+                return
+            }
+        }
+        // A stream revision for the same candidate must not restart an active
+        // debrid resolution.
+        if preFetchDebridTask != nil { return }
 
         let discDuration = streamDiscoveryDuration ?? (viewModel.prefetchStartTime.map { Date().timeIntervalSince($0) } ?? 0)
         streamDiscoveryDuration = discDuration
@@ -1047,13 +1213,14 @@ struct DetailsScreen: View {
             preResolvedFilename = candidate.filename
             preResolvedVideoSize = candidate.videoSize
             preResolvedDuration = 0.0
-            print("[PreFetch] ⚡️ Direct source ready (0ms resolution). Instant playback armed!")
+            maybeWarmPreResolvedURL(url, candidate: candidate, meta: meta, episode: currentEpisode)
+            print("[PreFetch] ⚡️ Direct source URL ready; playback prepares on Play.")
             return
         }
 
         guard candidate.isDebridResolvable && smartStreamSelection else { return }
 
-        preFetchDebridTask?.cancel()
+        let resolutionGeneration = preResolutionGeneration
         preFetchDebridTask = Task { @MainActor in
             let t0_debrid = Date()
             let season = currentEpisode?.season
@@ -1070,30 +1237,136 @@ struct DetailsScreen: View {
                     debridVideoSize = videoSize
                 }
             }
-            if resolvedURL == nil, TorrentSettings.isEnabled(), let infoHash = candidate.effectiveInfoHash, !infoHash.isEmpty {
-                do {
-                    resolvedURL = try await TorrentEngineManager.shared.startStream(
-                        infoHash: infoHash,
-                        fileIdx: candidate.effectiveFileIdx,
-                        trackers: candidate.sources,
-                        filename: candidate.filename
-                    )
-                } catch {
-                    print("[PreFetch] Torrent stream pre-resolve failed: \(error)")
-                }
-            }
-            guard !Task.isCancelled, let url = resolvedURL else { return }
+            guard !Task.isCancelled,
+                  self.isDetailsPlaybackContextActive,
+                  !self.didHandOffPlayback,
+                  self.preResolutionGeneration == resolutionGeneration,
+                  let latestIdentity = self.preResolutionIdentity,
+                  latestIdentity == identity else { return }
+            self.preFetchDebridTask = nil
+            guard let url = resolvedURL else { return }
+            let resolvedCandidate = latestIdentity.candidate
             let debridElapsed = Date().timeIntervalSince(t0_debrid)
             self.preResolvedURL = url
             self.preResolvedFilename = debridFilename
             self.preResolvedVideoSize = debridVideoSize
-            self.preResolvedStream = candidate
-            self.preResolvedStreamId = currentStreamId
+            self.preResolvedStream = resolvedCandidate
+            self.preResolvedStreamId = latestIdentity.streamID
             self.preResolvedEpisode = currentEpisode
             self.preResolvedEpisodeSubtitle = currentEpisode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? ""
             self.preResolvedDuration = debridElapsed
-            print("[PreFetch] ⚡️ Pre-resolved Debrid link in background in \(String(format: "%.3fs", debridElapsed))! URL: \(url.absoluteString)")
-            print("[PreFetch] ✅ Stream fully pre-loaded and ready for instant playback on Play click!")
+            self.maybeWarmPreResolvedURL(url, candidate: resolvedCandidate, meta: meta, episode: currentEpisode)
+            print("[PreFetch] ⚡️ Pre-resolved Debrid link in background in \(String(format: "%.3fs", debridElapsed))!")
+            print("[PreFetch] ✅ Stream URL ready; startup prewarm requested when supported.")
+        }
+    }
+
+    private func maybeWarmPreResolvedURL(
+        _ url: URL,
+        candidate: NuvioStream,
+        meta: NuvioMeta,
+        episode: NuvioVideo?
+    ) {
+        guard isDetailsPlaybackContextActive, !didHandOffPlayback else { return }
+        let isSeries = meta.isSeries || NuvioMeta.isSeriesType(meta.type)
+        let type = meta.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isPlayableMovieOrEpisode = isSeries ? episode != nil : (type == "movie" || type == "film")
+        let isLiveOrSports = isLiveOrSportsContent(meta: meta, url: url)
+        let headers = candidate.httpHeaders ?? [:]
+        let backend = PlaybackBackendPolicy.resolveFromCurrentSettings(
+            url: url,
+            streamName: candidate.name,
+            streamDescription: candidate.description,
+            filename: candidate.filename,
+            isLiveStream: isLiveOrSports,
+            isSports: meta.isSports,
+            httpHeaders: headers
+        ).backend
+        let hybridDiskCacheEnabled = (ProfileSettings.current.object(forKey: SettingsKey.hybridDiskCacheEnabled) as? Bool) ?? false
+        let eligible = DetailsPlaybackPrewarmPolicy.shouldPrewarm(
+            url: url,
+            backend: backend,
+            backgroundStreamPreFetchEnabled: (ProfileSettings.current.object(forKey: SettingsKey.backgroundStreamPreFetch) as? Bool) ?? true,
+            smartStreamSelectionEnabled: smartStreamSelection,
+            usesExternalPlayer: effectivePlayer(for: nil) != .builtIn,
+            isPlayableMovieOrEpisode: isPlayableMovieOrEpisode,
+            isLiveOrSports: isLiveOrSports || meta.isSports
+        )
+        if eligible {
+            playbackPrewarmer.warm(
+                url: url,
+                headers: headers,
+                hybridProfileID: hybridDiskCacheEnabled ? (ProfileSettings.activeProfileID ?? "") : nil
+            )
+        } else {
+            playbackPrewarmer.discardCurrent()
+        }
+    }
+
+    private func isLiveOrSportsContent(meta: NuvioMeta, url: URL) -> Bool {
+        if meta.isSports || CinemetaCatalogRepository.isLiveContentType(meta.type) { return true }
+
+        let id = meta.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if id.hasPrefix("iptv:") || id.hasPrefix("live:") || id.hasPrefix("channel:") || id.hasPrefix("stream:")
+            || id.hasPrefix("pp-live:") || id.contains("cdnlive") || id.contains("daddylive")
+            || id.contains("streamed.pk") || id.contains("nuvio_sport") {
+            return true
+        }
+
+        var name = meta.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while let first = name.first, !first.isLetter && !first.isNumber && first != "[" && first != "(" {
+            name.removeFirst()
+            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if name.hasPrefix("now:") || name.hasPrefix("live:") || name.hasPrefix("[live]") || name.hasPrefix("(live)") {
+            return true
+        }
+
+        let path = url.path.lowercased()
+        return path.contains("/live/") || path.contains("/iptv/") || path.contains("live.m3u8") || path.contains("cdnlive")
+    }
+
+    private func effectivePlayer(for selectedPlayer: ExternalPlayer?) -> ExternalPlayer {
+        selectedPlayer ?? ExternalPlayer.from(
+            ProfileSettings.current.string(forKey: SettingsKey.externalPlayer)
+        )
+    }
+
+    private func maybeWarmSavedPlaybackTarget(
+        _ target: DetailsSavedPlaybackTarget,
+        meta: NuvioMeta,
+        episode: NuvioVideo?
+    ) {
+        guard isDetailsPlaybackContextActive, !didHandOffPlayback else { return }
+        let isSeries = meta.isSeries || NuvioMeta.isSeriesType(meta.type)
+        let type = meta.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isPlayableMovieOrEpisode = isSeries ? episode != nil : (type == "movie" || type == "film")
+        let isLiveOrSports = isLiveOrSportsContent(meta: meta, url: target.url)
+        let backend = PlaybackBackendPolicy.resolveFromCurrentSettings(
+            url: target.url,
+            isLiveStream: isLiveOrSports,
+            isSports: meta.isSports,
+            httpHeaders: target.httpHeaders
+        ).backend
+        let hybridDiskCacheEnabled = (ProfileSettings.current.object(forKey: SettingsKey.hybridDiskCacheEnabled) as? Bool) ?? false
+        let eligible = DetailsPlaybackPrewarmPolicy.shouldPrewarm(
+            url: target.url,
+            backend: backend,
+            backgroundStreamPreFetchEnabled: (ProfileSettings.current.object(forKey: SettingsKey.backgroundStreamPreFetch) as? Bool) ?? true,
+            smartStreamSelectionEnabled: smartStreamSelection,
+            usesExternalPlayer: effectivePlayer(for: nil) != .builtIn,
+            isPlayableMovieOrEpisode: isPlayableMovieOrEpisode,
+            isLiveOrSports: isLiveOrSports || meta.isSports,
+            isSavedPlaybackTarget: true
+        )
+        if eligible {
+            playbackPrewarmer.warm(
+                url: target.url,
+                headers: target.httpHeaders,
+                hybridProfileID: hybridDiskCacheEnabled ? (ProfileSettings.activeProfileID ?? "") : nil
+            )
+        } else {
+            playbackPrewarmer.discardCurrent()
         }
     }
 
@@ -1112,6 +1385,27 @@ struct DetailsScreen: View {
             result.append(candidate)
         }
         return result
+    }
+
+    private func preResolvedMatchesPlaybackSelection(_ stream: NuvioStream, meta: NuvioMeta) -> Bool {
+        guard let resolvedStream = preResolvedStream,
+              let resolvedStreamID = preResolvedStreamId else { return false }
+        let selectedEpisode = pendingEpisode ?? viewModel.prefetchedEpisode
+        let selectedStreamID = selectedEpisode.map { canonicalEpisodeStreamId(for: $0, meta: meta) } ?? meta.streamId
+        guard resolvedStreamID == selectedStreamID,
+              preResolvedEpisode?.id == selectedEpisode?.id else { return false }
+
+        let resolvedIdentity = DetailsBackgroundResolutionIdentity(
+            streamID: resolvedStreamID,
+            episodeID: preResolvedEpisode?.id,
+            candidate: resolvedStream
+        )
+        let selectedIdentity = DetailsBackgroundResolutionIdentity(
+            streamID: selectedStreamID,
+            episodeID: selectedEpisode?.id,
+            candidate: stream
+        )
+        return resolvedIdentity == selectedIdentity
     }
 
     /// Plays a chosen stream. Direct URLs go straight to the player; torrent-only
@@ -1169,7 +1463,7 @@ struct DetailsScreen: View {
                         if self.startupBenchmarkToken == startupToken {
                             self.startupBenchmarkToken = nil
                         }
-                        onPlayClick(
+                        dispatchPlayback(
                             localURL.absoluteString,
                             candidate.httpHeaders ?? [:],
                             meta,
@@ -1214,7 +1508,7 @@ struct DetailsScreen: View {
             if self.startupBenchmarkToken == startupToken {
                 self.startupBenchmarkToken = nil
             }
-            onPlayClick(
+            dispatchPlayback(
                 url,
                 stream.httpHeaders ?? [:],
                 meta,
@@ -1235,7 +1529,12 @@ struct DetailsScreen: View {
             return
         }
 
-        if let preURL = preResolvedURL, preResolvedStream == stream {
+        if let preURL = preResolvedURL, preResolvedMatchesPlaybackSelection(stream, meta: meta) {
+            preResolvedStream = stream
+            preResolvedEpisode = pendingEpisode ?? viewModel.prefetchedEpisode
+            preResolvedEpisodeSubtitle = preResolvedEpisode.map {
+                "S\($0.season) · E\($0.episode) · \($0.title)"
+            } ?? ""
             let debridSaved = preResolvedDuration ?? 0
             if debridSaved > 0 {
                 PlaybackStartupTiming.markDebridResolved(token: startupToken)
@@ -1247,7 +1546,7 @@ struct DetailsScreen: View {
             if self.startupBenchmarkToken == startupToken {
                 self.startupBenchmarkToken = nil
             }
-            onPlayClick(
+            dispatchPlayback(
                 preURL.absoluteString,
                 stream.httpHeaders ?? [:],
                 meta,
@@ -1320,7 +1619,7 @@ struct DetailsScreen: View {
                     if self.startupBenchmarkToken == startupToken {
                         self.startupBenchmarkToken = nil
                     }
-                    onPlayClick(
+                    dispatchPlayback(
                         url.absoluteString,
                         stream.httpHeaders ?? [:],
                         meta,
@@ -1414,12 +1713,12 @@ struct DetailsScreen: View {
         Task {
             if let source = await YouTubeTrailerResolver.shared.resolve(for: meta) {
                 await MainActor.run {
-                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil, false)
+                    dispatchPlayback(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil, false)
                 }
             } else if let ytId = await preferredTrailerYouTubeId(for: meta) {
                 let youtubeUrl = "https://www.youtube.com/watch?v=\(ytId)"
                 await MainActor.run {
-                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil, false)
+                    dispatchPlayback(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil, false)
                 }
             }
         }

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import OSLog
+import AetherEngine
 
 struct StreamProbeResult: Sendable {
     let supportsRange: Bool
@@ -21,6 +22,83 @@ struct StreamProbeResult: Sendable {
         self.etag = etag
         self.lastModified = lastModified
         self.resolvedURL = resolvedURL
+    }
+}
+
+/// Small, one-shot memo for the bounded Details range probe. It is independent
+/// of the cache manager's active playback probe and server ownership.
+final class PlaybackStreamRangeProbeMemo: @unchecked Sendable {
+    private struct Header: Hashable, Sendable {
+        let name: String
+        let value: String
+    }
+    private struct Key: Hashable, Sendable {
+        let url: String
+        let headers: [Header]
+        let profileID: String
+        init(url: URL, headers: [String: String], profileID: String) {
+            self.url = url.absoluteString
+            self.headers = headers.map { Header(name: $0.key, value: $0.value) }
+                .sorted { $0.name == $1.name ? $0.value < $1.value : $0.name < $1.name }
+            self.profileID = profileID
+        }
+    }
+    private struct Entry {
+        let key: Key
+        let result: StreamProbeResult
+        let token: UUID
+        let expiresAt: TimeInterval
+    }
+    static let shared = PlaybackStreamRangeProbeMemo()
+    static let defaultTTL: TimeInterval = 15
+    static let defaultCapacity = 2
+    private let lock = NSLock()
+    private let capacity: Int
+    private var entries: [Key: Entry] = [:]
+    private var order: [Key] = []
+
+    init(capacity: Int = defaultCapacity) { self.capacity = max(1, capacity) }
+
+    @discardableResult
+    func store(_ result: StreamProbeResult, url: URL, headers: [String: String],
+               profileID: String, token: UUID, ttl: TimeInterval = defaultTTL) -> Bool {
+        guard result.supportsRange, result.contentLength > 0, ttl.isFinite, ttl >= 0 else { return false }
+        let key = Key(url: url, headers: headers, profileID: profileID)
+        lock.lock(); defer { lock.unlock() }
+        let now = ProcessInfo.processInfo.systemUptime
+        purgeExpiredLocked(now: now)
+        removeLocked(key)
+        while entries.count >= capacity, let oldest = order.first { removeLocked(oldest) }
+        entries[key] = Entry(key: key, result: result, token: token, expiresAt: now + ttl)
+        order.append(key)
+        return true
+    }
+
+    func take(url: URL, headers: [String: String], profileID: String) -> StreamProbeResult? {
+        let key = Key(url: url, headers: headers, profileID: profileID)
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = entries[key] else { return nil }
+        removeLocked(key)
+        return entry.expiresAt > ProcessInfo.processInfo.systemUptime ? entry.result : nil
+    }
+
+    func discard(token: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        entries.values.filter { $0.token == token }.map(\.key).forEach(removeLocked)
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        purgeExpiredLocked(now: ProcessInfo.processInfo.systemUptime)
+        return entries.count
+    }
+
+    private func purgeExpiredLocked(now: TimeInterval) {
+        entries.values.filter { $0.expiresAt <= now }.map(\.key).forEach(removeLocked)
+    }
+    private func removeLocked(_ key: Key) {
+        entries.removeValue(forKey: key)
+        if let index = order.firstIndex(of: key) { order.remove(at: index) }
     }
 }
 
@@ -346,9 +424,33 @@ actor PlaybackStreamCacheManager {
         }
 
         let session = sessionConfiguration.map { URLSession(configuration: $0) } ?? URLSession.shared
-        return await performRangeProbe(
+        let result = await performRangeProbe(
             url: url, headers: headers, session: session, preparationBudget: preparationBudget
         )
+        guard !Task.isCancelled else {
+            return StreamProbeResult(supportsRange: false, contentLength: 0, etag: nil, lastModified: nil)
+        }
+        return result
+    }
+
+    /// Independent Details-time probe; never joins or replaces `activeProbe`.
+    @discardableResult
+    func warmRangeProbeMemo(url: URL, headers: [String: String], profileID: String, token: UUID,
+                            sessionConfiguration: URLSessionConfiguration? = nil,
+                            preparationBudget: TimeInterval = PlaybackStreamCacheManager.defaultProbePreparationBudget) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        let probe = await probeRangeSupport(url: url, headers: headers,
+                                            sessionConfiguration: sessionConfiguration,
+                                            preparationBudget: preparationBudget)
+        guard !Task.isCancelled else { Self.discardRangeProbeMemo(token: token); return false }
+        guard PlaybackStreamRangeProbeMemo.shared.store(probe, url: url, headers: headers,
+                                                         profileID: profileID, token: token) else { return false }
+        diskCacheLog.info("Cache probe warm outcome=ready length=\(probe.contentLength)")
+        return true
+    }
+
+    nonisolated static func discardRangeProbeMemo(token: UUID) {
+        PlaybackStreamRangeProbeMemo.shared.discard(token: token)
     }
 
     private func performRangeProbe(
@@ -388,7 +490,9 @@ actor PlaybackStreamCacheManager {
         // A valid byte-range response proves support. HEAD is only a bounded,
         // optional metadata fallback when the range response has no validator.
         if etag == nil, lastModified == nil {
-            if remainingBudget() > 0 {
+            if Task.isCancelled {
+                return StreamProbeResult(supportsRange: false, contentLength: 0, etag: nil, lastModified: nil)
+            } else if remainingBudget() > 0 {
                 let headDelegate = RangeProbeDelegate(originalURL: url, customHeaders: headers, expectedRange: nil)
                 var headRequest = URLRequest(url: url)
                 headRequest.httpMethod = "HEAD"
@@ -597,6 +701,7 @@ actor PlaybackStreamCacheManager {
         for remoteURL: URL,
         headers: [String: String] = [:],
         sessionToken: String = UUID().uuidString,
+        cacheProfileIDOverride: String? = nil,
         canonicalMediaKey: String? = nil,
         cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         filename: String? = nil,
@@ -609,11 +714,21 @@ actor PlaybackStreamCacheManager {
         preparationBudget: TimeInterval = PlaybackStreamCacheManager.defaultProbePreparationBudget
     ) async -> URL? {
         pendingSessionToken = sessionToken
-
-        let probe = await trackRangeProbe(
-            url: remoteURL, headers: headers, sessionConfiguration: sessionConfiguration,
-            preparationBudget: preparationBudget, sessionToken: sessionToken
-        )
+        guard !Task.isCancelled else {
+            if pendingSessionToken == sessionToken { pendingSessionToken = nil }
+            return nil
+        }
+        let profileID = cacheProfileIDOverride ?? ProfileSettings.activeProfileID ?? ""
+        let probe: StreamProbeResult
+        if let memo = PlaybackStreamRangeProbeMemo.shared.take(url: remoteURL, headers: headers, profileID: profileID) {
+            probe = memo
+            diskCacheLog.info("Cache probe outcome=reused warm memo length=\(memo.contentLength)")
+        } else {
+            probe = await trackRangeProbe(
+                url: remoteURL, headers: headers, sessionConfiguration: sessionConfiguration,
+                preparationBudget: preparationBudget, sessionToken: sessionToken
+            )
+        }
         guard !Task.isCancelled else {
             if pendingSessionToken == sessionToken { pendingSessionToken = nil }
             return nil
@@ -685,6 +800,8 @@ actor PlaybackStreamCacheManager {
             pendingSessionToken = nil
 
             if let oldServer, oldServer !== server {
+                let oldProxyURL = await oldServer.localURL
+                AetherEngine.discardPrewarmedSource(url: oldProxyURL)
                 await serverStopper(oldServer)
                 guard !Task.isCancelled else {
                     diskCacheLog.info("Cache preparation outcome=cancelled_after_old_server_stop origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL))")
@@ -694,6 +811,18 @@ actor PlaybackStreamCacheManager {
                 guard activeServer === server, activeSessionToken == sessionToken else {
                     diskCacheLog.info("Cache preparation outcome=superseded_after_old_server_stop origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL))")
                     return nil
+                }
+            }
+            guard activeServer === server, activeSessionToken == sessionToken else {
+                diskCacheLog.info("Cache preparation outcome=superseded_before_return")
+                return nil
+            }
+            if AetherEngine.isPrewarmed(url: remoteURL) {
+                if AetherEngine.transferPrewarmedSource(from: remoteURL, to: localURL, httpHeaders: headers,
+                                                        expectedContentLength: probe.contentLength) {
+                    diskCacheLog.info("Cache startup warm remapped to local proxy")
+                } else {
+                    diskCacheLog.info("Cache startup warm declined: request mismatch")
                 }
             }
             diskCacheLog.notice("Hybrid Disk Cache engaged for origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL)) [session=\(sessionID)] -> \(localURL.absoluteString)")
@@ -736,6 +865,8 @@ actor PlaybackStreamCacheManager {
         }
 
         if let serverToStop {
+            let proxyURL = await serverToStop.localURL
+            AetherEngine.discardPrewarmedSource(url: proxyURL)
             await serverStopper(serverToStop)
         }
     }
@@ -759,6 +890,8 @@ actor PlaybackStreamCacheManager {
         if pendingSessionToken == sessionToken { pendingSessionToken = nil }
         // A successor takes responsibility for stopping the server it replaces.
         if !wasPublished || ownsActiveServer {
+            let proxyURL = await server.localURL
+            AetherEngine.discardPrewarmedSource(url: proxyURL)
             await serverStopper(server)
         }
     }

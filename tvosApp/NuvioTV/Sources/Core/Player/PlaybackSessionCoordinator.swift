@@ -143,6 +143,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
             && !request.isSports
             && PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
             && request.videoURL.pathExtension.lowercased() != "m3u8"
+            && !PlaybackBackendPolicy.isDiscImage(request.videoURL.absoluteString, filename: request.filename)
     }
 
     func beginNewPlaybackCompletionSession(
@@ -558,7 +559,8 @@ final class PlaybackSessionCoordinator: ObservableObject {
     }
 
     private func mpvSupportsRequest(_ request: PlaybackLoadRequest) -> Bool {
-        guard PlaybackBackendPolicy.mpvSupportsURL(request.videoURL.absoluteString),
+        guard !PlaybackBackendPolicy.isDiscImage(request.videoURL.absoluteString, filename: request.filename),
+              PlaybackBackendPolicy.mpvSupportsURL(request.videoURL.absoluteString),
               request.httpHeaderSourceURL.map({ PlaybackBackendPolicy.mpvSupportsURL($0.absoluteString) }) ?? true
         else { return false }
         // Extensionless playlists may only be identified after the native engine opens them.

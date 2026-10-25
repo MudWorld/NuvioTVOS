@@ -7,6 +7,429 @@
 
 import Foundation
 import Combine
+import AetherEngine
+
+struct DetailsBackgroundResolutionIdentity: Equatable {
+    let streamID: String
+    let episodeID: String?
+    let candidate: NuvioStream
+
+    static func == (lhs: DetailsBackgroundResolutionIdentity, rhs: DetailsBackgroundResolutionIdentity) -> Bool {
+        let left = lhs.candidate
+        let right = rhs.candidate
+        guard lhs.streamID == rhs.streamID,
+              lhs.episodeID == rhs.episodeID,
+              left.id == right.id,
+              left.directURL == right.directURL,
+              (left.httpHeaders ?? [:]) == (right.httpHeaders ?? [:]) else {
+            return false
+        }
+        guard left.directURL == nil else { return true }
+        return left.effectiveInfoHash == right.effectiveInfoHash
+            && left.effectiveFileIdx == right.effectiveFileIdx
+            && left.sources == right.sources
+            && left.filename == right.filename
+    }
+}
+
+struct DetailsSavedPlaybackTarget: Equatable {
+    let url: URL
+    let httpHeaders: [String: String]
+}
+
+enum DetailsSavedPlaybackTargetResolver {
+    typealias Lookup = (String, Int?, Int?, String?) -> (url: String, httpHeaders: [String: String])?
+
+    static func resolve(
+        metaID: String,
+        episode: NuvioVideo?,
+        profileID: String?,
+        reuseEnabled: Bool,
+        manualPicker: Bool,
+        lookup: Lookup
+    ) -> DetailsSavedPlaybackTarget? {
+        guard reuseEnabled, !manualPicker,
+              let saved = lookup(metaID, episode?.season, episode?.episode, profileID),
+              let url = URL(string: saved.url.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(), !scheme.isEmpty else { return nil }
+        if scheme == "http" || scheme == "https" {
+            guard url.host != nil else { return nil }
+        }
+        return DetailsSavedPlaybackTarget(url: url, httpHeaders: saved.httpHeaders)
+    }
+}
+
+enum DetailsPlaybackPrewarmPolicy {
+    static func shouldPrewarm(
+        url: URL?,
+        backend: PlayerBackendKind,
+        backgroundStreamPreFetchEnabled: Bool,
+        smartStreamSelectionEnabled: Bool,
+        usesExternalPlayer: Bool,
+        isPlayableMovieOrEpisode: Bool,
+        isLiveOrSports: Bool,
+        isSavedPlaybackTarget: Bool = false
+    ) -> Bool {
+        guard let url,
+              backgroundStreamPreFetchEnabled,
+              smartStreamSelectionEnabled || isSavedPlaybackTarget,
+              !usesExternalPlayer,
+              isPlayableMovieOrEpisode,
+              !isLiveOrSports,
+              backend == .aether,
+              PlaybackBackendPolicy.isRemoteHTTP(url.absoluteString),
+              !PlaybackBackendPolicy.isHLS(url.absoluteString),
+              let host = url.host?.lowercased(),
+              host != "::1",
+              !host.hasPrefix("127."),
+              host != "localhost",
+              !host.hasSuffix(".localhost"),
+              host != "googlevideo.com",
+              !host.hasSuffix(".googlevideo.com") else {
+            return false
+        }
+        return true
+    }
+}
+
+private final class DetailsPlaybackWarmOperationState: @unchecked Sendable {
+    enum Status { case running, prepared, claimed, cancelled }
+
+    private let lock = NSLock()
+    private var storedStatus = Status.running
+
+    var status: Status {
+        lock.lock(); defer { lock.unlock() }
+        return storedStatus
+    }
+
+    var isClaimed: Bool { status == .claimed }
+
+    func markPrepared() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard storedStatus == .running else { return false }
+        storedStatus = .prepared
+        return true
+    }
+
+    func claimPrepared() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard storedStatus == .prepared else { return false }
+        storedStatus = .claimed
+        return true
+    }
+
+    func cancel() {
+        lock.lock(); defer { lock.unlock() }
+        if storedStatus != .claimed { storedStatus = .cancelled }
+    }
+}
+
+/// Owns the one Details prewarm and serializes replacement cleanup so a late
+/// canceled fetch cannot discard a newer warm for the same URL.
+@MainActor
+final class DetailsPlaybackPrewarmer {
+    typealias WarmSource = @Sendable (URL, [String: String]) async -> Void
+    typealias DiscardSource = @Sendable (URL) -> Void
+    typealias WarmRangeProbe = @Sendable (URL, [String: String], String, UUID) async -> Void
+    typealias DiscardRangeProbe = @Sendable (UUID) -> Void
+    typealias PreparedWarmHook = @Sendable () async -> Void
+
+    private struct Key: Equatable, Sendable {
+        let url: URL
+        let headers: [String: String]
+        let hybridProfileID: String?
+
+        static func == (lhs: Key, rhs: Key) -> Bool {
+            lhs.url.absoluteString == rhs.url.absoluteString
+                && lhs.headers == rhs.headers
+                && lhs.hybridProfileID == rhs.hybridProfileID
+        }
+    }
+
+    private let warmSource: WarmSource
+    private let discardSource: DiscardSource
+    private let warmRangeProbe: WarmRangeProbe?
+    private let discardRangeProbe: DiscardRangeProbe?
+    private let afterWarmPrepared: PreparedWarmHook
+    private var requestedKey: Key?
+    private var activeKey: Key?
+    private var completedKey: Key?
+    private var activeGeneration: UInt64?
+    private var activeWarmID: UUID?
+    private var completedWarmID: UUID?
+    private var activeOperationState: DetailsPlaybackWarmOperationState?
+    private var completedOperationState: DetailsPlaybackWarmOperationState?
+    private var detachedWarmTask: Task<Void, Never>?
+    private var settlementTask: Task<Void, Never>?
+    private var nextGeneration: UInt64 = 0
+    private var isContextActive = true
+    private var didHandOff = false
+
+    init(
+        warm: @escaping WarmSource,
+        discard: @escaping DiscardSource,
+        warmRangeProbe: WarmRangeProbe? = nil,
+        discardRangeProbe: DiscardRangeProbe? = nil,
+        afterWarmPrepared: @escaping PreparedWarmHook = {}
+    ) {
+        warmSource = warm
+        discardSource = discard
+        self.warmRangeProbe = warmRangeProbe
+        self.discardRangeProbe = discardRangeProbe
+        self.afterWarmPrepared = afterWarmPrepared
+    }
+
+    static func engineBacked() -> DetailsPlaybackPrewarmer {
+        DetailsPlaybackPrewarmer(
+            warm: { url, headers in
+                _ = await AetherEngine.prewarm(url: url, httpHeaders: headers)
+            },
+            discard: { url in
+                AetherEngine.discardPrewarmedSource(url: url)
+            },
+            warmRangeProbe: { url, headers, profileID, token in
+                _ = await PlaybackStreamCacheManager.shared.warmRangeProbeMemo(
+                    url: url, headers: headers, profileID: profileID, token: token
+                )
+            },
+            discardRangeProbe: { token in
+                PlaybackStreamCacheManager.discardRangeProbeMemo(token: token)
+            }
+        )
+    }
+
+    func activateContext() {
+        didHandOff = false
+        isContextActive = true
+    }
+
+    func warm(url: URL, headers: [String: String], hybridProfileID: String? = nil) {
+        guard isContextActive, !didHandOff else { return }
+        let key = Key(url: url, headers: headers, hybridProfileID: hybridProfileID)
+        if requestedKey == key || completedKey == key { return }
+
+        if let completedKey {
+            if let completedWarmID, completedOperationState?.isClaimed != true {
+                completedOperationState?.cancel()
+                discardWarm(completedKey, token: completedWarmID)
+            }
+            self.completedKey = nil
+            self.completedWarmID = nil
+            self.completedOperationState = nil
+        }
+        requestedKey = key
+
+        if let activeKey {
+            if activeKey != key {
+                activeOperationState?.cancel()
+                detachedWarmTask?.cancel()
+                if let activeWarmID { discardWarm(activeKey, token: activeWarmID) }
+            }
+            return
+        }
+        beginWarm(key)
+    }
+
+    /// Cancel the current warm while keeping this Details context available for
+    /// another candidate, such as when selection changes to a non-HTTP source.
+    func discardCurrent() {
+        guard !didHandOff else { return }
+        requestedKey = nil
+        if let completedKey {
+            if let completedWarmID, completedOperationState?.isClaimed != true {
+                completedOperationState?.cancel()
+                discardWarm(completedKey, token: completedWarmID)
+            }
+            self.completedKey = nil
+            self.completedWarmID = nil
+            self.completedOperationState = nil
+        }
+        activeOperationState?.cancel()
+        detachedWarmTask?.cancel()
+        if let activeKey, let activeWarmID { discardWarm(activeKey, token: activeWarmID) }
+    }
+
+    /// Ends Details work. A successfully matched handoff already transferred
+    /// ownership to playback and is intentionally retained for engine adoption.
+    func endContext() {
+        guard !didHandOff else { return }
+        isContextActive = false
+        discardCurrent()
+    }
+
+    @discardableResult
+    func handOff(urlString: String, headers: [String: String], retainOnlyIf allowed: Bool) -> Bool {
+        guard !didHandOff else { return false }
+        let actualURL = URL(string: urlString)
+        let requestMatches = allowed
+            && actualURL?.absoluteString == completedKey?.url.absoluteString
+            && headers == completedKey?.headers
+
+        let claimedCompletedWarm = requestMatches && completedOperationState?.claimPrepared() == true
+        let claimedActiveWarm = !claimedCompletedWarm
+            && allowed
+            && actualURL?.absoluteString == activeKey?.url.absoluteString
+            && headers == activeKey?.headers
+            && activeOperationState?.claimPrepared() == true
+        let matchedWarm = claimedCompletedWarm || claimedActiveWarm
+
+        isContextActive = false
+        didHandOff = true
+        requestedKey = nil
+        if matchedWarm {
+            if claimedCompletedWarm {
+                completedKey = nil
+                completedWarmID = nil
+                completedOperationState = nil
+            } else {
+                // Release actor-owned state so a returned Details context can
+                // warm a new candidate before this operation's settlement runs.
+                activeKey = nil
+                activeWarmID = nil
+                activeOperationState = nil
+                activeGeneration = nil
+            }
+            // A claimed active operation may still be awaiting MainActor settlement.
+            // Its operation state now owns the bytes through deinit and settlement.
+            return true
+        }
+
+        activeOperationState?.cancel()
+        detachedWarmTask?.cancel()
+        if let activeKey, let activeWarmID {
+            discardWarm(activeKey, token: activeWarmID)
+        }
+        if let completedKey, let completedWarmID {
+            completedOperationState?.cancel()
+            discardWarm(completedKey, token: completedWarmID)
+            self.completedKey = nil
+            self.completedWarmID = nil
+            self.completedOperationState = nil
+        }
+        return false
+    }
+
+    deinit {
+        if !didHandOff, activeOperationState?.isClaimed != true {
+            activeOperationState?.cancel()
+            detachedWarmTask?.cancel()
+        }
+        if !didHandOff, activeOperationState?.isClaimed != true, let activeKey, let activeWarmID {
+            discardSource(activeKey.url)
+            discardRangeProbe?(activeWarmID)
+        }
+        if !didHandOff, completedOperationState?.isClaimed != true, let completedKey, let completedWarmID {
+            discardSource(completedKey.url)
+            discardRangeProbe?(completedWarmID)
+        }
+    }
+
+    /// Test seam that waits for the current bounded operation to settle.
+    func waitForCurrentOperation() async {
+        while true {
+            let generation = nextGeneration
+            let task = settlementTask
+            await task?.value
+            if nextGeneration == generation { return }
+        }
+    }
+
+    func settlementTaskForTesting() -> Task<Void, Never>? { settlementTask }
+
+    private func beginWarm(_ key: Key) {
+        nextGeneration &+= 1
+        let generation = nextGeneration
+        activeGeneration = generation
+        activeKey = key
+        let warmID = UUID()
+        activeWarmID = warmID
+        let operationState = DetailsPlaybackWarmOperationState()
+        activeOperationState = operationState
+
+        let operation = Task.detached(priority: .utility) { [warmSource, discardSource, warmRangeProbe, discardRangeProbe, afterWarmPrepared] in
+            guard !Task.isCancelled else {
+                operationState.cancel()
+                discardSource(key.url)
+                discardRangeProbe?(warmID)
+                return
+            }
+            async let sourceWarm: Void = warmSource(key.url, key.headers)
+            if let profileID = key.hybridProfileID, let warmRangeProbe {
+                async let cacheProbe: Void = warmRangeProbe(key.url, key.headers, profileID, warmID)
+                _ = await (sourceWarm, cacheProbe)
+            } else {
+                await sourceWarm
+            }
+            guard operationState.markPrepared() else {
+                discardSource(key.url)
+                discardRangeProbe?(warmID)
+                return
+            }
+            await afterWarmPrepared()
+            if operationState.status == .cancelled {
+                discardSource(key.url)
+                discardRangeProbe?(warmID)
+            }
+        }
+        detachedWarmTask = operation
+        settlementTask = Task { @MainActor [weak self] in
+            await operation.value
+            self?.finishWarm(
+                key, token: warmID, generation: generation,
+                wasCancelled: operation.isCancelled, operationState: operationState
+            )
+        }
+    }
+
+    private func finishWarm(
+        _ key: Key,
+        token: UUID,
+        generation: UInt64,
+        wasCancelled: Bool,
+        operationState: DetailsPlaybackWarmOperationState
+    ) {
+        guard activeGeneration == generation else { return }
+
+        if operationState.isClaimed {
+            activeKey = nil
+            activeWarmID = nil
+            activeOperationState = nil
+            activeGeneration = nil
+            detachedWarmTask = nil
+            return
+        }
+
+        let isStale = wasCancelled || operationState.status == .cancelled || !isContextActive || requestedKey != key
+        if isStale {
+            operationState.cancel()
+            // This runs before any replacement starts, so an old same-URL fetch
+            // cannot remove bytes written by the replacement. Duplicate per-URL
+            // take after the operation's own late-cancel cleanup is harmless.
+            discardWarm(key, token: token)
+        } else {
+            completedKey = key
+            completedWarmID = token
+            completedOperationState = operationState
+        }
+
+        activeKey = nil
+        activeWarmID = nil
+        activeOperationState = nil
+        activeGeneration = nil
+        detachedWarmTask = nil
+
+        guard isContextActive, !didHandOff, let requestedKey else { return }
+        if requestedKey != key || isStale {
+            beginWarm(requestedKey)
+        }
+    }
+
+    private func discardWarm(_ key: Key, token: UUID) {
+        discardSource(key.url)
+        discardRangeProbe?(token)
+    }
+}
 
 /// Selects where Details gets its progressive stream results. Keeping this
 /// decision at composition time makes the view model independent of concrete
@@ -27,6 +450,7 @@ class DetailsViewModel: ObservableObject {
     private(set) var prefetchedStreamId: String?
     private(set) var prefetchedEpisode: NuvioVideo?
     private(set) var prefetchStartTime: Date?
+    private(set) var requestedStreamId: String?
 
     private let repository: CatalogRepository
     private let streamDiscoveryMode: DetailsStreamDiscoveryMode
@@ -83,6 +507,7 @@ class DetailsViewModel: ObservableObject {
         prefetchedStreamId = nil
         prefetchedEpisode = nil
         prefetchStartTime = nil
+        requestedStreamId = nil
         detailsRequestGeneration &+= 1
         let requestGeneration = detailsRequestGeneration
 
@@ -190,6 +615,7 @@ class DetailsViewModel: ObservableObject {
         prefetchedStreamId = nil
         prefetchedEpisode = nil
         prefetchStartTime = nil
+        requestedStreamId = nil
     }
 
     func resolveDefaultPlayTarget(for meta: NuvioMeta) -> (streamId: String, episode: NuvioVideo?)? {
@@ -540,6 +966,7 @@ class DetailsViewModel: ObservableObject {
     ///
     /// `forceRefresh` restarts discovery for the same key (explicit refresh).
     func prepareStreams(forId streamId: String, type: String, forceRefresh: Bool = false) {
+        requestedStreamId = streamId
         streamObserveTask?.cancel()
 
         if streamDiscoveryMode == .shared {
@@ -628,12 +1055,12 @@ class DetailsViewModel: ObservableObject {
     }
 
     private func prepareRepositoryStreams(forId streamId: String, type: String) {
+        uiState.streams = []
+        uiState.streamGroups = []
+        uiState.streamsRevision &+= 1
+        uiState.streamsEmptyReason = nil
+        uiState.isLoadingStreams = true
         streamObserveTask = Task {
-            uiState.streams = []
-            uiState.streamGroups = []
-            uiState.streamsRevision &+= 1
-            uiState.streamsEmptyReason = nil
-            uiState.isLoadingStreams = true
             for await streams in repository.streamsProgressively(id: streamId, type: type) {
                 if Task.isCancelled { return }
                 uiState.streams = streams

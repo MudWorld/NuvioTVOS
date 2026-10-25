@@ -4543,3 +4543,221 @@ extension PlaybackStreamCacheTests {
         XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
     }
 }
+
+final class PlaybackStreamRangeProbeMemoTests: XCTestCase {
+    func testRangeProbeMemoIsExactOneShotAndOldTokenCleanupIsScoped() {
+        let memo = PlaybackStreamRangeProbeMemo(capacity: 2)
+        let url = URL(string: "https://cache-test.invalid/memo_exact")!
+        let headers = ["Referer": "https://addon.example"]
+        let firstToken = UUID()
+        let secondToken = UUID()
+        let first = StreamProbeResult(supportsRange: true, contentLength: 64, etag: "first", lastModified: nil)
+        let second = StreamProbeResult(supportsRange: true, contentLength: 64, etag: "second", lastModified: nil)
+
+        XCTAssertTrue(memo.store(first, url: url, headers: headers, profileID: "profile-a", token: firstToken))
+        XCTAssertNil(memo.take(url: url, headers: ["Referer": "different"], profileID: "profile-a"))
+        XCTAssertNil(memo.take(url: url, headers: headers, profileID: "profile-b"))
+        XCTAssertTrue(memo.store(second, url: url, headers: headers, profileID: "profile-a", token: secondToken))
+        memo.discard(token: firstToken)
+
+        XCTAssertEqual(memo.take(url: url, headers: headers, profileID: "profile-a")?.etag, "second")
+        XCTAssertNil(memo.take(url: url, headers: headers, profileID: "profile-a"))
+    }
+
+    func testRangeProbeMemoExpiryAndCapacityAreBounded() {
+        let memo = PlaybackStreamRangeProbeMemo(capacity: 2)
+        let headers: [String: String] = [:]
+        let profileID = "profile-a"
+        let result = StreamProbeResult(supportsRange: true, contentLength: 64, etag: "tag", lastModified: nil)
+        let expiredURL = URL(string: "https://cache-test.invalid/memo_expired")!
+        XCTAssertTrue(memo.store(result, url: expiredURL, headers: headers, profileID: profileID, token: UUID(), ttl: 0))
+        XCTAssertNil(memo.take(url: expiredURL, headers: headers, profileID: profileID))
+
+        let urls = ["memo_oldest", "memo_middle", "memo_newest"].map {
+            URL(string: "https://cache-test.invalid/\($0)")!
+        }
+        for url in urls {
+            XCTAssertTrue(memo.store(result, url: url, headers: headers, profileID: profileID, token: UUID()))
+        }
+        XCTAssertEqual(memo.count, 2)
+        XCTAssertNil(memo.take(url: urls[0], headers: headers, profileID: profileID))
+        XCTAssertNotNil(memo.take(url: urls[1], headers: headers, profileID: profileID))
+        XCTAssertNotNil(memo.take(url: urls[2], headers: headers, profileID: profileID))
+    }
+}
+
+extension PlaybackStreamCacheTests {
+    func testHybridProbeMemoIsReusedByPrepareCacheServer() async throws {
+        let url = URL(string: "https://cache-test.invalid/hybrid_memo_reuse")!
+        let headers = ["Referer": "https://addon.example"]
+        let profileID = "hybrid_profile_\(UUID().uuidString)"
+        let warmID = UUID()
+        let sessionToken = "hybrid_session_\(UUID().uuidString)"
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.response(for: request, body: Data([0x42, 0x43]), total: 64, etag: "hybrid-tag")
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            PlaybackStreamRangeProbeMemo.shared.discard(token: warmID)
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
+
+        let manager = PlaybackStreamCacheManager.shared
+        let warmed = await manager.warmRangeProbeMemo(
+            url: url, headers: headers, profileID: profileID, token: warmID,
+            sessionConfiguration: configuration, preparationBudget: 1
+        )
+        XCTAssertTrue(warmed)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+
+        let proxyURL = await manager.prepareCacheServer(
+            for: url, headers: headers, sessionToken: sessionToken,
+            cacheProfileIDOverride: profileID, cacheRoot: cacheRoot,
+            sessionConfiguration: configuration, freeSpaceProvider: { _ in 0 }, preparationBudget: 1
+        )
+        XCTAssertNotNil(proxyURL)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1, "prepare reused the completed Details probe")
+        await manager.stopActiveSession(token: sessionToken)
+    }
+
+    func testHybridProbeMemoMismatchAndExpiryFallBackToColdProbe() async throws {
+        let manager = PlaybackStreamCacheManager.shared
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.response(for: request, body: Data([0x42, 0x43]), total: 64, etag: "cold-tag")
+        }
+        defer { PlaybackStreamCacheURLProtocol.handler = nil }
+
+        let cases: [(name: String, urlMismatch: Bool, headerMismatch: Bool, profileMismatch: Bool, expired: Bool)] = [
+            ("URL", true, false, false, false),
+            ("headers", false, true, false, false),
+            ("profile", false, false, true, false),
+            ("expired", false, false, false, true)
+        ]
+        for testCase in cases {
+            await manager.stopActiveSession()
+            let actualURL = URL(string: "https://cache-test.invalid/hybrid_cold_\(testCase.name)")!
+            let warmURL = testCase.urlMismatch
+                ? URL(string: "https://cache-test.invalid/hybrid_other_\(testCase.name)")!
+                : actualURL
+            let actualHeaders = ["Referer": "https://playback.example"]
+            let warmHeaders = testCase.headerMismatch ? ["Referer": "https://warm.example"] : actualHeaders
+            let actualProfile = "profile-\(testCase.name)"
+            let warmProfile = testCase.profileMismatch ? "other-\(testCase.name)" : actualProfile
+            let memoToken = UUID()
+            let sessionToken = "hybrid_cold_\(testCase.name)_\(UUID().uuidString)"
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let probe = StreamProbeResult(supportsRange: true, contentLength: 64, etag: "warm-tag", lastModified: nil)
+            XCTAssertTrue(PlaybackStreamRangeProbeMemo.shared.store(
+                probe, url: warmURL, headers: warmHeaders, profileID: warmProfile,
+                token: memoToken, ttl: testCase.expired ? 0 : 15
+            ))
+            PlaybackStreamCacheURLProtocol.resetMetrics()
+
+            let proxyURL = await manager.prepareCacheServer(
+                for: actualURL, headers: actualHeaders, sessionToken: sessionToken,
+                cacheProfileIDOverride: actualProfile, cacheRoot: cacheRoot,
+                sessionConfiguration: configuration, freeSpaceProvider: { _ in 0 }, preparationBudget: 1
+            )
+            XCTAssertNotNil(proxyURL, testCase.name)
+            XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1, "\(testCase.name) mismatch must probe cold")
+            await manager.stopActiveSession(token: sessionToken)
+            PlaybackStreamRangeProbeMemo.shared.discard(token: memoToken)
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
+    }
+
+    func testBackgroundRangeWarmDoesNotCancelPendingPlaybackProbe() async throws {
+        let manager = PlaybackStreamCacheManager()
+        let pendingURL = URL(string: "https://cache-test.invalid/hybrid_pending_owner")!
+        let warmURL = URL(string: "https://cache-test.invalid/hybrid_independent_warm")!
+        let profileID = "profile-\(UUID().uuidString)"
+        let warmToken = UUID()
+        let sessionToken = "pending_owner_\(UUID().uuidString)"
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            if request.url == pendingURL {
+                return PlaybackStreamCacheURLProtocol.Response(
+                    data: Data([0x42, 0x43]), statusCode: 206, contentRange: "bytes 0-1/64",
+                    retryAfter: nil, etag: "owner-tag", lastModified: nil,
+                    bodyChunkBytes: 1, bodyChunkDelay: 0.5
+                )
+            }
+            return PlaybackStreamCacheURLProtocol.response(for: request, body: Data([0x42, 0x43]), total: 64, etag: "owner-tag")
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            PlaybackStreamRangeProbeMemo.shared.discard(token: warmToken)
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
+
+        let pendingPreparation = Task {
+            await manager.prepareCacheServer(
+                for: pendingURL, sessionToken: sessionToken, cacheRoot: cacheRoot,
+                sessionConfiguration: configuration, freeSpaceProvider: { _ in 0 }, preparationBudget: 5
+            )
+        }
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+
+        let warmed = await manager.warmRangeProbeMemo(
+            url: warmURL, headers: [:], profileID: profileID, token: warmToken,
+            sessionConfiguration: configuration, preparationBudget: 2
+        )
+        XCTAssertTrue(warmed)
+        let proxyURL = await pendingPreparation.value
+        XCTAssertNotNil(proxyURL, "the independent warm must not replace/cancel the pending playback probe")
+        let activeToken = await manager.activeSessionToken
+        XCTAssertEqual(activeToken, sessionToken)
+        await manager.stopActiveSession(token: sessionToken)
+    }
+}
+
+extension PlaybackStreamCacheTests {
+    func testCancelledBackgroundRangeWarmDoesNotPublishMemo() async throws {
+        let url = URL(string: "https://cache-test.invalid/hybrid_cancelled_warm")!
+        let headers = ["Referer": "https://addon.example"]
+        let profileID = "cancel_profile_\(UUID().uuidString)"
+        let token = UUID()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.delay = 5
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.response(for: request, body: Data([0x42, 0x43]), total: 64, etag: "cancel-tag")
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            PlaybackStreamCacheURLProtocol.delay = 0
+            PlaybackStreamRangeProbeMemo.shared.discard(token: token)
+        }
+
+        let manager = PlaybackStreamCacheManager.shared
+        let warming = Task {
+            await manager.warmRangeProbeMemo(
+                url: url, headers: headers, profileID: profileID, token: token,
+                sessionConfiguration: configuration, preparationBudget: 5
+            )
+        }
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+        warming.cancel()
+        let warmedAfterCancellation = await warming.value
+        XCTAssertFalse(warmedAfterCancellation)
+        XCTAssertNil(PlaybackStreamRangeProbeMemo.shared.take(url: url, headers: headers, profileID: profileID))
+        await waitForProtocolCancellationIfStillLoading()
+        XCTAssertGreaterThan(PlaybackStreamCacheURLProtocol.cancellationCount, 0)
+    }
+}
