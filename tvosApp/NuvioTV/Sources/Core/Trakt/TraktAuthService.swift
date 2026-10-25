@@ -3967,19 +3967,40 @@ struct TraktLibraryService {
 
     static func fetchLibrary(
         repository: CatalogRepository,
-        requireSelectedSource: Bool = true
+        requireSelectedSource: Bool = true,
+        onSnapshot: LibraryMetadataHydrator.SnapshotHandler? = nil
     ) async -> [LibraryStoreItem]? {
-        guard (!requireSelectedSource || TraktSettingsStore.librarySourceMode == .trakt),
-              TraktAuthStore.isAuthenticated else {
+        let store = await MainActor.run { ProfileSettings.current }
+        let profileID = await MainActor.run { LibraryStore.activeProfileId }
+        let settingsProfileID = await MainActor.run { ProfileSettings.activeProfileID }
+        let context = await MainActor.run { TraktLibraryMutationContext() }
+        guard (!requireSelectedSource || TraktSettingsStore.librarySourceMode(in: store) == .trakt),
+              TraktAuthStore.isAuthenticated(in: store),
+              (!requireSelectedSource || context != nil) else {
             return []
         }
 
-        let service = TraktAuthService()
+        let isCurrent: @MainActor () -> Bool = {
+            guard !Task.isCancelled,
+                  LibraryStore.activeProfileId == profileID,
+                  ProfileSettings.activeProfileID == settingsProfileID,
+                  ProfileSettings.isActiveStore(store),
+                  TraktAuthStore.isAuthenticated(in: store) else { return false }
+            if requireSelectedSource {
+                return TraktSettingsStore.librarySourceMode(in: store) == .trakt
+                    && context?.isCurrent == true
+            }
+            return true
+        }
+
+        let service = TraktAuthService(store: store)
         guard await service.refreshTokenIfNeeded() else { return nil }
+        guard await isCurrent() else { return nil }
 
         var receivedResponse = false
         var seeds: [TraktLibrarySeed] = []
 
+        guard await isCurrent() else { return nil }
         if let movies: [TraktLibraryItemDTO] = try? await service.authorizedGet(
             path: "users/me/watchlist/movies/rank?extended=full&page=1&limit=1000"
         ) {
@@ -3987,6 +4008,7 @@ struct TraktLibraryService {
             seeds.append(contentsOf: movies.compactMap { seed(from: $0, type: "movie") })
         }
 
+        guard await isCurrent() else { return nil }
         if let shows: [TraktLibraryItemDTO] = try? await service.authorizedGet(
             path: "users/me/watchlist/shows/rank?extended=full&page=1&limit=1000"
         ) {
@@ -3994,12 +4016,14 @@ struct TraktLibraryService {
             seeds.append(contentsOf: shows.compactMap { seed(from: $0, type: "series") })
         }
 
+        guard await isCurrent() else { return nil }
         if let lists: [TraktPersonalListDTO] = try? await service.authorizedGet(
             path: "users/me/lists"
         ) {
             receivedResponse = true
             for list in lists where list.type?.lowercased() == "personal" {
-                guard !Task.isCancelled, let identifier = listIdentifier(from: list.ids) else { continue }
+                guard await isCurrent() else { return nil }
+                guard let identifier = listIdentifier(from: list.ids) else { continue }
 
                 if let movies: [TraktLibraryItemDTO] = try? await service.authorizedGet(
                     path: "users/me/lists/\(identifier)/items/movie?extended=full&page=1&limit=1000"
@@ -4007,30 +4031,43 @@ struct TraktLibraryService {
                     seeds.append(contentsOf: movies.compactMap { seed(from: $0, type: "movie") })
                 }
 
+                guard await isCurrent() else { return nil }
                 if let shows: [TraktLibraryItemDTO] = try? await service.authorizedGet(
                     path: "users/me/lists/\(identifier)/items/show?extended=full&page=1&limit=1000"
                 ) {
                     seeds.append(contentsOf: shows.compactMap { seed(from: $0, type: "series") })
                 }
+                guard await isCurrent() else { return nil }
             }
         }
 
         guard receivedResponse else { return nil }
+        guard await isCurrent() else { return nil }
 
-        let sortedSeeds = seeds.sorted { $0.addedAt > $1.addedAt }
+        let sortedSeeds = seeds.enumerated().sorted {
+            if $0.element.addedAt == $1.element.addedAt { return $0.offset < $1.offset }
+            return $0.element.addedAt > $1.element.addedAt
+        }.map(\.element)
         var usedIDs = Set<String>()
         var results: [LibraryStoreItem] = []
 
         for seed in sortedSeeds {
-            guard !Task.isCancelled, results.count < maxItems else { break }
+            guard await isCurrent(), results.count < maxItems else { break }
             let key = "\(seed.type):\(seed.contentID)"
             guard usedIDs.insert(key).inserted else { continue }
 
-            let meta = (try? await repository.getMetadata(id: seed.contentID, type: seed.type))
-                ?? placeholderMeta(for: seed)
+            let placeholder = placeholderMeta(for: seed)
+            let meta = repository.cachedMetadata(for: seed.contentID)
+                .map { LibraryMetadataHydrator.merging($0, into: placeholder) }
+                ?? placeholder
             results.append(LibraryStoreItem(meta: meta, addedAt: seed.addedAt))
         }
-        return results
+        return await LibraryMetadataHydrator.hydrate(
+            seeds: results,
+            repository: repository,
+            onSnapshot: onSnapshot,
+            isCurrent: isCurrent
+        )
     }
 
     private static func seed(from item: TraktLibraryItemDTO, type: String) -> TraktLibrarySeed? {

@@ -2044,13 +2044,29 @@ final class SimklAuthServiceTests: XCTestCase {
 
         final class SimklLibraryTestRepository: MockCatalogRepository {
             let resolvedMeta: NuvioMeta
-            init(resolvedMeta: NuvioMeta) { self.resolvedMeta = resolvedMeta }
+            let snapshotProbe: SimklLibrarySnapshotProbe
+            init(resolvedMeta: NuvioMeta, snapshotProbe: SimklLibrarySnapshotProbe) {
+                self.resolvedMeta = resolvedMeta
+                self.snapshotProbe = snapshotProbe
+            }
             override func getMetadata(id: String, type: String) async throws -> NuvioMeta {
-                resolvedMeta
+                snapshotProbe.recordMetadataLookup()
+                return resolvedMeta
             }
         }
 
-        let repository = SimklLibraryTestRepository(resolvedMeta: makeMeta(type: "series"))
+        let snapshotProbe = SimklLibrarySnapshotProbe()
+        let resolvedMeta = NuvioMeta(
+            id: "tt-canonical-123",
+            name: "Example Show",
+            posterUrl: "https://example.test/show.jpg",
+            type: "series",
+            genres: ["Drama"]
+        )
+        let repository = SimklLibraryTestRepository(
+            resolvedMeta: resolvedMeta,
+            snapshotProbe: snapshotProbe
+        )
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SimklURLProtocolStub.self]
         let session = URLSession(configuration: configuration)
@@ -2109,13 +2125,22 @@ final class SimklAuthServiceTests: XCTestCase {
             force: true,
             client: SimklAPIClient(session: session),
             tokenStorage: tokenStorage,
-            profileScope: "profile-1"
+            profileScope: "profile-1",
+            onSnapshot: { items in
+                snapshotProbe.recordSnapshot(items)
+                return true
+            }
         )
 
         XCTAssertEqual(rejectedAllItemsRequests, 1)
         XCTAssertEqual(refreshRequests, 1)
         XCTAssertEqual(retriedAllItemsRequests, 1)
         XCTAssertEqual(items?.map(\.meta.name), ["Example Show"])
+        XCTAssertEqual(snapshotProbe.snapshots.first?.map(\.meta.name), ["Source Placeholder"])
+        XCTAssertFalse(snapshotProbe.sawMetadataBeforeSeedSnapshot)
+        XCTAssertEqual(items?.first?.id, "tt1234567", "metadata resolution must preserve the Simkl card ID")
+        XCTAssertEqual(items?.first?.addedAt, ISO8601DateFormatter().date(from: "2026-10-13T00:00:00Z"))
+        XCTAssertEqual(items?.first?.meta.genres, ["Drama"])
         XCTAssertEqual(tokenStorage.accessToken(for: "profile-1"), "simkl_at_review_new")
     }
 
@@ -2304,6 +2329,36 @@ final class SimklAuthServiceTests: XCTestCase {
         let response = try await service.startPINAuth()
         XCTAssertEqual(response.userCode, "ABC123")
         XCTAssertFalse(service.currentState().isV2Flow)
+    }
+}
+
+private final class SimklLibrarySnapshotProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedSnapshots: [[LibraryStoreItem]] = []
+    private var metadataLookupStartedBeforeSnapshot = false
+
+    var snapshots: [[LibraryStoreItem]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedSnapshots
+    }
+
+    var sawMetadataBeforeSeedSnapshot: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return metadataLookupStartedBeforeSnapshot
+    }
+
+    func recordSnapshot(_ snapshot: [LibraryStoreItem]) {
+        lock.lock()
+        recordedSnapshots.append(snapshot)
+        lock.unlock()
+    }
+
+    func recordMetadataLookup() {
+        lock.lock()
+        if recordedSnapshots.isEmpty { metadataLookupStartedBeforeSnapshot = true }
+        lock.unlock()
     }
 }
 

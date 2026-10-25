@@ -1758,7 +1758,8 @@ struct SimklLibraryService {
         force: Bool = false,
         client: SimklAPIClient = SimklAPIClient(),
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
-        profileScope: String? = nil
+        profileScope: String? = nil,
+        onSnapshot: LibraryMetadataHydrator.SnapshotHandler? = nil
     ) async -> [LibraryStoreItem]? {
         let resolvedProfile = profileScope ?? SimklRuntimeSession.profileScope()
         guard TraktSettingsStore.librarySourceMode(in: store) == .simkl,
@@ -1773,7 +1774,7 @@ struct SimklLibraryService {
             return []
         }
         guard owner.isCurrentAuthorization(),
-              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return nil }
 
         let seeds: [(String, SimklSyncItem)] =
             (response.movies ?? []).filter(isLibraryItem).map { ("movie", $0) }
@@ -1788,10 +1789,9 @@ struct SimklLibraryService {
             guard !Task.isCancelled,
                   let placeholder = placeholderMeta(item: item, type: type),
                   seen.insert("\(type):\(placeholder.id)").inserted else { continue }
-            let meta = (try? await repository.getMetadata(id: placeholder.id, type: type))
+            let meta = repository.cachedMetadata(for: placeholder.id)
+                .map { LibraryMetadataHydrator.merging($0, into: placeholder) }
                 ?? placeholder
-            guard owner.isCurrentAuthorization(),
-              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
             results.append(
                 LibraryStoreItem(
                     meta: meta,
@@ -1799,9 +1799,19 @@ struct SimklLibraryService {
                 )
             )
         }
-        guard owner.isCurrentAuthorization(),
-              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
-        return results.sorted { $0.addedAt > $1.addedAt }
+        let sortedResults = results.enumerated().sorted {
+            if $0.element.addedAt == $1.element.addedAt { return $0.offset < $1.offset }
+            return $0.element.addedAt > $1.element.addedAt
+        }.map(\.element)
+        return await LibraryMetadataHydrator.hydrate(
+            seeds: sortedResults,
+            repository: repository,
+            onSnapshot: onSnapshot,
+            isCurrent: {
+                !Task.isCancelled && owner.isCurrentAuthorization()
+                    && TraktSettingsStore.librarySourceMode(in: store) == .simkl
+            }
+        )
     }
 
     private static func isLibraryItem(_ item: SimklSyncItem) -> Bool {
@@ -1873,6 +1883,113 @@ struct SimklLibraryService {
     }
 }
 
+/// Publishes the lightweight library snapshot first, then fills its metadata
+/// with a small number of concurrent lookups. The item ID and watchlist date
+/// always come from the provider seed so SwiftUI keeps stable card identity.
+enum LibraryMetadataHydrator {
+    typealias SnapshotHandler = @MainActor ([LibraryStoreItem]) -> Bool
+
+    private static let maximumConcurrency = 4
+
+    static func hydrate(
+        seeds: [LibraryStoreItem],
+        repository: CatalogRepository,
+        onSnapshot: SnapshotHandler? = nil,
+        isCurrent: @MainActor () -> Bool
+    ) async -> [LibraryStoreItem]? {
+        guard await isCurrent() else { return nil }
+        var results = seeds
+        if let onSnapshot, !(await onSnapshot(results)) { return nil }
+        guard !Task.isCancelled else { return nil }
+
+        return await withTaskGroup(of: (Int, NuvioMeta?).self) { group in
+            var nextIndex = 0
+            var inFlight = 0
+
+            func addNext() {
+                guard nextIndex < seeds.count else { return }
+                let index = nextIndex
+                let seed = seeds[index]
+                nextIndex += 1
+                inFlight += 1
+                group.addTask {
+                    guard !Task.isCancelled else { return (index, nil) }
+                    return (index, try? await repository.getMetadata(
+                        id: seed.meta.id,
+                        type: seed.meta.type
+                    ))
+                }
+            }
+
+            for _ in 0..<min(Self.maximumConcurrency, seeds.count) { addNext() }
+            while inFlight > 0 {
+                guard let (index, metadata) = await group.next() else { break }
+                inFlight -= 1
+                guard await isCurrent(), !Task.isCancelled else {
+                    group.cancelAll()
+                    return nil
+                }
+                if let metadata {
+                    let seed = results[index]
+                    results[index] = LibraryStoreItem(
+                        meta: Self.merging(metadata, into: seed.meta),
+                        addedAt: seed.addedAt
+                    )
+                    if let onSnapshot, !(await onSnapshot(results)) {
+                        group.cancelAll()
+                        return nil
+                    }
+                }
+                guard await isCurrent(), !Task.isCancelled else {
+                    group.cancelAll()
+                    return nil
+                }
+                addNext()
+            }
+            guard await isCurrent(), !Task.isCancelled else { return nil }
+            return results
+        }
+    }
+
+    static func merging(_ metadata: NuvioMeta, into seed: NuvioMeta) -> NuvioMeta {
+        func nonEmpty(_ value: String?) -> String? {
+            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return value
+        }
+
+        return NuvioMeta(
+            id: seed.id,
+            name: nonEmpty(metadata.name) ?? seed.name,
+            description: nonEmpty(metadata.description) ?? seed.description,
+            posterUrl: nonEmpty(metadata.posterUrl) ?? seed.posterUrl,
+            backgroundUrl: nonEmpty(metadata.backgroundUrl) ?? seed.backgroundUrl,
+            logoUrl: nonEmpty(metadata.logoUrl) ?? seed.logoUrl,
+            imdbId: metadata.imdbId ?? seed.imdbId,
+            tmdbId: metadata.tmdbId ?? seed.tmdbId,
+            type: seed.type,
+            year: metadata.year ?? seed.year,
+            genres: metadata.genres ?? seed.genres,
+            rating: metadata.rating ?? seed.rating,
+            releaseInfo: nonEmpty(metadata.releaseInfo) ?? seed.releaseInfo,
+            runtime: nonEmpty(metadata.runtime) ?? seed.runtime,
+            cast: metadata.cast ?? seed.cast,
+            director: metadata.director ?? seed.director,
+            writer: metadata.writer ?? seed.writer,
+            certification: metadata.certification ?? seed.certification,
+            country: metadata.country ?? seed.country,
+            language: metadata.language ?? seed.language,
+            released: metadata.released ?? seed.released,
+            status: metadata.status ?? seed.status,
+            videos: metadata.videos ?? seed.videos,
+            trailerYtIds: metadata.trailerYtIds ?? seed.trailerYtIds,
+            externalRatings: metadata.externalRatings ?? seed.externalRatings,
+            posterShape: metadata.posterShape ?? seed.posterShape,
+            isFromAddon: metadata.isFromAddon ?? seed.isFromAddon,
+            landscapePosterUrl: nonEmpty(metadata.landscapePosterUrl) ?? seed.landscapePosterUrl
+        )
+    }
+}
+
 enum SimklSettingsStore {
     static func isPlanToWatchHomeCatalogsEnabled(in store: UserDefaults = ProfileSettings.current) -> Bool {
         store.bool(forKey: SettingsKey.simklPlanToWatchHomeCatalogs)
@@ -1921,14 +2038,23 @@ enum SelectedLibraryService {
         }
     }
 
-    static func fetchLibrary(repository: CatalogRepository) async -> [LibraryStoreItem]? {
+    static func fetchLibrary(
+        repository: CatalogRepository,
+        onSnapshot: LibraryMetadataHydrator.SnapshotHandler? = nil
+    ) async -> [LibraryStoreItem]? {
         switch TraktSettingsStore.librarySourceMode {
         case .local:
             return []
         case .trakt:
-            return await TraktLibraryService.fetchLibrary(repository: repository)
+            return await TraktLibraryService.fetchLibrary(
+                repository: repository,
+                onSnapshot: onSnapshot
+            )
         case .simkl:
-            return await SimklLibraryService.fetchLibrary(repository: repository)
+            return await SimklLibraryService.fetchLibrary(
+                repository: repository,
+                onSnapshot: onSnapshot
+            )
         case .mdblist:
             return await MdbListLibraryService.fetchLibrary(repository: repository)
         case .wetrakr:

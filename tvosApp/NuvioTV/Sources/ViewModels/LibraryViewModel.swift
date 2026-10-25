@@ -187,6 +187,10 @@ public class LibraryViewModel: ObservableObject {
         refreshGeneration &+= 1
         let generation = refreshGeneration
         let profileID = LibraryStore.activeProfileId
+        let settingsProfileID = ProfileSettings.activeProfileID
+        let settingsStore = ProfileSettings.current
+        let source = TraktSettingsStore.librarySourceMode(in: settingsStore)
+        let traktContext = source == .trakt ? TraktLibraryMutationContext() : nil
 
         guard usesRemoteLibrary else {
             loadLibrary()
@@ -199,15 +203,36 @@ public class LibraryViewModel: ObservableObject {
             validateFilters()
         }
 
-        guard let remoteItems = await SelectedLibraryService.fetchLibrary(repository: repository),
-              !Task.isCancelled,
-              generation == refreshGeneration,
-              profileID == LibraryStore.activeProfileId,
-              usesRemoteLibrary else {
+        let onSnapshot: LibraryMetadataHydrator.SnapshotHandler = { [weak self] snapshot in
+            guard let self,
+                  self.isCurrentRemoteRefresh(
+                    generation: generation,
+                    profileID: profileID,
+                    settingsProfileID: settingsProfileID,
+                    store: settingsStore,
+                    source: source,
+                    traktContext: traktContext
+                  ) else { return false }
+            self.displayedSource = source
+            self.items = snapshot.map(\.stremioMeta)
+            self.validateFilters()
+            return true
+        }
+
+        guard let remoteItems = await SelectedLibraryService.fetchLibrary(
+            repository: repository,
+            onSnapshot: onSnapshot
+        ), isCurrentRemoteRefresh(
+            generation: generation,
+            profileID: profileID,
+            settingsProfileID: settingsProfileID,
+            store: settingsStore,
+            source: source,
+            traktContext: traktContext
+        ) else {
             return
         }
 
-        let source = TraktSettingsStore.librarySourceMode
         displayedSource = source
         remoteItems.forEach { CinemetaCatalogRepository.cacheCatalogMetadata($0.meta) }
         items = remoteItems.map(\.stremioMeta)
@@ -216,7 +241,10 @@ public class LibraryViewModel: ObservableObject {
             guard !Task.isCancelled,
                   generation == refreshGeneration,
                   profileID == LibraryStore.activeProfileId,
-                  usesRemoteLibrary else { return }
+                  settingsProfileID == ProfileSettings.activeProfileID,
+                  ProfileSettings.isActiveStore(settingsStore),
+                  TraktSettingsStore.librarySourceMode(in: settingsStore) == source,
+                  SelectedLibraryService.isSelectedAndAuthenticated else { return }
             mdbListLists = lists ?? []
             if let selectedMdbListListID,
                mdbListLists.contains(where: { $0.id == selectedMdbListListID }) {
@@ -233,6 +261,26 @@ public class LibraryViewModel: ObservableObject {
             selectedMdbListListID = nil
         }
         validateFilters()
+    }
+
+    private func isCurrentRemoteRefresh(
+        generation: Int,
+        profileID: String?,
+        settingsProfileID: String?,
+        store: UserDefaults,
+        source: TraktLibrarySourceMode,
+        traktContext: TraktLibraryMutationContext?
+    ) -> Bool {
+        !Task.isCancelled
+            && generation == refreshGeneration
+            && profileID == LibraryStore.activeProfileId
+            && settingsProfileID == ProfileSettings.activeProfileID
+            && ProfileSettings.isActiveStore(store)
+            && TraktSettingsStore.librarySourceMode(in: store) == source
+            && TraktSettingsStore.librarySourceMode == source
+            && (source != .trakt || traktContext?.isCurrent == true)
+            && source != .local
+            && SelectedLibraryService.isSelectedAndAuthenticated
     }
 
     public func selectMdbListList(_ listID: Int?) async {
@@ -306,16 +354,21 @@ public class LibraryViewModel: ObservableObject {
         guard usesRemoteLibrary else { return }
         let item = LibraryStoreItem(meta: meta, addedAt: Date()).stremioMeta
         if isInWatchlist {
-            items = [item] + items.filter {
-                !($0.id == item.id && $0.contentType.caseInsensitiveCompare(item.contentType) == .orderedSame)
-            }
+            items = [item] + items.filter { !matchesLibraryMutation($0, meta: meta) }
         } else {
-            items.removeAll {
-                $0.id == item.id && $0.contentType.caseInsensitiveCompare(item.contentType) == .orderedSame
-            }
+            items.removeAll { matchesLibraryMutation($0, meta: meta) }
         }
         displayedSource = TraktSettingsStore.librarySourceMode
         validateFilters()
+    }
+
+    private func matchesLibraryMutation(_ item: StremioMeta, meta: NuvioMeta) -> Bool {
+        LibraryMutationIdentity.matches(
+            itemID: item.id,
+            itemType: item.contentType,
+            cachedMetadata: repository.cachedMetadata(for: item.id),
+            mutation: meta
+        )
     }
 
     private func validateFilters() {
@@ -379,5 +432,47 @@ public class LibraryViewModel: ObservableObject {
         }
         
         return result
+    }
+}
+
+enum LibraryMutationIdentity {
+    static func matches(
+        itemID: String,
+        itemType: String,
+        cachedMetadata: NuvioMeta?,
+        mutation: NuvioMeta
+    ) -> Bool {
+        guard itemType.caseInsensitiveCompare(mutation.type) == .orderedSame else { return false }
+        let itemKeys = keys(id: itemID, metadata: cachedMetadata)
+        let mutationKeys = keys(id: mutation.id, metadata: mutation)
+        return !itemKeys.isDisjoint(with: mutationKeys)
+    }
+
+    private static func keys(id: String, metadata: NuvioMeta?) -> Set<String> {
+        var keys = Set<String>()
+
+        func addID(_ value: String) {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty else { return }
+            keys.insert("id:\(normalized)")
+            if normalized.hasPrefix("tmdb:"), let tmdb = Int(normalized.dropFirst("tmdb:".count)) {
+                keys.insert("tmdb:\(tmdb)")
+            } else if normalized.hasPrefix("tt") {
+                keys.insert("imdb:\(normalized)")
+            }
+        }
+
+        addID(id)
+        if let metadata {
+            addID(metadata.id)
+            if let imdbID = metadata.imdbId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !imdbID.isEmpty {
+                keys.insert("imdb:\(imdbID.lowercased())")
+            }
+            if let tmdbID = metadata.tmdbId {
+                keys.insert("tmdb:\(tmdbID)")
+            }
+        }
+        return keys
     }
 }
