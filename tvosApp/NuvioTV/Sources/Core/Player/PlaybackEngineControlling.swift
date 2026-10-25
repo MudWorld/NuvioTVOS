@@ -24,6 +24,13 @@ func formattedAVSyncGap(_ gapMs: Double?) -> String {
     return String(format: "%+.1f ms", gapMs)
 }
 
+struct PlaybackDiscTitleInfo: Equatable, Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let durationSeconds: Double
+    let chapterCount: Int
+}
+
 struct PlaybackDebugInfo: Equatable {
     // Engine / Backend identification
     var player: String = ""
@@ -229,8 +236,11 @@ protocol PlaybackEngineControlling: AnyObject {
     var currentErrorMessage: String { get }
     var videoFrameSize: CGSize { get }
     var engineVersion: String? { get }
+    var supportsAudioProcessing: Bool { get }
     var playbackDebugInfo: PlaybackDebugInfo { get }
     var loadingStepMessage: String? { get }
+    var discTitles: [PlaybackDiscTitleInfo] { get }
+    var selectedDiscTitleId: Int? { get }
 
     func loadFile(_ urlString: String)
     func playPlayback()
@@ -244,6 +254,7 @@ protocol PlaybackEngineControlling: AnyObject {
     func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool)
     func selectAudio(_ trackId: Int)
     func selectSubtitle(_ trackId: Int)
+    func selectDiscTitle(_ id: Int)
     func addSubtitle(_ subtitle: NuvioSubtitle, select: Bool)
     func addAudioUrl(_ url: String)
     func applySubtitleStyle()
@@ -254,7 +265,11 @@ protocol PlaybackEngineControlling: AnyObject {
 @MainActor
 extension PlaybackEngineControlling {
     var engineVersion: String? { nil }
+    var supportsAudioProcessing: Bool { false }
+    var discTitles: [PlaybackDiscTitleInfo] { [] }
+    var selectedDiscTitleId: Int? { nil }
     func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool) {}
+    func selectDiscTitle(_ id: Int) {}
 }
 
 enum PlaybackToggleDirection: Equatable {

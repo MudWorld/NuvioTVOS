@@ -492,8 +492,9 @@ struct PlayerControls: View {
             if didReportPlaybackStarted && canShowAudioPicker && playerShowAudio {
                 PlayerAudioMenuButton(
                     orderedTracks: orderedAudioTracks,
-                    enhanceDialogueMode: viewModel.enhanceDialogueMode,
-                    isReduceLoudSoundsActive: viewModel.isReduceLoudSoundsActive,
+                    supportsAudioProcessing: viewModel.supportsAudioProcessing,
+                    enhanceDialogueMode: viewModel.supportsAudioProcessing ? viewModel.enhanceDialogueMode : .off,
+                    isReduceLoudSoundsActive: viewModel.supportsAudioProcessing && viewModel.isReduceLoudSoundsActive,
                     isFocused: focusedControl == .audio,
                     onSelectTrack: { track in
                         viewModel.selectAudio(track)
@@ -858,6 +859,7 @@ private struct PlayerSubtitleMenuButton: View, Equatable {
 
 private struct PlayerAudioMenuButton: View, Equatable {
     let orderedTracks: [AudioTrack]
+    let supportsAudioProcessing: Bool
     let enhanceDialogueMode: EnhanceDialogueMode
     let isReduceLoudSoundsActive: Bool
     let isFocused: Bool
@@ -867,6 +869,7 @@ private struct PlayerAudioMenuButton: View, Equatable {
 
     static func == (lhs: PlayerAudioMenuButton, rhs: PlayerAudioMenuButton) -> Bool {
         lhs.isFocused == rhs.isFocused
+            && lhs.supportsAudioProcessing == rhs.supportsAudioProcessing
             && lhs.enhanceDialogueMode == rhs.enhanceDialogueMode
             && lhs.isReduceLoudSoundsActive == rhs.isReduceLoudSoundsActive
             && lhs.orderedTracks == rhs.orderedTracks
@@ -874,32 +877,34 @@ private struct PlayerAudioMenuButton: View, Equatable {
 
     var body: some View {
         Menu {
-            Section(L10n.string("player_audio_adjustments", fallback: "Audio Adjustments")) {
-                Menu {
-                    ForEach(EnhanceDialogueMode.allCases) { mode in
-                        Button {
-                            onSetEnhanceDialogueMode(mode)
-                        } label: {
-                            audioMenuItem(
-                                title: mode.title,
-                                isSelected: enhanceDialogueMode == mode
-                            )
+            if supportsAudioProcessing {
+                Section(L10n.string("player_audio_adjustments", fallback: "Audio Adjustments")) {
+                    Menu {
+                        ForEach(EnhanceDialogueMode.allCases) { mode in
+                            Button {
+                                onSetEnhanceDialogueMode(mode)
+                            } label: {
+                                audioMenuItem(
+                                    title: mode.title,
+                                    isSelected: enhanceDialogueMode == mode
+                                )
+                            }
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(L10n.string("player_enhance_dialogue", fallback: "Enhance Dialogue"))
+                            Text(enhanceDialogueMode.title)
                         }
                     }
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(L10n.string("player_enhance_dialogue", fallback: "Enhance Dialogue"))
-                        Text(enhanceDialogueMode.title)
-                    }
-                }
 
-                Button {
-                    onToggleReduceLoudSounds()
-                } label: {
-                    audioMenuItem(
-                        title: L10n.string("player_reduce_loud_sounds", fallback: "Reduce Loud Sounds"),
-                        isSelected: isReduceLoudSoundsActive
-                    )
+                    Button {
+                        onToggleReduceLoudSounds()
+                    } label: {
+                        audioMenuItem(
+                            title: L10n.string("player_reduce_loud_sounds", fallback: "Reduce Loud Sounds"),
+                            isSelected: isReduceLoudSoundsActive
+                        )
+                    }
                 }
             }
 
@@ -1647,6 +1652,7 @@ struct PlayerSettingsPanel: View {
     var onClose: () -> Void
 
     private enum Tab: String, CaseIterable, Hashable {
+        case titles = "Titles"
         case subtitles = "Subtitles"
         case audio = "Audio"
         case speed = "Speed"
@@ -1657,11 +1663,14 @@ struct PlayerSettingsPanel: View {
     private enum StyleControl: Hashable {
         case delayMinus, delayPlus
         case aiTranslation
+        case font
         case sizeMinus, sizePlus
         case bold
+        case position
         case color(String)
         case opacityMinus, opacityPlus
         case outline
+        case outlineWidthMinus, outlineWidthPlus
         case background
         case backgroundColor(String)
         case backgroundOpacityMinus, backgroundOpacityPlus
@@ -1675,6 +1684,7 @@ struct PlayerSettingsPanel: View {
 
     private enum Focus: Hashable {
         case tab(Tab)
+        case discTitle(Int)
         case noneRow
         case language(String)
         case option(String)
@@ -1699,7 +1709,13 @@ struct PlayerSettingsPanel: View {
     @FocusState private var focus: Focus?
 
     private var visibleTabs: [Tab] {
-        didReportPlaybackStarted ? Tab.allCases : [.logs]
+        guard didReportPlaybackStarted else { return [.logs] }
+        var tabs: [Tab] = []
+        if !viewModel.discTitles.isEmpty {
+            tabs.append(.titles)
+        }
+        tabs.append(contentsOf: [.subtitles, .audio, .speed, .picture, .logs])
+        return tabs
     }
 
     private var activeTab: Tab {
@@ -1719,6 +1735,7 @@ struct PlayerSettingsPanel: View {
                 tabBar
 
                 switch activeTab {
+                case .titles: titlesPage
                 case .subtitles: subtitlesPage
                 case .audio: audioPage
                 case .speed: speedPage
@@ -1758,6 +1775,8 @@ struct PlayerSettingsPanel: View {
         .onChange(of: tab) { _, newTab in
             if newTab == .audio && orderedAudioTracks.isEmpty {
                 focus = .audioControl(.delayMinus)
+            } else if newTab == .titles, let first = viewModel.discTitles.first {
+                focus = .discTitle(viewModel.selectedDiscTitleId ?? first.id)
             }
         }
         .onChange(of: didReportPlaybackStarted) { _, isReady in
@@ -1786,6 +1805,8 @@ struct PlayerSettingsPanel: View {
                     tab = item
                     if item == .audio && orderedAudioTracks.isEmpty {
                         focus = .audioControl(.delayMinus)
+                    } else if item == .titles, let first = viewModel.discTitles.first {
+                        focus = .discTitle(viewModel.selectedDiscTitleId ?? first.id)
                     }
                 } label: {
                     Text(item.rawValue)
@@ -1810,6 +1831,88 @@ struct PlayerSettingsPanel: View {
             Spacer()
         }
         .focusSection()
+    }
+
+    // MARK: Disc Titles page
+
+    private var titlesPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            columnHeader("Disc Titles")
+            if viewModel.discTitles.isEmpty {
+                Text("No disc titles available")
+                    .font(.system(size: 23, weight: .medium))
+                    .foregroundColor(.white.opacity(0.45))
+                    .padding(.top, 10)
+                Spacer(minLength: 0)
+            } else {
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 14) {
+                        ForEach(viewModel.discTitles) { title in
+                            discTitleCard(title)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .focusSection()
+            }
+        }
+        .frame(width: 840, alignment: .leading)
+    }
+
+    private func discTitleCard(_ title: PlaybackDiscTitleInfo) -> some View {
+        let isFocused = focus == .discTitle(title.id)
+        let isSelected = viewModel.selectedDiscTitleId == title.id
+        let durationFormatted = formatTitleDuration(title.durationSeconds)
+        let chapterText = title.chapterCount > 0 ? "\(title.chapterCount) chapters" : ""
+        let detail = [durationFormatted, chapterText].filter { !$0.isEmpty }.joined(separator: " • ")
+
+        return Button {
+            viewModel.selectDiscTitle(title.id)
+        } label: {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(title.name)
+                        .font(.system(size: 27, weight: .semibold))
+                        .foregroundColor(isFocused ? .black : .white)
+                        .lineLimit(1)
+                    if !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(isFocused ? .black.opacity(0.58) : .white.opacity(0.6))
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 25, weight: .bold))
+                        .foregroundColor(isFocused ? .black : .white)
+                }
+            }
+            .padding(.horizontal, 26)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(isFocused ? Color.white : Color.white.opacity(0.07))
+            )
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($focus, equals: .discTitle(title.id))
+        .focusEffectDisabledIfAvailable()
+    }
+
+    private func formatTitleDuration(_ seconds: Double) -> String {
+        guard seconds > 0, seconds.isFinite else { return "" }
+        let total = Int(seconds)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        } else {
+            return String(format: "%d:%02d", minutes, secs)
+        }
     }
 
     // MARK: Subtitles page
@@ -2086,12 +2189,35 @@ struct PlayerSettingsPanel: View {
                         value: "\(style.textSize)%",
                         minusKey: .sizeMinus,
                         plusKey: .sizePlus,
-                        onMinus: { updateStyle { $0.textSize = max($0.textSize - 5, 60) } },
+                        onMinus: { updateStyle { $0.textSize = max($0.textSize - 5, 5) } },
                         onPlus: { updateStyle { $0.textSize = min($0.textSize + 5, 220) } }
                     )
 
+                    cycleRow(
+                        title: L10n.string("subtitle_font", fallback: "Font"),
+                        value: style.fontName,
+                        focusKey: .font
+                    ) {
+                        let all = SubtitleFontOption.allCases.map(\.rawValue)
+                        let idx = all.firstIndex(of: style.fontName) ?? 0
+                        let next = all[(idx + 1) % all.count]
+                        updateStyle { $0.fontName = next }
+                    }
+
                     toggleRow(title: L10n.string("subtitle_style_bold", fallback: "Bold"), isOn: style.bold, focusKey: .bold) {
                         updateStyle { $0.bold.toggle() }
+                    }
+
+                    toggleRow(
+                        title: L10n.string("subtitle_position", fallback: "Position"),
+                        isOn: style.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame,
+                        onLabel: L10n.string("subtitle_position_top", fallback: "Top"),
+                        offLabel: L10n.string("subtitle_position_bottom", fallback: "Bottom"),
+                        focusKey: .position
+                    ) {
+                        updateStyle {
+                            $0.verticalAlignment = ($0.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame) ? "Bottom" : "Top"
+                        }
                     }
 
                     colorRow
@@ -2108,6 +2234,17 @@ struct PlayerSettingsPanel: View {
                     toggleRow(title: L10n.string("subtitle_style_outline", fallback: "Outline"), isOn: style.outlineEnabled, focusKey: .outline) {
                         updateStyle { $0.outlineEnabled.toggle() }
                     }
+
+                    stepperRow(
+                        title: L10n.string("subtitle_outline_width", fallback: "Outline Thickness"),
+                        value: "\(style.outlineWidth)pt",
+                        minusKey: .outlineWidthMinus,
+                        plusKey: .outlineWidthPlus,
+                        onMinus: { updateStyle { $0.outlineWidth = max($0.outlineWidth - 1, 1) } },
+                        onPlus: { updateStyle { $0.outlineWidth = min($0.outlineWidth + 1, 6) } }
+                    )
+                    .opacity(style.outlineEnabled ? 1 : 0.46)
+                    .disabled(!style.outlineEnabled)
 
                     toggleRow(title: L10n.string("subtitle_background", fallback: "Background"), isOn: style.backgroundEnabled, focusKey: .background) {
                         updateStyle { $0.backgroundEnabled.toggle() }
@@ -2142,16 +2279,49 @@ struct PlayerSettingsPanel: View {
     private func updateStyle(_ mutate: (inout SubtitleStyle) -> Void) {
         mutate(&style)
         let defaults = ProfileSettings.current
+        defaults.set(style.fontName, forKey: SubtitleStyleKey.fontName)
         defaults.set(style.textSize, forKey: SubtitleStyleKey.textSize)
         defaults.set(style.bold, forKey: SubtitleStyleKey.bold)
+        defaults.set(style.verticalAlignment, forKey: SubtitleStyleKey.verticalAlignment)
+        defaults.set(style.bottomOffset, forKey: SubtitleStyleKey.bottomOffset)
+        defaults.set(style.horizontalMargin, forKey: SubtitleStyleKey.horizontalMargin)
+        defaults.set(style.letterSpacing, forKey: SubtitleStyleKey.letterSpacing)
         defaults.set(style.textColorHex, forKey: SubtitleStyleKey.textColor)
         defaults.set(style.textOpacity, forKey: SubtitleStyleKey.textOpacity)
         defaults.set(style.outlineEnabled, forKey: SubtitleStyleKey.outlineEnabled)
         defaults.set(style.outlineColorHex, forKey: SubtitleStyleKey.outlineColor)
+        defaults.set(style.outlineWidth, forKey: SubtitleStyleKey.outlineWidth)
         defaults.set(style.backgroundEnabled, forKey: SubtitleStyleKey.backgroundEnabled)
         defaults.set(style.backgroundColorHex, forKey: SubtitleStyleKey.backgroundColor)
         defaults.set(style.backgroundOpacity, forKey: SubtitleStyleKey.backgroundOpacity)
         viewModel.applySubtitleStyle()
+    }
+
+    private func cycleRow(title: String, value: String, focusKey: StyleControl, action: @escaping () -> Void) -> some View {
+        let isFocused = focus == .style(focusKey)
+        return VStack(alignment: .leading, spacing: 14) {
+            styleLabel(title)
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    Text(value)
+                        .font(.system(size: 20, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                .foregroundColor(isFocused ? .black : .white)
+                .padding(.horizontal, 20)
+                .frame(minWidth: 140)
+                .frame(height: 52)
+                .background(
+                    Capsule().fill(isFocused ? Color.white : Color.white.opacity(0.10))
+                )
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focused($focus, equals: .style(focusKey))
+            .focusEffectDisabledIfAvailable()
+        }
     }
 
     private func stepperRow(
@@ -2196,17 +2366,24 @@ struct PlayerSettingsPanel: View {
         .focusEffectDisabledIfAvailable()
     }
 
-    private func toggleRow(title: String, isOn: Bool, focusKey: StyleControl, action: @escaping () -> Void) -> some View {
+    private func toggleRow(
+        title: String,
+        isOn: Bool,
+        onLabel: String = L10n.string("subtitle_style_on", fallback: "On"),
+        offLabel: String = L10n.string("subtitle_style_off", fallback: "Off"),
+        focusKey: StyleControl,
+        action: @escaping () -> Void
+    ) -> some View {
         let isFocused = focus == .style(focusKey)
         return VStack(alignment: .leading, spacing: 14) {
             styleLabel(title)
             Button(action: action) {
-                Text(isOn
-                     ? L10n.string("subtitle_style_on", fallback: "On")
-                     : L10n.string("subtitle_style_off", fallback: "Off"))
+                Text(isOn ? onLabel : offLabel)
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundColor(isFocused ? .black : .white)
-                    .frame(width: 112, height: 52)
+                    .frame(minWidth: 112)
+                    .frame(height: 52)
+                    .padding(.horizontal, 16)
                     .background(
                         Capsule().fill(isFocused ? Color.white : Color.white.opacity(0.10))
                     )

@@ -1807,6 +1807,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         return trimmed
     }
 
+    var supportsAudioProcessing: Bool { true }
+
     var playbackDebugInfo: PlaybackDebugInfo {
         let width = getInt("video-params/w")
         let height = getInt("video-params/h")
@@ -2197,6 +2199,18 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         setStringProperty("sub-color", style.subColor)
         setStringProperty("sub-outline-color", style.subOutlineColor)
         setStringProperty("sub-back-color", style.subBackgroundColor)
+        if !style.mpvFontName.isEmpty {
+            setStringProperty("sub-font", style.mpvFontName)
+        } else {
+            setStringProperty("sub-font", "")
+        }
+        if style.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame {
+            setStringProperty("sub-pos", "0")
+            setStringProperty("sub-align-y", "top")
+        } else {
+            setStringProperty("sub-pos", "100")
+            setStringProperty("sub-align-y", "bottom")
+        }
     }
 
     func destroyPlayer() {

@@ -121,7 +121,8 @@ extension CharacterSet {
 enum DebridVideo {
     static let extensions: Set<String> = [
         "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm",
-        "m4v", "mpg", "mpeg", "ts", "m2ts", "vob", "ogv"
+        "m4v", "mpg", "mpeg", "ts", "m2ts", "vob", "ogv",
+        "iso", "img"
     ]
 
     /// Whether a torrent file path looks like a playable video (by extension).

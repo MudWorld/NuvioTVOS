@@ -88,13 +88,59 @@ enum PlaybackBackendPolicy {
         return ["m3u8", "m3u"].contains(url.pathExtension.lowercased())
     }
 
+    static func isDiscImage(_ urlString: String, filename: String? = nil) -> Bool {
+        let ext = URL(string: urlString)?.pathExtension.lowercased() ?? ""
+        if ["iso", "img", "udf"].contains(ext) { return true }
+        if let filename {
+            let fnExt = (filename as NSString).pathExtension.lowercased()
+            if ["iso", "img", "udf"].contains(fnExt) { return true }
+        }
+        let lowerPath = (URL(string: urlString)?.path ?? urlString).lowercased()
+        if lowerPath.hasSuffix(".iso") || lowerPath.hasSuffix(".img") || lowerPath.hasSuffix(".udf") {
+            return true
+        }
+        if let query = URL(string: urlString)?.query?.lowercased(),
+           query.contains(".iso") || query.contains(".img") || query.contains(".udf") {
+            if let components = URLComponents(string: urlString) {
+                for item in components.queryItems ?? [] {
+                    if let val = item.value?.lowercased(),
+                       val.hasSuffix(".iso") || val.hasSuffix(".img") || val.hasSuffix(".udf") {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
     static func mpvSupportsURL(_ urlString: String) -> Bool {
+        guard !isDiscImage(urlString) else { return false }
+        if urlString.lowercased().hasPrefix("smb://") { return false }
         guard isRemoteHTTP(urlString) else { return true }
         return PlaybackEngineCapabilities.mpv.supportsDirectHTTPS
             && (!isHLSPlaylist(urlString) || PlaybackEngineCapabilities.mpv.supportsRemoteHLS)
     }
 
     static func resolve(_ input: Input) -> Result {
+        if isDiscImage(input.urlString, filename: input.filename) {
+            if input.engineSetting == .mpv {
+                return Result(
+                    backend: .aether,
+                    allowAutomaticFallback: false,
+                    reason: "Disc image (.iso) requires AetherEngine; MPVKit does not support disc containers",
+                    statusMessage: "AetherEngine (MPV lacks disc support)"
+                )
+            }
+            return Result(
+                backend: .aether,
+                allowAutomaticFallback: false,
+                reason: input.engineSetting == .aether
+                    ? "Player Engine forced AetherEngine for disc image (.iso)"
+                    : "Auto: Disc image (.iso) detected, routing to AetherEngine native disc reader",
+                statusMessage: nil
+            )
+        }
+
         if isRemoteHTTP(input.urlString), isHLSPlaylist(input.urlString),
            !PlaybackEngineCapabilities.mpv.supportsRemoteHLS {
             return Result(

@@ -33,6 +33,56 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: sports))
         XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: hls))
         XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: false, request: vod))
+        let isoRequest = PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie.iso")!)
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: isoRequest))
+        let tokenRequestWithISOSuffix = PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/stream?token=abc")!,
+            filename: "Backup.iso"
+        )
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: tokenRequestWithISOSuffix))
+    }
+
+    func testDiscImageRoutesToAetherEngineWithoutFallback() {
+        let isoAuto = PlaybackBackendPolicy.resolve(.init(
+            urlString: "https://example.test/movie.iso",
+            engineSetting: .auto,
+            requiresMPVAudioControls: false,
+            assMode: .off
+        ))
+        XCTAssertEqual(isoAuto.backend, .aether)
+        XCTAssertFalse(isoAuto.allowAutomaticFallback)
+        XCTAssertTrue(isoAuto.reason.contains("Disc image (.iso) detected"))
+
+        let isoMpvForced = PlaybackBackendPolicy.resolve(.init(
+            urlString: "https://example.test/movie.iso",
+            engineSetting: .mpv,
+            requiresMPVAudioControls: false,
+            assMode: .off
+        ))
+        XCTAssertEqual(isoMpvForced.backend, .aether)
+        XCTAssertFalse(isoMpvForced.allowAutomaticFallback)
+        XCTAssertTrue(isoMpvForced.reason.contains("Disc image (.iso) requires AetherEngine"))
+        XCTAssertEqual(isoMpvForced.statusMessage, "AetherEngine (MPV lacks disc support)")
+
+        let isoWithFilename = PlaybackBackendPolicy.resolve(.init(
+            urlString: "https://example.test/stream?id=123",
+            filename: "Movie.1080p.BluRay.ISO",
+            engineSetting: .auto,
+            requiresMPVAudioControls: false,
+            assMode: .off
+        ))
+        XCTAssertEqual(isoWithFilename.backend, .aether)
+        XCTAssertFalse(isoWithFilename.allowAutomaticFallback)
+
+        XCTAssertFalse(PlaybackBackendPolicy.mpvSupportsURL("https://example.test/movie.iso"))
+        XCTAssertFalse(PlaybackBackendPolicy.mpvSupportsURL("file:///movies/feature.img"))
+        XCTAssertFalse(PlaybackBackendPolicy.mpvSupportsURL("smb://nas/movies/feature.mkv"))
+    }
+
+    func testDebridAndTorrentAcceptISOExtensions() {
+        XCTAssertTrue(DebridVideo.isPlayable("Movie.1080p.BluRay.iso"))
+        XCTAssertTrue(DebridVideo.isPlayable("Disc.IMG"))
+        XCTAssertEqual(TorrentStreamServer.mimeType(for: "disc.iso"), "application/x-iso9660-image")
     }
 
     @MainActor

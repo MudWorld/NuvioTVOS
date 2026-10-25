@@ -384,6 +384,7 @@ actor TorrentStreamServer {
         case "avi": return "video/x-msvideo"
         case "mov": return "video/quicktime"
         case "webm": return "video/webm"
+        case "iso", "img": return "application/x-iso9660-image"
         default: return "application/octet-stream"
         }
     }

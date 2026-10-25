@@ -348,6 +348,54 @@ final class SceneNavigationTests: XCTestCase {
         XCTAssertNil(loading.pipeline, "a pipeline from the outgoing track is hidden during reload")
     }
 
+    func testDolbyVisionRouteDescriptionUsesObservedRouteEvidence() {
+        XCTAssertEqual(
+            AetherPlaybackController.dolbyVisionRouteDescription(
+                sourceProfile: 7,
+                conversion: nil,
+                felComposedFrameCount: 12
+            ),
+            "P7 FEL · 12 frames composed"
+        )
+        XCTAssertEqual(
+            AetherPlaybackController.dolbyVisionRouteDescription(
+                sourceProfile: 7,
+                conversion: nil,
+                felComposedFrameCount: 0
+            ),
+            "P7 FEL route · awaiting composition"
+        )
+        XCTAssertEqual(
+            AetherPlaybackController.dolbyVisionRouteDescription(
+                sourceProfile: 7,
+                conversion: .profile7ToProfile81,
+                felComposedFrameCount: nil
+            ),
+            "P7→8.1 libdovi"
+        )
+        XCTAssertEqual(
+            AetherPlaybackController.dolbyVisionRouteDescription(
+                sourceProfile: 7,
+                conversion: nil,
+                felComposedFrameCount: nil
+            ),
+            "P7"
+        )
+        XCTAssertEqual(
+            AetherPlaybackController.dolbyVisionRouteDescription(
+                sourceProfile: 8,
+                conversion: nil,
+                felComposedFrameCount: nil
+            ),
+            "P8"
+        )
+        XCTAssertNil(AetherPlaybackController.dolbyVisionRouteDescription(
+            sourceProfile: nil,
+            conversion: nil,
+            felComposedFrameCount: nil
+        ))
+    }
+
     func testFreshAetherMetricsStayUnavailableAndMPVHandoffUsesActiveSnapshot() throws {
         guard let aetherController = AetherPlaybackController() else {
             throw XCTSkip("AetherEngine is unavailable in this test environment")

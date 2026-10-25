@@ -3,7 +3,7 @@ import OSLog
 
 actor TorrentSession {
     private static let videoExtensions: Set<String> = [
-        "mkv", "mp4", "m4v", "avi", "webm", "mov", "ts", "wmv", "flv"
+        "mkv", "mp4", "m4v", "avi", "webm", "mov", "ts", "wmv", "flv", "iso", "img"
     ]
 
     static let defaultTrackers = [

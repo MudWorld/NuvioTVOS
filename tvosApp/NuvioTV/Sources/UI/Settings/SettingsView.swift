@@ -274,6 +274,7 @@ enum SettingsKey {
     static let jellyfinLocalRowEnabled = "nuvio.tv.settings.integrations.jellyfinLocalRowEnabled"
 
     static let trueHDSpatialAudio = "nuvio.tv.settings.playback.trueHDSpatialAudio"
+    static let preferDualLayerDolbyVision = "nuvio.tv.settings.playback.preferDualLayerDolbyVision"
     static let playerEngine = "nuvio.tv.settings.playback.playerEngine"
     static let trickplayServer = "nuvio.tv.settings.playback.trickplayServer"
     static let externalPlayer = "nuvio.tv.settings.playback.externalPlayer"
@@ -387,7 +388,7 @@ enum SettingsKey {
         cinemetaDisabled, deletedLocalAddons,
         smbServers, smbLibraryIndex, smbLocalRowEnabled,
         jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
-        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, rememberLastSourceFocus, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        playerEngine, trueHDSpatialAudio, preferDualLayerDolbyVision, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, rememberLastSourceFocus, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         backgroundStreamPreFetch,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, autoSkipIntro, autoSkipRecap, autoSkipOutro, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
@@ -405,9 +406,62 @@ enum SettingsKey {
 
 // MARK: - Subtitle styling (applied to every MPV playback session)
 
+/// Typeface options available for subtitle rendering.
+enum SubtitleFontOption: String, CaseIterable, Identifiable {
+    case system = "System"
+    case rounded = "Rounded"
+    case serif = "Serif"
+    case monospaced = "Monospaced"
+    case trebuchetMS = "Trebuchet MS"
+    case helveticaNeue = "Helvetica Neue"
+    case futura = "Futura"
+    case avenirNext = "Avenir Next"
+    case georgia = "Georgia"
+    case menlo = "Menlo"
+    case courierNew = "Courier New"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .system: return "System"
+        case .rounded: return "Rounded"
+        case .serif: return "Serif"
+        case .monospaced: return "Monospace"
+        case .trebuchetMS: return "Trebuchet MS"
+        case .helveticaNeue: return "Helvetica Neue"
+        case .futura: return "Futura"
+        case .avenirNext: return "Avenir Next"
+        case .georgia: return "Georgia"
+        case .menlo: return "Menlo"
+        case .courierNew: return "Courier New"
+        }
+    }
+
+    var mpvFontName: String {
+        switch self {
+        case .system: return ""
+        case .rounded: return "Arial Rounded MT Bold"
+        case .serif: return "Times New Roman"
+        case .monospaced: return "Courier"
+        default: return rawValue
+        }
+    }
+}
+
+/// Screen placement options for subtitles.
+enum SubtitleVerticalPosition: String, CaseIterable, Identifiable {
+    case bottom = "Bottom"
+    case top = "Top"
+
+    var id: String { rawValue }
+}
+
 enum SubtitleStyleKey {
+    static let fontName = "nuvio.tv.settings.subtitleStyle.fontName"
     static let textSize = "nuvio.tv.settings.subtitleStyle.textSize"
     static let bold = "nuvio.tv.settings.subtitleStyle.bold"
+    static let verticalAlignment = "nuvio.tv.settings.subtitleStyle.verticalAlignment"
     static let bottomOffset = "nuvio.tv.settings.subtitleStyle.bottomOffset"
     static let horizontalMargin = "nuvio.tv.settings.subtitleStyle.horizontalMargin"
     static let letterSpacing = "nuvio.tv.settings.subtitleStyle.letterSpacing"
@@ -415,20 +469,23 @@ enum SubtitleStyleKey {
     static let textOpacity = "nuvio.tv.settings.subtitleStyle.textOpacity"
     static let outlineEnabled = "nuvio.tv.settings.subtitleStyle.outlineEnabled"
     static let outlineColor = "nuvio.tv.settings.subtitleStyle.outlineColor"
+    static let outlineWidth = "nuvio.tv.settings.subtitleStyle.outlineWidth"
     static let backgroundEnabled = "nuvio.tv.settings.subtitleStyle.backgroundEnabled"
     static let backgroundColor = "nuvio.tv.settings.subtitleStyle.backgroundColor"
     static let backgroundOpacity = "nuvio.tv.settings.subtitleStyle.backgroundOpacity"
 
     static let all = [
-        textSize, bold, bottomOffset, horizontalMargin, letterSpacing,
-        textColor, textOpacity, outlineEnabled, outlineColor,
+        fontName, textSize, bold, verticalAlignment, bottomOffset, horizontalMargin, letterSpacing,
+        textColor, textOpacity, outlineEnabled, outlineColor, outlineWidth,
         backgroundEnabled, backgroundColor, backgroundOpacity
     ]
 }
 
 enum SubtitleStyleDefaults {
-    static let textSize = 100        // percent, 60...220
+    static let fontName = SubtitleFontOption.system.rawValue
+    static let textSize = 100        // percent, 5...220
     static let bold = false
+    static let verticalAlignment = SubtitleVerticalPosition.bottom.rawValue
     static let bottomOffset = 20     // 0...160, raises subtitles off the bottom edge
     static let horizontalMargin = 25 // 0...200, left+right inset (mpv default is 25)
     static let letterSpacing = 0     // -8...40, negative squeezes, positive opens the text
@@ -436,6 +493,7 @@ enum SubtitleStyleDefaults {
     static let textOpacity = 100     // percent, 20...100
     static let outlineEnabled = true
     static let outlineColor = "#000000"
+    static let outlineWidth = 2      // 1...8 pt
     static let backgroundEnabled = false
     static let backgroundColor = "#000000"
     static let backgroundOpacity = 65
@@ -453,18 +511,21 @@ enum SubtitlePalette {
 /// every libmpv session and by the settings live preview. Defaults mirror
 /// `SubtitleStyleDefaults` so a fresh install renders white, outlined captions.
 struct SubtitleStyle {
-    var textSize: Int
-    var bold: Bool
-    var bottomOffset: Int
-    var horizontalMargin: Int
-    var letterSpacing: Int
-    var textColorHex: String
-    var textOpacity: Int
-    var outlineEnabled: Bool
-    var outlineColorHex: String
-    var backgroundEnabled: Bool
-    var backgroundColorHex: String
-    var backgroundOpacity: Int
+    var fontName: String = SubtitleStyleDefaults.fontName
+    var textSize: Int = SubtitleStyleDefaults.textSize
+    var bold: Bool = SubtitleStyleDefaults.bold
+    var verticalAlignment: String = SubtitleStyleDefaults.verticalAlignment
+    var bottomOffset: Int = SubtitleStyleDefaults.bottomOffset
+    var horizontalMargin: Int = SubtitleStyleDefaults.horizontalMargin
+    var letterSpacing: Int = SubtitleStyleDefaults.letterSpacing
+    var textColorHex: String = SubtitleStyleDefaults.textColor
+    var textOpacity: Int = SubtitleStyleDefaults.textOpacity
+    var outlineEnabled: Bool = SubtitleStyleDefaults.outlineEnabled
+    var outlineColorHex: String = SubtitleStyleDefaults.outlineColor
+    var outlineWidth: Int = SubtitleStyleDefaults.outlineWidth
+    var backgroundEnabled: Bool = SubtitleStyleDefaults.backgroundEnabled
+    var backgroundColorHex: String = SubtitleStyleDefaults.backgroundColor
+    var backgroundOpacity: Int = SubtitleStyleDefaults.backgroundOpacity
 
     static var current: SubtitleStyle {
         let defaults = ProfileSettings.current
@@ -478,8 +539,10 @@ struct SubtitleStyle {
             defaults.string(forKey: key) ?? fallback
         }
         return SubtitleStyle(
-            textSize: min(220, max(60, intValue(SubtitleStyleKey.textSize, SubtitleStyleDefaults.textSize))),
+            fontName: stringValue(SubtitleStyleKey.fontName, SubtitleStyleDefaults.fontName),
+            textSize: min(220, max(5, intValue(SubtitleStyleKey.textSize, SubtitleStyleDefaults.textSize))),
             bold: boolValue(SubtitleStyleKey.bold, SubtitleStyleDefaults.bold),
+            verticalAlignment: stringValue(SubtitleStyleKey.verticalAlignment, SubtitleStyleDefaults.verticalAlignment),
             bottomOffset: intValue(SubtitleStyleKey.bottomOffset, SubtitleStyleDefaults.bottomOffset),
             horizontalMargin: intValue(SubtitleStyleKey.horizontalMargin, SubtitleStyleDefaults.horizontalMargin),
             letterSpacing: intValue(SubtitleStyleKey.letterSpacing, SubtitleStyleDefaults.letterSpacing),
@@ -487,16 +550,42 @@ struct SubtitleStyle {
             textOpacity: intValue(SubtitleStyleKey.textOpacity, SubtitleStyleDefaults.textOpacity),
             outlineEnabled: boolValue(SubtitleStyleKey.outlineEnabled, SubtitleStyleDefaults.outlineEnabled),
             outlineColorHex: stringValue(SubtitleStyleKey.outlineColor, SubtitleStyleDefaults.outlineColor),
+            outlineWidth: min(8, max(1, intValue(SubtitleStyleKey.outlineWidth, SubtitleStyleDefaults.outlineWidth))),
             backgroundEnabled: boolValue(SubtitleStyleKey.backgroundEnabled, SubtitleStyleDefaults.backgroundEnabled),
             backgroundColorHex: stringValue(SubtitleStyleKey.backgroundColor, SubtitleStyleDefaults.backgroundColor),
             backgroundOpacity: intValue(SubtitleStyleKey.backgroundOpacity, SubtitleStyleDefaults.backgroundOpacity)
         )
     }
 
+    func font(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        switch fontName {
+        case "Rounded":
+            return .system(size: size, weight: weight, design: .rounded)
+        case "Serif":
+            return .system(size: size, weight: weight, design: .serif)
+        case "Monospace", "Monospaced":
+            return .system(size: size, weight: weight, design: .monospaced)
+        case "Helvetica Neue", "Trebuchet MS", "Futura", "Avenir Next", "Georgia", "Menlo", "Courier New":
+            return .custom(fontName, size: size).weight(weight)
+        default:
+            return .system(size: size, weight: weight, design: .default)
+        }
+    }
+
+    var mpvFontName: String {
+        switch fontName {
+        case "System": return ""
+        case "Rounded": return "Arial Rounded MT Bold"
+        case "Serif": return "Times New Roman"
+        case "Monospace", "Monospaced": return "Courier"
+        default: return fontName
+        }
+    }
+
     // MARK: libmpv property mapping
 
     /// `sub-scale` — relative subtitle text size.
-    var subScale: Double { min(max(Double(textSize) / 100.0, 0.4), 3.0) }
+    var subScale: Double { min(max(Double(textSize) / 100.0, 0.05), 3.0) }
     /// `sub-margin-y` — lifts captions off the bottom edge (22 is mpv's default).
     var subMarginY: Int { 22 + min(max(bottomOffset, 0), 160) }
     /// `sub-margin-x` — left+right screen inset in scaled pixels.
@@ -504,7 +593,10 @@ struct SubtitleStyle {
     /// `sub-spacing` — extra letter spacing; negative squeezes, positive opens.
     var subSpacing: Int { min(max(letterSpacing, -8), 40) }
     /// `sub-outline-size` — 0 collapses the border entirely.
-    var subOutlineSize: Double { outlineEnabled ? 3.0 : 0.0 }
+    var subOutlineSize: Double {
+        guard outlineEnabled else { return 0.0 }
+        return Double(min(max(outlineWidth, 1), 8)) * 1.5
+    }
     /// `sub-color` — `#AARRGGBB`, alpha carries Text Opacity.
     var subColor: String { Self.mpvColor(hex: textColorHex, opacity: textOpacity) }
     /// `sub-outline-color` — always fully opaque.
@@ -3066,6 +3158,87 @@ private struct HomeLayoutLivePreview: View {
     }
 }
 
+private struct SettingsFeatureSummaryCard: View {
+    let featureName: String
+    let status: String
+    let actionSubtitle: String
+    let accentColor: Color
+    var isEntryAnchor = false
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(featureName)
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text(status)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(.white.opacity(0.56))
+            }
+
+            SettingsActionRow(
+                title: L10n.format("tvos_settings_manage_feature", fallback: "Manage %@", featureName),
+                subtitle: actionSubtitle,
+                value: L10n.string("tvos_settings_open", fallback: "Open"),
+                accentColor: accentColor,
+                action: action
+            )
+            .settingsEntryAnchor(isEntryAnchor)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .settingsGlass(shape: RoundedRectangle(cornerRadius: 30, style: .continuous), isProminent: false)
+        .overlay(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+}
+
+private struct SettingsFeatureSettingsSheet<Content: View>: View {
+    let title: String
+    let subtitle: String
+    @ViewBuilder let content: Content
+
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+
+    var body: some View {
+        ZStack {
+            Color.nuvioBackground(amoled: amoled, body: bodyColor)
+                .ignoresSafeArea()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(title)
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(.white)
+
+                        Text(subtitle)
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.white.opacity(0.62))
+                    }
+
+                    content
+                }
+                .frame(width: 1_000, alignment: .leading)
+                .padding(.horizontal, 52)
+                .padding(.vertical, 38)
+            }
+            .focusSection()
+        }
+        .onExitCommand { dismiss() }
+    }
+}
+
+private func settingsCountSummary(_ count: Int, singular: String, plural: String) -> String {
+    "\(count) \(count == 1 ? singular : plural)"
+}
+
 private struct LayoutDiscoverySettingsView: View {
     let accentColor: Color
 
@@ -3092,6 +3265,10 @@ private struct LayoutDiscoverySettingsView: View {
     @AppStorage(SettingsKey.focusedPosterBackdropEnabled) private var focusedPosterBackdropEnabled = true
     @AppStorage(SettingsKey.focusedPosterBackdropDelay) private var focusedPosterBackdropDelay = 3
     @AppStorage(SettingsKey.detailsActionsBelowInfo) private var detailsActionsBelowInfo = false
+    @State private var showingHomeCatalogOrderSettings = false
+    @State private var showingCollectionsSettings = false
+    @State private var homeCatalogSummaryCount = 0
+    @State private var collectionsSummaryCount = 0
 
     /// Classic was never a distinct layout (behaved like Modern).
     private let layouts = ["Modern", "Grid View", "Compact"]
@@ -3292,9 +3469,23 @@ private struct LayoutDiscoverySettingsView: View {
                 .disabled(!focusedPosterBackdropEnabled)
             }
 
-            HomeCatalogOrderSection(accentColor: accentColor)
+            SettingsFeatureSummaryCard(
+                featureName: L10n.string("tvos_settings_home_catalogs", fallback: "Home Catalogs"),
+                status: settingsCountSummary(homeCatalogSummaryCount, singular: "catalog row", plural: "catalog rows"),
+                actionSubtitle: L10n.string("tvos_settings_home_catalogs_open_subtitle", fallback: "Reorder, refresh, and manage Home catalog rows"),
+                accentColor: accentColor
+            ) {
+                showingHomeCatalogOrderSettings = true
+            }
 
-            CollectionsSettingsSection(accentColor: accentColor)
+            SettingsFeatureSummaryCard(
+                featureName: L10n.string("tmdb_collections_title", fallback: "Collections"),
+                status: settingsCountSummary(collectionsSummaryCount, singular: "collection", plural: "collections"),
+                actionSubtitle: L10n.string("tvos_settings_collections_open_subtitle", fallback: "Create, organize, import, and export collections"),
+                accentColor: accentColor
+            ) {
+                showingCollectionsSettings = true
+            }
 
             SettingsGroup(
                 title: L10n.string("layout_section_continue_watching", fallback: "Continue Watching"),
@@ -3486,6 +3677,58 @@ private struct LayoutDiscoverySettingsView: View {
         .task {
             heroRatingSourceOptions = await AddonRatingsService.availableHeroRatingSources()
         }
+        .onAppear(perform: refreshSummaryCounts)
+        .onReceive(NotificationCenter.default.publisher(for: NuvioSyncManager.addonOrderChangedNotification).receive(on: RunLoop.main)) { _ in
+            refreshHomeCatalogSummaryCount()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NuvioSyncManager.homeContentSyncedNotification).receive(on: RunLoop.main)) { _ in
+            refreshSummaryCounts()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TVHomeCatalogOrder.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshHomeCatalogSummaryCount()
+            refreshCollectionsSummaryCount()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TVHomeCatalogOrder.snapshotChangedNotification).receive(on: RunLoop.main)) { _ in
+            refreshHomeCatalogSummaryCount()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CollectionsStore.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshCollectionsSummaryCount()
+        }
+        .fullScreenCover(isPresented: $showingHomeCatalogOrderSettings, onDismiss: refreshHomeCatalogSummaryCount) {
+            SettingsFeatureSettingsSheet(
+                title: L10n.string("tvos_settings_home_catalogs", fallback: "Home Catalogs"),
+                subtitle: L10n.string("tvos_settings_controls_catalog_and_collection_row_orde_b7069193", fallback: "Controls catalog and collection row order on Home")
+            ) {
+                HomeCatalogOrderSection(accentColor: accentColor)
+            }
+            .modifier(ClearPresentationBackgroundIfAvailable())
+        }
+        .fullScreenCover(isPresented: $showingCollectionsSettings, onDismiss: refreshCollectionsSummaryCount) {
+            SettingsFeatureSettingsSheet(
+                title: L10n.string("tmdb_collections_title", fallback: "Collections"),
+                subtitle: L10n.string("tvos_settings_group_catalogs_into_folders_on_your_home_screen", fallback: "Group catalogs into folders on your home screen")
+            ) {
+                CollectionsSettingsSection(accentColor: accentColor)
+            }
+            .modifier(ClearPresentationBackgroundIfAvailable())
+        }
+    }
+
+    private func refreshSummaryCounts() {
+        refreshHomeCatalogSummaryCount()
+        refreshCollectionsSummaryCount()
+    }
+
+    private func refreshHomeCatalogSummaryCount() {
+        homeCatalogSummaryCount = layoutVisibleHomeCatalogRows().filter { row in
+            row.id != TVHomeSection.continueWatchingId
+                && row.id != TVHomeSection.upcomingId
+                && !row.id.hasPrefix(TVHomeSection.collectionIdPrefix)
+        }.count
+    }
+
+    private func refreshCollectionsSummaryCount() {
+        collectionsSummaryCount = CollectionsStore.rawCollections().count
     }
 }
 
@@ -3780,6 +4023,9 @@ private struct IntegrationSettingsView: View {
     @State private var showingMdbListOptions = false
     @State private var showingAISubtitleOptions = false
     @State private var showingP2PConsent = false
+    @State private var showingAddonsSettings = false
+    @State private var addonSummaryCount = 0
+    @State private var addonSummarySyncedAddons: [SyncedAddon]? = nil
     @StateObject private var debridConnection = DebridAccountConnectionViewModel()
 
     init(accentColor: Color, profileID: String?) {
@@ -3863,7 +4109,15 @@ private struct IntegrationSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            AddonsSettingsSection(accentColor: accentColor)
+            SettingsFeatureSummaryCard(
+                featureName: L10n.string("tvos_settings_add_ons", fallback: "Add-ons"),
+                status: settingsCountSummary(addonSummaryCount, singular: "add-on configured", plural: "add-ons configured"),
+                actionSubtitle: L10n.string("tvos_settings_addons_open_subtitle", fallback: "Manage Stremio-compatible catalogs, streams, and subtitles"),
+                accentColor: accentColor,
+                isEntryAnchor: true
+            ) {
+                showingAddonsSettings = true
+            }
 
             SettingsGroup(
                 title: L10n.string("tvos_settings_watch_progress_title", fallback: "Continue Watching & Scrobbling"),
@@ -4208,6 +4462,7 @@ private struct IntegrationSettingsView: View {
         }
         .onAppear {
             currentCacheSizeText = TorrentSettings.cacheSizeFormatted()
+            refreshAddonSummaryCount()
             RemoteTrackingState.normalizeWatchProgressSource()
             RemoteTrackingState.normalizeLibrarySource()
             RemoteTrackingState.normalizeMoreLikeThisSource()
@@ -4330,6 +4585,15 @@ private struct IntegrationSettingsView: View {
             AISubtitleOptionsSheet(accentColor: accentColor)
                 .modifier(ClearPresentationBackgroundIfAvailable())
         }
+        .fullScreenCover(isPresented: $showingAddonsSettings, onDismiss: refreshAddonSummaryCount) {
+            SettingsFeatureSettingsSheet(
+                title: L10n.string("tvos_settings_add_ons", fallback: "Add-ons"),
+                subtitle: L10n.string("tvos_settings_stremio_compatible_catalogs_streams_and__cd03738a", fallback: "Stremio-compatible catalogs, streams, and subtitles")
+            ) {
+                AddonsSettingsSection(accentColor: accentColor, onSyncedAddonsChange: receiveSyncedAddonSummary)
+            }
+            .modifier(ClearPresentationBackgroundIfAvailable())
+        }
         .onChange(of: traktViewModel.mode) { _, mode in
             if mode == .connected { showingTraktLogin = false }
         }
@@ -4396,6 +4660,12 @@ private struct IntegrationSettingsView: View {
                 wetrakrViewModel.credentialsDidChange()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NuvioSyncManager.addonOrderChangedNotification).receive(on: RunLoop.main)) { _ in
+            refreshAddonSummaryCount()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NuvioSyncManager.homeContentSyncedNotification).receive(on: RunLoop.main)) { _ in
+            refreshAddonSummaryCount()
+        }
     }
 
     private var hasAnyDebridConnected: Bool {
@@ -4435,6 +4705,25 @@ private struct IntegrationSettingsView: View {
         realDebridAccessToken = store.string(forKey: SettingsKey.realDebridAccessToken) ?? ""
         debridApiKey = store.string(forKey: SettingsKey.debridApiKey) ?? ""
         debridProvider = store.string(forKey: SettingsKey.debridProvider) ?? "None"
+    }
+
+    private func receiveSyncedAddonSummary(_ syncedAddons: [SyncedAddon]) {
+        addonSummarySyncedAddons = syncedAddons
+        addonSummaryCount = AddonsSettingsSection.displayedRowCount(using: syncedAddons)
+    }
+
+    private func refreshAddonSummaryCount() {
+        let configured = AddonsSettingsSection.configuredSyncedAddons()
+        let resolved = configured.map { configuredAddon in
+            guard let resolvedAddon = addonSummarySyncedAddons?.first(where: { $0.id == configuredAddon.id }) else {
+                return configuredAddon
+            }
+            var updated = resolvedAddon
+            updated.isEnabled = configuredAddon.isEnabled
+            return updated
+        }
+        addonSummarySyncedAddons = resolved
+        addonSummaryCount = AddonsSettingsSection.displayedRowCount(using: resolved)
     }
 
     private var tmdbHasApiKey: Bool {
@@ -7899,6 +8188,7 @@ private struct PlaybackSettingsView: View {
 
     @AppStorage(SettingsKey.playerEngine) private var playerEngine = "Auto"
     @AppStorage(SettingsKey.trueHDSpatialAudio) private var trueHDSpatialAudio = false
+    @AppStorage(SettingsKey.preferDualLayerDolbyVision) private var preferDualLayerDolbyVision = false
     @AppStorage(SettingsKey.externalPlayer) private var externalPlayer = ExternalPlayer.builtIn.rawValue
     @AppStorage(SettingsKey.externalPlayerForwardSubtitles) private var externalPlayerForwardSubtitles = true
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
@@ -8020,13 +8310,26 @@ private struct PlaybackSettingsView: View {
                     title: L10n.string("tvos_settings_truehd_spatial_audio", fallback: "Atmos & DTS:X Spatial Audio (Beta)"),
                     subtitle: L10n.string(
                         "tvos_settings_truehd_spatial_audio_subtitle",
-                        fallback: "Render TrueHD Atmos and DTS:X to 9.1.6 using lossy APAC. Requires tvOS 26+ and AetherEngine; applies to the next playback."
+                        fallback: "On the native route, renders supported TrueHD Atmos and DTS:X to APAC. FEL software playback experimentally decodes TrueHD Atmos to PCM for APAC output and falls back to PCM if APAC fails. Requires tvOS 26+ and AetherEngine; applies to the next playback."
                     ),
                     isOn: $trueHDSpatialAudio,
                     accentColor: accentColor
                 )
                 .disabled(!SpatialAudioSettings.isSupported)
                 .opacity(SpatialAudioSettings.isSupported ? 1 : 0.46)
+
+                SettingsToggleRow(
+                    title: L10n.string(
+                        "tvos_settings_prefer_dual_layer_dolby_vision",
+                        fallback: "Full Dolby Vision P7 FEL (Experimental)"
+                    ),
+                    subtitle: L10n.string(
+                        "tvos_settings_prefer_dual_layer_dolby_vision_subtitle",
+                        fallback: "AetherEngine only. TrueHD Atmos via APAC requires Spatial Audio and tvOS 26+; other FEL audio uses PCM. Applies next playback."
+                    ),
+                    isOn: $preferDualLayerDolbyVision,
+                    accentColor: accentColor
+                )
 
                 SettingsOptionRow(
                     title: L10n.string("tvos_settings_external_player", fallback: "External Player"),
@@ -8047,32 +8350,6 @@ private struct PlaybackSettingsView: View {
                 )
                 .opacity(externalPlayer == ExternalPlayer.builtIn.rawValue ? 0.46 : 1)
                 .disabled(externalPlayer == ExternalPlayer.builtIn.rawValue)
-
-                SettingsToggleRow(
-                    title: L10n.string("tvos_settings_auto_play_next_episode", fallback: "Auto-Play Next Episode"),
-                    subtitle: L10n.string(
-                        "tvos_settings_auto_play_next_after_end_subtitle",
-                        fallback: "Play the next episode after the current episode fully ends. You can cancel from the Next Episode prompt."
-                    ),
-                    isOn: $autoPlayNext,
-                    accentColor: accentColor
-                )
-
-                SettingsToggleRow(
-                    title: L10n.string("tvos_settings_prefer_binge_group", fallback: "Prefer Same Source / Binge Group"),
-                    subtitle: L10n.string(
-                        "tvos_settings_prefer_binge_group_subtitle",
-                        fallback: "Automatically match and play streams from the same release group, add-on, and resolution across consecutive episodes and continue watching."
-                    ),
-                    isOn: Binding(
-                        get: { streamAutoPlayPreferBingeGroup || streamAutoPlayReuseBingeGroup },
-                        set: { newValue in
-                            streamAutoPlayPreferBingeGroup = newValue
-                            streamAutoPlayReuseBingeGroup = newValue
-                        }
-                    ),
-                    accentColor: accentColor
-                )
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_post_play_recommendations", fallback: "Post-Play Recommendations"),
@@ -8254,6 +8531,16 @@ private struct PlaybackSettingsView: View {
                     isOn: $autoSkipOutro,
                     accentColor: accentColor
                 )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_auto_play_next_episode", fallback: "Auto-Play Next Episode"),
+                    subtitle: L10n.string(
+                        "tvos_settings_auto_play_next_after_end_subtitle",
+                        fallback: "Play the next episode after the current episode fully ends. You can cancel from the Next Episode prompt."
+                    ),
+                    isOn: $autoPlayNext,
+                    accentColor: accentColor
+                )
             }
 
             SettingsGroup(title: L10n.string("tvos_settings_smart_playback", fallback: "Smart Playback"), subtitle: L10n.string("tvos_settings_automatically_choose_streams_and_matchin_9ca69e9f", fallback: "Automatically choose streams and matching subtitles")) {
@@ -8289,6 +8576,22 @@ private struct PlaybackSettingsView: View {
                 )
                 .opacity(reuseLastLink ? 1 : 0.46)
                 .disabled(!reuseLastLink)
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_prefer_binge_group", fallback: "Prefer Same Source / Binge Group"),
+                    subtitle: L10n.string(
+                        "tvos_settings_prefer_binge_group_subtitle",
+                        fallback: "Automatically match and play streams from the same release group, add-on, and resolution across consecutive episodes and continue watching."
+                    ),
+                    isOn: Binding(
+                        get: { streamAutoPlayPreferBingeGroup || streamAutoPlayReuseBingeGroup },
+                        set: { newValue in
+                            streamAutoPlayPreferBingeGroup = newValue
+                            streamAutoPlayReuseBingeGroup = newValue
+                        }
+                    ),
+                    accentColor: accentColor
+                )
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_remember_last_source_focus", fallback: "Remember Last Source Focus"),
@@ -8635,8 +8938,10 @@ struct SubtitleStyleEditor: View {
     let accentColor: Color
     var onChange: (() -> Void)? = nil
 
+    @AppStorage(SubtitleStyleKey.fontName) private var fontName = SubtitleStyleDefaults.fontName
     @AppStorage(SubtitleStyleKey.textSize) private var textSize = SubtitleStyleDefaults.textSize
     @AppStorage(SubtitleStyleKey.bold) private var bold = SubtitleStyleDefaults.bold
+    @AppStorage(SubtitleStyleKey.verticalAlignment) private var verticalAlignment = SubtitleStyleDefaults.verticalAlignment
     @AppStorage(SubtitleStyleKey.bottomOffset) private var bottomOffset = SubtitleStyleDefaults.bottomOffset
     @AppStorage(SubtitleStyleKey.horizontalMargin) private var horizontalMargin = SubtitleStyleDefaults.horizontalMargin
     @AppStorage(SubtitleStyleKey.letterSpacing) private var letterSpacing = SubtitleStyleDefaults.letterSpacing
@@ -8644,14 +8949,17 @@ struct SubtitleStyleEditor: View {
     @AppStorage(SubtitleStyleKey.textOpacity) private var textOpacity = SubtitleStyleDefaults.textOpacity
     @AppStorage(SubtitleStyleKey.outlineEnabled) private var outlineEnabled = SubtitleStyleDefaults.outlineEnabled
     @AppStorage(SubtitleStyleKey.outlineColor) private var outlineColor = SubtitleStyleDefaults.outlineColor
+    @AppStorage(SubtitleStyleKey.outlineWidth) private var outlineWidth = SubtitleStyleDefaults.outlineWidth
     @AppStorage(SubtitleStyleKey.backgroundEnabled) private var backgroundEnabled = SubtitleStyleDefaults.backgroundEnabled
     @AppStorage(SubtitleStyleKey.backgroundColor) private var backgroundColor = SubtitleStyleDefaults.backgroundColor
     @AppStorage(SubtitleStyleKey.backgroundOpacity) private var backgroundOpacity = SubtitleStyleDefaults.backgroundOpacity
 
     private var style: SubtitleStyle {
         SubtitleStyle(
-            textSize: min(220, max(60, textSize)),
+            fontName: fontName,
+            textSize: min(220, max(5, textSize)),
             bold: bold,
+            verticalAlignment: verticalAlignment,
             bottomOffset: bottomOffset,
             horizontalMargin: horizontalMargin,
             letterSpacing: letterSpacing,
@@ -8659,6 +8967,7 @@ struct SubtitleStyleEditor: View {
             textOpacity: textOpacity,
             outlineEnabled: outlineEnabled,
             outlineColorHex: outlineColor,
+            outlineWidth: min(8, max(1, outlineWidth)),
             backgroundEnabled: backgroundEnabled,
             backgroundColorHex: backgroundColor,
             backgroundOpacity: backgroundOpacity
@@ -8667,7 +8976,7 @@ struct SubtitleStyleEditor: View {
 
     /// Concatenation of every value; `.onChange` on it fires `onChange` once per edit.
     private var changeToken: String {
-        "\(textSize)|\(bold)|\(bottomOffset)|\(horizontalMargin)|\(letterSpacing)|\(textColor)|\(textOpacity)|\(outlineEnabled)|\(outlineColor)|\(backgroundEnabled)|\(backgroundColor)|\(backgroundOpacity)"
+        "\(fontName)|\(textSize)|\(bold)|\(verticalAlignment)|\(bottomOffset)|\(horizontalMargin)|\(letterSpacing)|\(textColor)|\(textOpacity)|\(outlineEnabled)|\(outlineColor)|\(outlineWidth)|\(backgroundEnabled)|\(backgroundColor)|\(backgroundOpacity)"
     }
 
     var body: some View {
@@ -8691,11 +9000,19 @@ struct SubtitleStyleEditor: View {
     private var controls: some View {
         VStack(alignment: .leading, spacing: 22) {
             SettingsGroup(title: L10n.string("tvos_settings_text", fallback: "Text"), subtitle: L10n.string("tvos_settings_size_weight_spacing_color_and_opacity_of_4755001d", fallback: "Size, weight, spacing, color, and opacity of the caption text")) {
+                SettingsOptionRow(
+                    title: L10n.string("subtitle_font", fallback: "Font"),
+                    subtitle: L10n.string("subtitle_font_desc", fallback: "Typeface used for subtitles"),
+                    selection: $fontName,
+                    options: SubtitleFontOption.allCases.map(\.rawValue),
+                    accentColor: accentColor
+                )
+
                 SettingsStepperRow(
                     title: L10n.string("tvos_settings_text_size", fallback: "Text Size"),
                     subtitle: L10n.string("tvos_settings_relative_subtitle_text_size", fallback: "Relative subtitle text size"),
                     value: $textSize,
-                    range: 60...220,
+                    range: 5...220,
                     step: 5,
                     suffix: "%",
                     accentColor: accentColor
@@ -8738,6 +9055,14 @@ struct SubtitleStyleEditor: View {
             }
 
             SettingsGroup(title: L10n.string("tvos_settings_position", fallback: "Position"), subtitle: L10n.string("tvos_settings_where_captions_sit_on_screen", fallback: "Where captions sit on screen")) {
+                SettingsOptionRow(
+                    title: L10n.string("subtitle_position", fallback: "Screen Position"),
+                    subtitle: L10n.string("subtitle_position_desc", fallback: "Place captions at the bottom or top of the screen"),
+                    selection: $verticalAlignment,
+                    options: SubtitleVerticalPosition.allCases.map(\.rawValue),
+                    accentColor: accentColor
+                )
+
                 SettingsStepperRow(
                     title: L10n.string("tvos_settings_vertical_position", fallback: "Vertical Position"),
                     subtitle: L10n.string("tvos_settings_raise_captions_up_off_the_bottom_edge", fallback: "Raise captions up off the bottom edge"),
@@ -8771,6 +9096,18 @@ struct SubtitleStyleEditor: View {
                     title: L10n.string("subtitle_outline_color", fallback: "Outline Color"),
                     subtitle: L10n.string("tvos_settings_border_color_drawn_around_the_text", fallback: "Border color drawn around the text"),
                     selection: $outlineColor,
+                    accentColor: accentColor
+                )
+                .opacity(outlineEnabled ? 1 : 0.46)
+                .disabled(!outlineEnabled)
+
+                SettingsStepperRow(
+                    title: L10n.string("subtitle_outline_width", fallback: "Outline Thickness"),
+                    subtitle: L10n.string("subtitle_outline_width_desc", fallback: "Width of the text stroke border"),
+                    value: $outlineWidth,
+                    range: 1...6,
+                    step: 1,
+                    suffix: "pt",
                     accentColor: accentColor
                 )
                 .opacity(outlineEnabled ? 1 : 0.46)
@@ -8835,8 +9172,10 @@ struct SubtitleStyleEditor: View {
     }
 
     private func resetDefaults() {
+        fontName = SubtitleStyleDefaults.fontName
         textSize = SubtitleStyleDefaults.textSize
         bold = SubtitleStyleDefaults.bold
+        verticalAlignment = SubtitleStyleDefaults.verticalAlignment
         bottomOffset = SubtitleStyleDefaults.bottomOffset
         horizontalMargin = SubtitleStyleDefaults.horizontalMargin
         letterSpacing = SubtitleStyleDefaults.letterSpacing
@@ -8844,6 +9183,7 @@ struct SubtitleStyleEditor: View {
         textOpacity = SubtitleStyleDefaults.textOpacity
         outlineEnabled = SubtitleStyleDefaults.outlineEnabled
         outlineColor = SubtitleStyleDefaults.outlineColor
+        outlineWidth = SubtitleStyleDefaults.outlineWidth
         backgroundEnabled = SubtitleStyleDefaults.backgroundEnabled
         backgroundColor = SubtitleStyleDefaults.backgroundColor
         backgroundOpacity = SubtitleStyleDefaults.backgroundOpacity
@@ -8858,10 +9198,14 @@ private struct SubtitlePreviewCard: View {
     private let sampleText = "The quick brown fox jumps over the lazy dog"
 
     private var fontSize: CGFloat {
-        min(max(CGFloat(style.textSize) / 100.0 * 40.0, 16), 92)
+        min(max(CGFloat(style.textSize) / 100.0 * 40.0, 2), 92)
     }
 
-    private var previewBottomPadding: CGFloat {
+    private var isTopAligned: Bool {
+        style.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame
+    }
+
+    private var previewVerticalPadding: CGFloat {
         22 + CGFloat(min(max(style.bottomOffset, 0), 160)) * 0.7
     }
 
@@ -8874,7 +9218,9 @@ private struct SubtitlePreviewCard: View {
     }
 
     private var outlineWidth: CGFloat {
-        max(2, fontSize * 0.05)
+        guard style.outlineEnabled else { return 0 }
+        let configured = max(1, CGFloat(style.outlineWidth) * 0.8)
+        return min(configured, max(0.5, fontSize * 0.3))
     }
 
     private var outlineOffsets: [CGPoint] {
@@ -8890,8 +9236,8 @@ private struct SubtitlePreviewCard: View {
     var body: some View {
         // Decorative backdrop only. The 320pt Circle's intrinsic size was warping
         // where `ZStack(.bottom)` placed the caption, dropping it below the card's
-        // clipped 220pt bottom. Keeping the caption as a bottom *overlay* pins it to
-        // the real 220pt frame instead, so its bottom padding is honored.
+        // clipped 220pt bottom. Keeping the caption as a bottom/top *overlay* pins it to
+        // the real 220pt frame instead, so its vertical padding is honored.
         ZStack {
             LinearGradient(
                 colors: [
@@ -8911,11 +9257,11 @@ private struct SubtitlePreviewCard: View {
         }
         .frame(height: 220)
         .frame(maxWidth: .infinity)
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: isTopAligned ? .top : .bottom) {
             styledSubtitle
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, previewHorizontalPadding)
-                .padding(.bottom, previewBottomPadding)
+                .padding(isTopAligned ? .top : .bottom, previewVerticalPadding)
         }
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
@@ -8948,11 +9294,11 @@ private struct SubtitlePreviewCard: View {
     }
 
     private var styledSubtitleText: some View {
-        let font = Font.system(size: fontSize, weight: style.bold ? .heavy : .semibold)
+        let font = style.font(size: fontSize, weight: style.bold ? .heavy : .semibold)
         let fill = Color(hex: style.textColorHex).opacity(Double(min(max(style.textOpacity, 0), 100)) / 100.0)
         let outline = Color(hex: style.outlineColorHex)
         return ZStack {
-            if style.outlineEnabled {
+            if style.outlineEnabled && outlineWidth > 0 {
                 ForEach(Array(outlineOffsets.enumerated()), id: \.offset) { _, point in
                     Text(sampleText)
                         .font(font)
@@ -11044,6 +11390,7 @@ private struct JellyfinLibrarySelectionSheet: View {
 
 private struct AddonsSettingsSection: View {
     let accentColor: Color
+    var onSyncedAddonsChange: (([SyncedAddon]) -> Void)? = nil
 
     @AppStorage(SettingsKey.streamAddonManifestURL) private var streamAddonManifestURL = ""
     @AppStorage(SettingsKey.streamAddonManifestURLs) private var streamAddonManifestURLs = ""
@@ -11176,6 +11523,7 @@ private struct AddonsSettingsSection: View {
             if let id = addon.manifestID { identities[addon.url.absoluteString] = id }
         }
         CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, knownManifestIDs: identities)
+        onSyncedAddonsChange?(syncedAddons)
         TVHomeCatalogOrder.setDisabledAddonSources(
             ids: Set(syncedAddons.filter { !$0.isEnabled }.compactMap(\.manifestID)),
             names: Set(
@@ -11210,6 +11558,7 @@ private struct AddonsSettingsSection: View {
         }
         syncedAddons = resolved
         addons = Self.initialLocalAddons()
+        onSyncedAddonsChange?(resolved)
 
         var pendingRowUpdates: [(addonID: String, addonName: String, additions: [TVHomeCatalogOrder.SnapshotRow])] = []
 
@@ -11222,6 +11571,7 @@ private struct AddonsSettingsSection: View {
             }
             resolved[index].apply(manifest)
             syncedAddons = resolved
+            onSyncedAddonsChange?(resolved)
             if resolved[index].isEnabled,
                let addonID = manifest.id,
                addonID != CinemetaCatalogRepository.cinemetaAddonId {
@@ -11301,9 +11651,13 @@ private struct AddonsSettingsSection: View {
     /// the same addon (matched loosely by name/host, so the synced "Cinemeta"
     /// covers the built-in Cinemeta row instead of showing a duplicate).
     private func isCoveredBySyncedAddon(_ addon: AddonItem) -> Bool {
+        Self.isCoveredBySyncedAddon(addon, sources: syncedAddons)
+    }
+
+    private static func isCoveredBySyncedAddon(_ addon: AddonItem, sources: [SyncedAddon]) -> Bool {
         let target = Self.normalizedAddonKey(addon.name)
         guard !target.isEmpty else { return false }
-        return syncedAddons.contains { synced in
+        return sources.contains { synced in
             Self.normalizedAddonKey(synced.name).contains(target)
                 || Self.normalizedAddonKey(synced.url.host ?? "").contains(target)
         }
@@ -11340,6 +11694,20 @@ private struct AddonsSettingsSection: View {
             }
             return updated
         }
+    }
+
+    static func configuredSyncedAddons() -> [SyncedAddon] {
+        CinemetaCatalogRepository.configuredStreamAddonPreferences.compactMap { preference in
+            guard let url = CinemetaCatalogRepository.normalizedManifestURL(from: preference.url) else { return nil }
+            return SyncedAddon(url: url, isEnabled: preference.enabled)
+        }
+    }
+
+    static func displayedRowCount(using syncedAddons: [SyncedAddon]) -> Int {
+        let uncoveredLocalAddons = initialLocalAddons().filter {
+            !isCoveredBySyncedAddon($0, sources: syncedAddons)
+        }
+        return syncedAddons.count + uncoveredLocalAddons.count
     }
 
     private func setLocalAddonEnabled(at index: Int, isEnabled: Bool) {
@@ -11403,6 +11771,7 @@ private struct AddonsSettingsSection: View {
                 object: nil
             )
         }
+        onSyncedAddonsChange?(syncedAddons)
     }
 
     private func moveLocalAddon(from source: Int, to target: Int) {
@@ -15791,6 +16160,12 @@ private struct ClearPresentationBackgroundIfAvailable: ViewModifier {
     func body(content: Content) -> some View {
         #if os(iOS)
         if #available(iOS 16.4, *) {
+            content.presentationBackground(.clear)
+        } else {
+            content
+        }
+        #elseif os(tvOS)
+        if #available(tvOS 16.4, *) {
             content.presentationBackground(.clear)
         } else {
             content

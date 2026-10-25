@@ -41,6 +41,8 @@ private final class PlayerControlsTestEngine: PlaybackEngineControlling {
     var videoFrameSize = CGSize.zero
     var playbackDebugInfo = PlaybackDebugInfo(player: "Test")
     var loadingStepMessage: String?
+    var supportsAudioProcessing = false
+    var audioProcessingCalls: [(dialogue: EnhanceDialogueMode, reduceLoud: Bool)] = []
 
     func loadFile(_ urlString: String) {}
     func playPlayback() {}
@@ -51,6 +53,9 @@ private final class PlayerControlsTestEngine: PlaybackEngineControlling {
     func setSubtitleDelay(_ seconds: Double) {}
     func setAudioDelay(_ seconds: Double) {}
     func setAudioVolumeGain(dB: Double) {}
+    func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool) {
+        audioProcessingCalls.append((dialogue, reduceLoud))
+    }
     func selectAudio(_ trackId: Int) {}
     func selectSubtitle(_ trackId: Int) {}
     func addSubtitle(_ subtitle: NuvioSubtitle, select: Bool) {}
@@ -95,6 +100,74 @@ private final class DeferredNextStreamResolver {
     func release(_ prepared: PreparedNextStream?) {
         continuation?.resume(returning: prepared)
         continuation = nil
+    }
+}
+
+final class PlayerAudioProcessingTests: XCTestCase {
+    @MainActor
+    private func makeModel() -> PlayerViewModel {
+        PlayerViewModel(sessionCoordinator: PlaybackSessionCoordinator(
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        ))
+    }
+
+    @MainActor
+    func testUnsupportedRouteDoesNotClaimProcessingIsActive() {
+        let model = makeModel()
+        defer { model.shutdown() }
+        model.setEnhanceDialogueMode(.boost)
+        model.toggleReduceLoudSounds()
+        XCTAssertEqual(model.enhanceDialogueMode, .off)
+        XCTAssertFalse(model.isReduceLoudSoundsActive)
+
+        let unsupported = PlayerControlsTestEngine()
+        model.pollForTesting(using: unsupported)
+        XCTAssertFalse(model.supportsAudioProcessing)
+        XCTAssertTrue(unsupported.audioProcessingCalls.isEmpty)
+    }
+
+    @MainActor
+    func testSelectedModesReachReplacementControllerWithTheSameCapability() {
+        let model = makeModel()
+        defer { model.shutdown() }
+        model.enhanceDialogueMode = .boost
+        model.isReduceLoudSoundsActive = true
+        let original = PlayerControlsTestEngine()
+        original.supportsAudioProcessing = true
+        model.pollForTesting(using: original)
+        model.pollForTesting(using: original)
+        XCTAssertEqual(original.audioProcessingCalls.count, 1)
+
+        let replacement = PlayerControlsTestEngine()
+        replacement.supportsAudioProcessing = true
+        model.pollForTesting(using: replacement)
+        XCTAssertTrue(model.supportsAudioProcessing)
+        XCTAssertEqual(replacement.audioProcessingCalls.count, 1)
+        XCTAssertEqual(replacement.audioProcessingCalls.first?.dialogue, .boost)
+        XCTAssertEqual(replacement.audioProcessingCalls.first?.reduceLoud, true)
+    }
+
+    @MainActor
+    func testDecodedRouteAvailabilityReappliesSelectedModes() {
+        let model = makeModel()
+        defer { model.shutdown() }
+        model.enhanceDialogueMode = .enhance
+        model.isReduceLoudSoundsActive = true
+        let controller = PlayerControlsTestEngine()
+        model.pollForTesting(using: controller)
+        XCTAssertTrue(controller.audioProcessingCalls.isEmpty)
+
+        controller.supportsAudioProcessing = true
+        model.pollForTesting(using: controller)
+        XCTAssertTrue(model.supportsAudioProcessing)
+        XCTAssertEqual(controller.audioProcessingCalls.first?.dialogue, .enhance)
+        XCTAssertEqual(controller.audioProcessingCalls.first?.reduceLoud, true)
+
+        controller.supportsAudioProcessing = false
+        model.pollForTesting(using: controller)
+        XCTAssertFalse(model.supportsAudioProcessing)
+        XCTAssertEqual(controller.audioProcessingCalls.count, 1)
     }
 }
 
@@ -382,6 +455,58 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.showLoadingStatus))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.audioDelayPersistEnabled))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.persistentAudioDelayMs))
+    }
+
+    func testSubtitleStyleKeysAndDefaults() {
+        XCTAssertEqual(SubtitleStyleKey.fontName, "nuvio.tv.settings.subtitleStyle.fontName")
+        XCTAssertEqual(SubtitleStyleKey.textSize, "nuvio.tv.settings.subtitleStyle.textSize")
+        XCTAssertEqual(SubtitleStyleKey.verticalAlignment, "nuvio.tv.settings.subtitleStyle.verticalAlignment")
+        XCTAssertEqual(SubtitleStyleKey.outlineWidth, "nuvio.tv.settings.subtitleStyle.outlineWidth")
+
+        XCTAssertTrue(SubtitleStyleKey.all.contains(SubtitleStyleKey.fontName))
+        XCTAssertTrue(SubtitleStyleKey.all.contains(SubtitleStyleKey.textSize))
+        XCTAssertTrue(SubtitleStyleKey.all.contains(SubtitleStyleKey.verticalAlignment))
+        XCTAssertTrue(SubtitleStyleKey.all.contains(SubtitleStyleKey.outlineWidth))
+
+        XCTAssertEqual(SubtitleStyleDefaults.fontName, "System")
+        XCTAssertEqual(SubtitleStyleDefaults.textSize, 100)
+        XCTAssertEqual(SubtitleStyleDefaults.verticalAlignment, "Bottom")
+        XCTAssertEqual(SubtitleStyleDefaults.outlineWidth, 2)
+    }
+
+    func testSubtitleStyleSmallerSizeClampingAndScaling() {
+        var style = SubtitleStyle()
+        style.textSize = 5
+        XCTAssertEqual(style.subScale, 0.05, accuracy: 0.001)
+
+        let clampedMin = SubtitleStyle(textSize: min(220, max(5, 2)))
+        XCTAssertEqual(clampedMin.textSize, 5)
+        XCTAssertEqual(clampedMin.subScale, 0.05, accuracy: 0.001)
+
+        let clampedMax = SubtitleStyle(textSize: min(220, max(5, 250)))
+        XCTAssertEqual(clampedMax.textSize, 220)
+        XCTAssertEqual(clampedMax.subScale, 2.2, accuracy: 0.001)
+    }
+
+    func testSubtitleStyleFontAndPositionOptions() {
+        var style = SubtitleStyle()
+        XCTAssertEqual(style.mpvFontName, "")
+
+        style.fontName = "Trebuchet MS"
+        XCTAssertEqual(style.mpvFontName, "Trebuchet MS")
+
+        style.fontName = "Serif"
+        XCTAssertEqual(style.mpvFontName, "Times New Roman")
+
+        style.outlineEnabled = true
+        style.outlineWidth = 3
+        XCTAssertEqual(style.subOutlineSize, 4.5, accuracy: 0.001)
+
+        style.outlineEnabled = false
+        XCTAssertEqual(style.subOutlineSize, 0.0)
+
+        style.verticalAlignment = "Top"
+        XCTAssertEqual(style.verticalAlignment, "Top")
     }
 
     func testPromptFocusBlocksWindowInputCaptureButTimelineCaptureRemainsAllowed() {

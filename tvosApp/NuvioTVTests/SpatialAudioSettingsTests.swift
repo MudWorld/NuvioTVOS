@@ -3,6 +3,10 @@ import AetherEngine
 @testable import NuvioTV
 
 final class SpatialAudioSettingsTests: XCTestCase {
+    func testDualLayerDolbyVisionPreferenceIsRegisteredForProfileSync() {
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.preferDualLayerDolbyVision))
+    }
+
     func testExistingProfilesRemainOffUntilEnabledAndCanDisableAgain() {
         let name = "SpatialAudioSettingsTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!

@@ -206,6 +206,8 @@ class PlayerViewModel: ObservableObject {
     let clock = PlaybackClock()
     @Published var subtitles: [SubtitleTrack] = []
     @Published var audioTracks: [AudioTrack] = []
+    @Published var discTitles: [PlaybackDiscTitleInfo] = []
+    @Published var selectedDiscTitleId: Int? = nil
     @Published var playbackSpeed: PlaybackSpeed = .normal
     @Published var seekStepSeconds: Int = PlayerSeekSettings.current
     @Published var qualities: [QualityOption] = [.auto]
@@ -263,6 +265,8 @@ class PlayerViewModel: ObservableObject {
     @Published var enhanceDialogueMode: EnhanceDialogueMode = .off
     /// Active Reduce Loud Sounds toggle state.
     @Published var isReduceLoudSoundsActive: Bool = false
+    /// Whether the active playback route can apply dialogue/loudness processing.
+    @Published private(set) var supportsAudioProcessing = false
     /// Full-screen settings panel (subtitles / audio / speed) visibility.
     @Published var showSettingsPanel: Bool = false {
         didSet {
@@ -419,6 +423,11 @@ class PlayerViewModel: ObservableObject {
     private var engine: PlaybackEngineControlling {
         sessionCoordinator.activeEngine
     }
+
+    /// Weak identity of the controller that last received the selected processing settings. A
+    /// compatibility handoff can replace the controller while capability stays true (Aether → MPV).
+    private weak var audioProcessingAppliedController: (any PlaybackEngineControlling)?
+    private var audioProcessingAppliedCapability: Bool?
 
     private var pollTimer: Timer?
     private var controlsHideTimer: Timer?
@@ -844,6 +853,8 @@ class PlayerViewModel: ObservableObject {
             self.didAddExternalSubtitles = true
             self.audioTracks = []
             self.subtitles = []
+            self.discTitles = []
+            self.selectedDiscTitleId = nil
         }
     }
 
@@ -1578,7 +1589,7 @@ class PlayerViewModel: ObservableObject {
             let last = urlObj.lastPathComponent
             if !last.isEmpty && last != "/" && last.contains(".") {
                 let ext = (last as NSString).pathExtension.lowercased()
-                let videoExtensions: Set<String> = ["mkv", "mp4", "avi", "mov", "webm", "ts", "m4v", "wmv", "iso"]
+                let videoExtensions: Set<String> = ["mkv", "mp4", "avi", "mov", "webm", "ts", "m4v", "wmv", "iso", "img"]
                 if videoExtensions.contains(ext) {
                     return last
                 }
@@ -3096,6 +3107,21 @@ class PlayerViewModel: ObservableObject {
             trailerEndConfirmation.reset()
             return
         }
+        let processingSupported = c.supportsAudioProcessing
+        let controllerChanged = audioProcessingAppliedController !== c
+        if controllerChanged || audioProcessingAppliedCapability != processingSupported {
+            audioProcessingAppliedController = c
+            audioProcessingAppliedCapability = processingSupported
+            if processingSupported {
+                c.setAudioProcessing(
+                    dialogue: enhanceDialogueMode,
+                    reduceLoud: isReduceLoudSoundsActive
+                )
+            }
+        }
+        if supportsAudioProcessing != processingSupported {
+            supportsAudioProcessing = processingSupported
+        }
         PictureInPictureManager.shared.refreshWatchPartyTimebase(for: sessionCoordinator)
         guard !didShutdown, activeEngineKind == sampledEngineKind,
               sessionCoordinator.loadGeneration == sampledLoadGeneration else { return }
@@ -3664,6 +3690,11 @@ class PlayerViewModel: ObservableObject {
         subs.insert(SubtitleTrack(id: "off", name: "Off", language: "",
                                   isSelected: !anySelected), at: 0)
         if subtitles != subs { subtitles = subs }
+
+        let latestDiscTitles = c.discTitles
+        if discTitles != latestDiscTitles { discTitles = latestDiscTitles }
+        if selectedDiscTitleId != c.selectedDiscTitleId { selectedDiscTitleId = c.selectedDiscTitleId }
+
         applySavedTrackSelectionsIfNeeded()
         guard c === engine else { return }
         applyAudioPreferenceIfNeeded()
@@ -5507,11 +5538,13 @@ class PlayerViewModel: ObservableObject {
     }
 
     func setEnhanceDialogueMode(_ mode: EnhanceDialogueMode) {
+        guard engine.supportsAudioProcessing else { return }
         enhanceDialogueMode = mode
         engine.setAudioProcessing(dialogue: enhanceDialogueMode, reduceLoud: isReduceLoudSoundsActive)
     }
 
     func toggleReduceLoudSounds() {
+        guard engine.supportsAudioProcessing else { return }
         isReduceLoudSoundsActive.toggle()
         engine.setAudioProcessing(dialogue: enhanceDialogueMode, reduceLoud: isReduceLoudSoundsActive)
     }
@@ -5904,6 +5937,11 @@ class PlayerViewModel: ObservableObject {
             didApplyAudioPreference = true
             reapplyAutomaticSubtitlePreferenceAfterAudioSelection()
         }
+    }
+
+    func selectDiscTitle(_ id: Int) {
+        engine.selectDiscTitle(id)
+        selectedDiscTitleId = id
     }
 
     private func reapplyAutomaticSubtitlePreferenceAfterAudioSelection() {

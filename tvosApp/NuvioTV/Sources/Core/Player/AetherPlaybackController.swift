@@ -2585,6 +2585,19 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
     private(set) var audioTracks: [PlaybackTrackInfo] = []
     private(set) var subtitleTracks: [PlaybackTrackInfo] = []
+    var discTitles: [PlaybackDiscTitleInfo] {
+        engine.discTitles.map {
+            PlaybackDiscTitleInfo(
+                id: $0.id,
+                name: $0.name,
+                durationSeconds: $0.durationSeconds,
+                chapterCount: $0.chapterCount
+            )
+        }
+    }
+    var selectedDiscTitleId: Int? {
+        engine.selectedDiscTitle?.id
+    }
     private(set) var isPlayerLoading = true
     private(set) var isPlayerPlaying = false
     var isTransportPlaying: Bool {
@@ -3001,7 +3014,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 diagnostics: "route=scene-adapter reason=cancelled-or-superseded primary={\(primary.diagnostics)}")
         }
         guard primary.image == nil,
-              sourceDVProfile == 5,
+              (sourceDVProfile == 5 || sourceDVProfile == nil),
               sourceEligible,
               Self.isRecoverableDV5ResidentCaptureFailure(primary.diagnostics) else { return primary }
         guard targetSeconds.isFinite, targetSeconds >= 0 else {
@@ -3499,6 +3512,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         AetherEngine.version
     }
 
+    var supportsAudioProcessing: Bool {
+        engine.supportsAudioProcessing
+    }
+
     var playbackDebugInfo: PlaybackDebugInfo {
         let width = Int(engine.sourceVideoWidth > 0 ? engine.sourceVideoWidth : sourceProbe?.videoWidth ?? 0)
         let height = Int(engine.sourceVideoHeight > 0 ? engine.sourceVideoHeight : sourceProbe?.videoHeight ?? 0)
@@ -3548,18 +3565,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
         // Dolby Vision line
         let dvProfile = engine.sourceDVProfile ?? sourceProbe?.dvProfile
-        let dvStr: String
-        if let dvProfile, dvProfile > 0 {
-            if dvProfile == 7 {
-                dvStr = "P7→8.1 libdovi · FEL"
-            } else if dvProfile == 8 {
-                dvStr = "P8.1 libdovi · MEL"
-            } else {
-                dvStr = "P\(dvProfile) (Single Track)"
-            }
-        } else {
-            dvStr = isDV ? "Dolby Vision" : "None"
-        }
+        let dvStr = Self.dolbyVisionRouteDescription(
+            sourceProfile: dvProfile,
+            conversion: engine.dolbyVisionConversion,
+            felComposedFrameCount: engine.dolbyVisionFELComposedFrameCount
+        ) ?? (isDV ? "Dolby Vision" : "None")
 
         // DV HDR Metadata line
         let dvHdrStr = isDV
@@ -4482,6 +4492,27 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         return "[Script Info]\nScriptType: v4.00+\nPlayResX: \(playResX)\nPlayResY: \(playResY)\n\n\(cleanHeader)"
     }
 
+    static func dolbyVisionRouteDescription(
+        sourceProfile: Int?,
+        conversion: DolbyVisionConversion?,
+        felComposedFrameCount: Int?
+    ) -> String? {
+        if let felComposedFrameCount {
+            return felComposedFrameCount > 0
+                ? "P7 FEL · \(felComposedFrameCount) frames composed"
+                : "P7 FEL route · awaiting composition"
+        }
+        if conversion == .profile7ToProfile81 {
+            return "P7→8.1 libdovi"
+        }
+        guard let sourceProfile, sourceProfile > 0 else { return nil }
+        switch sourceProfile {
+        case 7: return "P7"
+        case 8: return "P8"
+        default: return "P\(sourceProfile) (Single Track)"
+        }
+    }
+
     static func audioSourceDiagnostics(
         for track: TrackInfo?,
         activeDecoder: String?,
@@ -4695,8 +4726,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         }
 
         let isLive = request.isLiveStream || request.isSports
+        let preferDualLayerDolbyVision = ProfileSettings.current.bool(forKey: SettingsKey.preferDualLayerDolbyVision)
         let options = LoadOptions(
             httpHeaders: request.httpHeaders,
+            preferDualLayerDolbyVision: preferDualLayerDolbyVision,
             matchContentEnabled: matchContent,
             panelIsInHDRMode: panelInHDR,
             panelPresentsDolbyVision: panelPresentsDV,
@@ -4788,9 +4821,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             path: parsed.path,
             auth: SMBSessionManager.shared.authMode(for: server)
         )
+        let ext = (parsed.path as NSString).pathExtension.lowercased()
         return SMBIOReader(
             source: connection,
-            discImageProbeEnabled: parsed.path.lowercased().hasSuffix(".iso")
+            discImageProbeEnabled: ["iso", "img", "udf"].contains(ext)
         )
     }
 
@@ -4882,6 +4916,17 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         _ = dB
     }
 
+    func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool) {
+        guard engine.supportsAudioProcessing else { return }
+        let mode: AudioDialogueEnhancement
+        switch dialogue {
+        case .off: mode = .off
+        case .enhance: mode = .enhance
+        case .boost: mode = .boost
+        }
+        engine.setAudioProcessing(dialogue: mode, reduceLoudSounds: reduceLoud)
+    }
+
     func selectAudio(_ trackId: Int) {
         engine.selectAudioTrack(index: trackId)
         mapAudioTracks(engine.audioTracks)
@@ -4894,6 +4939,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             engine.selectSubtitleTrack(index: trackId)
         }
         mapSubtitleTracks(engine.subtitleTracks)
+    }
+
+    func selectDiscTitle(_ id: Int) {
+        engine.selectTitle(id: id)
     }
 
     func addSubtitle(_ subtitle: NuvioSubtitle, select: Bool) {

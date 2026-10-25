@@ -12,13 +12,18 @@ struct PlayerSubtitleOverlay: View {
     let style: SubtitleStyle
 
     private var textSize: CGFloat {
-        min(max(CGFloat(style.textSize) / 100 * 55, 24), 125)
+        min(max(CGFloat(style.textSize) / 100 * 55, 2), 125)
     }
     private var textColor: Color { Color(hex: style.textColorHex) }
     private var outlineColor: Color { Color(hex: style.outlineColorHex) }
     private var textOpacity: Double { Double(min(max(style.textOpacity, 0), 100)) / 100 }
-    private var outlineWidth: CGFloat { style.outlineEnabled ? 2 : 0 }
-    private var bottomOffset: CGFloat { CGFloat(22 + min(max(style.bottomOffset, 0), 160)) }
+    private var outlineWidth: CGFloat {
+        guard style.outlineEnabled else { return 0 }
+        let configured = CGFloat(min(max(style.outlineWidth, 1), 8))
+        return min(configured, max(0.5, textSize * 0.3))
+    }
+    private var isTopAligned: Bool { style.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame }
+    private var verticalOffset: CGFloat { CGFloat(22 + min(max(style.bottomOffset, 0), 160)) }
     private var horizontalMargin: CGFloat { CGFloat(min(max(style.horizontalMargin, 0), 200)) }
     private var fontWeight: Font.Weight { style.bold ? .bold : .regular }
 
@@ -87,12 +92,14 @@ struct PlayerSubtitleOverlay: View {
                     }
                     .frame(
                         width: max(videoRect.width - horizontalMargin * 2, 1),
-                        height: max(videoRect.height - bottomOffset, 1),
-                        alignment: .bottom
+                        height: max(videoRect.height - verticalOffset, 1),
+                        alignment: isTopAligned ? .top : .bottom
                     )
                     .position(
                         x: videoRect.midX,
-                        y: videoRect.minY + max(videoRect.height - bottomOffset, 1) / 2
+                        y: isTopAligned
+                            ? videoRect.minY + verticalOffset + max(videoRect.height - verticalOffset, 1) / 2
+                            : videoRect.minY + max(videoRect.height - verticalOffset, 1) / 2
                     )
                 } else {
                     ForEach(placedTextCues) { cue in
@@ -100,7 +107,7 @@ struct PlayerSubtitleOverlay: View {
                             SubtitleCuePlacementLayout(
                                 placement: placement,
                                 horizontalMargin: horizontalMargin,
-                                verticalMargin: bottomOffset
+                                verticalMargin: verticalOffset
                             ) {
                                 textBody(cue, alignment: textAlignment(for: placement))
                             }
@@ -131,12 +138,14 @@ struct PlayerSubtitleOverlay: View {
                     }
                     .frame(
                         width: max(videoRect.width - horizontalMargin * 2, 1),
-                        height: max(videoRect.height - bottomOffset, 1),
-                        alignment: .bottom
+                        height: max(videoRect.height - verticalOffset, 1),
+                        alignment: isTopAligned ? .top : .bottom
                     )
                     .position(
                         x: videoRect.midX,
-                        y: videoRect.minY + max(videoRect.height - bottomOffset, 1) / 2
+                        y: isTopAligned
+                            ? videoRect.minY + verticalOffset + max(videoRect.height - verticalOffset, 1) / 2
+                            : videoRect.minY + max(videoRect.height - verticalOffset, 1) / 2
                     )
                 }
             }
@@ -164,7 +173,7 @@ struct PlayerSubtitleOverlay: View {
 
     private func outlinedText(_ string: String, alignment: TextAlignment) -> some View {
         Text(string)
-            .font(.system(size: textSize, weight: fontWeight))
+            .font(style.font(size: textSize, weight: fontWeight))
             .foregroundStyle(textColor.opacity(textOpacity))
             .tracking(CGFloat(style.subSpacing))
             .multilineTextAlignment(alignment)
@@ -184,7 +193,7 @@ struct PlayerSubtitleOverlay: View {
     private func styledText(_ run: SubtitleTextRun) -> Text {
         let size = run.fontSize.map { textSize * CGFloat($0) / 16 } ?? textSize
         let font = run.fontName.map { Font.custom($0, size: size) }
-            ?? Font.system(size: size)
+            ?? style.font(size: size, weight: run.isBold || style.bold ? .bold : .regular)
         var text = Text(run.text)
             .font(font.weight(run.isBold || style.bold ? .bold : .regular))
             .foregroundColor(runColor(run).opacity(textOpacity))
@@ -287,13 +296,18 @@ struct MPVSubtitleOverlay: View {
     let style: SubtitleStyle
 
     private var textSize: CGFloat {
-        min(max(CGFloat(style.textSize) / 100 * 55, 24), 125)
+        min(max(CGFloat(style.textSize) / 100 * 55, 2), 125)
     }
     private var textColor: Color { Color(hex: style.textColorHex) }
     private var outlineColor: Color { Color(hex: style.outlineColorHex) }
     private var textOpacity: Double { Double(min(max(style.textOpacity, 0), 100)) / 100 }
-    private var outlineWidth: CGFloat { style.outlineEnabled ? 2 : 0 }
-    private var bottomOffset: CGFloat { CGFloat(22 + min(max(style.bottomOffset, 0), 160)) }
+    private var outlineWidth: CGFloat {
+        guard style.outlineEnabled else { return 0 }
+        let configured = CGFloat(min(max(style.outlineWidth, 1), 8))
+        return min(configured, max(0.5, textSize * 0.3))
+    }
+    private var isTopAligned: Bool { style.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame }
+    private var verticalOffset: CGFloat { CGFloat(22 + min(max(style.bottomOffset, 0), 160)) }
     private var horizontalMargin: CGFloat { CGFloat(min(max(style.horizontalMargin, 0), 200)) }
     private var fontWeight: Font.Weight { style.bold ? .bold : .regular }
 
@@ -307,7 +321,7 @@ struct MPVSubtitleOverlay: View {
                 )
                 VStack(spacing: 8) {
                     Text(text)
-                        .font(.system(size: textSize, weight: fontWeight))
+                        .font(style.font(size: textSize, weight: fontWeight))
                         .foregroundStyle(textColor.opacity(textOpacity))
                         .tracking(CGFloat(style.subSpacing))
                         .multilineTextAlignment(.center)
@@ -328,12 +342,14 @@ struct MPVSubtitleOverlay: View {
                 }
                 .frame(
                     width: max(videoRect.width - horizontalMargin * 2, 1),
-                    height: max(videoRect.height - bottomOffset, 1),
-                    alignment: .bottom
+                    height: max(videoRect.height - verticalOffset, 1),
+                    alignment: isTopAligned ? .top : .bottom
                 )
                 .position(
                     x: videoRect.midX,
-                    y: videoRect.minY + max(videoRect.height - bottomOffset, 1) / 2
+                    y: isTopAligned
+                        ? videoRect.minY + verticalOffset + max(videoRect.height - verticalOffset, 1) / 2
+                        : videoRect.minY + max(videoRect.height - verticalOffset, 1) / 2
                 )
             }
         }
