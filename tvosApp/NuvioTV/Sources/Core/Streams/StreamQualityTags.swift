@@ -154,7 +154,7 @@ struct StreamQualityTags: Equatable, Codable {
                     let group = String(text[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
                     let lower = group.lowercased()
                     // Filter out common format/codec false positives
-                    if !["1080p", "720p", "2160p", "4k", "hdr", "mkv", "mp4", "x264", "x265", "hevc", "h264", "aac", "ddp5", "web", "dl", "sub", "dub"].contains(lower) {
+                    if !["1080p", "720p", "2160p", "4k", "hdr", "mkv", "mp4", "x264", "x265", "hevc", "h264", "aac", "ddp5", "web", "dl", "sub", "dub", "iso", "img"].contains(lower) {
                         return group.uppercased()
                     }
                 }

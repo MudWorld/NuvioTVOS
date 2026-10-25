@@ -59,6 +59,7 @@ struct NetflixSearchView: View {
     /// Match Native search: the tvOS keyboard stays mounted for focus
     /// restoration but collapses while browsing results.
     @State private var searchPresented = true
+    @State private var linearKeyboardExpandedHeight: CGFloat = 220
     @State private var resultFocusGeneration = 0
     @Environment(\.isEnabled) private var isEnabled
     @AppStorage(SettingsKey.amoled) private var amoled = false
@@ -87,7 +88,10 @@ struct NetflixSearchView: View {
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
 
-            TVOSKeyboardLayoutDetector(layoutMode: $detectedKeyboardMode)
+            TVOSKeyboardLayoutDetector(
+                layoutMode: $detectedKeyboardMode,
+                linearExpandedHeight: $linearKeyboardExpandedHeight
+            )
                 .frame(width: 0, height: 0)
                 .opacity(0)
 
@@ -156,6 +160,7 @@ struct NetflixSearchView: View {
                 isPresented: $searchPresented,
                 isDisabled: overlayRestoreItemID != nil || discoverOverlayTransitionActive,
                 topPadding: 56,
+                expandedHeight: linearKeyboardExpandedHeight,
                 onSubmit: {
                     viewModel.performSearch(query: viewModel.searchText)
                 }

@@ -459,16 +459,33 @@ final class StreamsRepository: ObservableObject {
         }
     }
 
-    private static func fetchStreams(
+    static func fetchStreams(
         from url: URL,
         addonName: String,
-        logo: String?
+        logo: String?,
+        session: URLSession = .shared
     ) async throws -> [NuvioStream] {
         var request = URLRequest(url: url)
         request.timeoutInterval = streamRequestTimeout
         request.setValue("Mozilla/5.0 (AppleTV; tvOS 18.0) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        if http.statusCode == 404 {
+            // Some Stremio add-on hosts (e.g. Peerflix) return HTTP 404 when no streams exist
+            // for the requested title rather than 200 with an empty list. Match Android StreamRepositoryImpl
+            // and treat 404 as an empty stream result instead of a network failure.
+            if let decoded = try? JSONDecoder().decode(StreamAddonResponse.self, from: data),
+               let streams = decoded.streams, !streams.isEmpty {
+                return streams.compactMap { raw in
+                    guard let stream = raw.toNuvioStream(addonName: addonName) else { return nil }
+                    return logo.map { stream.withAddonLogoURL($0) } ?? stream
+                }
+            }
+            return []
+        }
+        guard 200..<300 ~= http.statusCode else {
             throw URLError(.badServerResponse)
         }
         let decoded = try JSONDecoder().decode(StreamAddonResponse.self, from: data)

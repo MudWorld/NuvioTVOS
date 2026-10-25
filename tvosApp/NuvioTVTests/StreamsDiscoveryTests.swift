@@ -1132,6 +1132,84 @@ final class StreamsDiscoveryTests: XCTestCase {
         XCTAssertTrue(penguStream.isLikelyCached)
         XCTAssertFalse(uncachedTorrentio.isLikelyCached)
     }
+
+    func testFetchStreamsReturnsEmptyOn404NotFound() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockStreamHTTPURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { MockStreamHTTPURLProtocol.handler = nil }
+
+        MockStreamHTTPURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 404,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data("{\"streams\":[]}".utf8))
+        }
+
+        let streams = try await StreamsRepository.fetchStreams(
+            from: URL(string: "https://peerflix.example/stream/movie/tt31349844.json")!,
+            addonName: "Peerflix",
+            logo: nil,
+            session: session
+        )
+        XCTAssertEqual(streams, [])
+    }
+
+    func testFetchStreamsThrowsOn500InternalServerError() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockStreamHTTPURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { MockStreamHTTPURLProtocol.handler = nil }
+
+        MockStreamHTTPURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 500,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data())
+        }
+
+        do {
+            _ = try await StreamsRepository.fetchStreams(
+                from: URL(string: "https://peerflix.example/stream/movie/tt31349844.json")!,
+                addonName: "Peerflix",
+                logo: nil,
+                session: session
+            )
+            XCTFail("Expected URLError to be thrown on 500 status code")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .badServerResponse)
+        }
+    }
+}
+
+private final class MockStreamHTTPURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }
 
 

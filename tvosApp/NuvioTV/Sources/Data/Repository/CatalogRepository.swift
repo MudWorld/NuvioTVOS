@@ -2795,12 +2795,13 @@ struct AddonManifestCatalog: Decodable {
     let name: String?
     let showInHome: Bool?
     let extra: [AddonManifestCatalogExtra]?
-    /// Legacy manifest field predating the structured `extra` array.
+    /// Legacy manifest fields predating the structured `extra` array.
+    let extraSupported: [String]?
     let extraRequired: [String]?
     let posterShape: String?
 
     enum CodingKeys: String, CodingKey {
-        case type, id, name, showInHome, extra, extraRequired
+        case type, id, name, showInHome, extra, extraSupported, extraRequired
         case posterShape
         case poster_shape
     }
@@ -2812,6 +2813,7 @@ struct AddonManifestCatalog: Decodable {
         name = try container.decodeIfPresent(String.self, forKey: .name)
         showInHome = try container.decodeIfPresent(Bool.self, forKey: .showInHome)
         extra = try container.decodeIfPresent([AddonManifestCatalogExtra].self, forKey: .extra)
+        extraSupported = try container.decodeIfPresent([String].self, forKey: .extraSupported)
         extraRequired = try container.decodeIfPresent([String].self, forKey: .extraRequired)
         posterShape = try container.decodeIfPresent(String.self, forKey: .posterShape)
             ?? container.decodeIfPresent(String.self, forKey: .poster_shape)
@@ -2831,11 +2833,14 @@ struct AddonManifestCatalog: Decodable {
         return required.allSatisfy { $0 == "genre" }
     }
 
-    /// Mirrors the Android app's `supportsSearch()`
+    /// Search requires a declared search extra, with no other required extras.
     var supportsSearch: Bool {
         let extraNames = (extra ?? []).map { $0.name.lowercased() }
+        let supportedNames = (extraSupported ?? []).map { $0.lowercased() }
         let required = requiredExtraNames
-        let hasSearchExtra = extraNames.contains("search") || (extra == nil && extraRequired == nil)
+        let hasSearchExtra = extraNames.contains("search")
+            || supportedNames.contains("search")
+            || required.contains("search")
         let noBlockingRequired = required.allSatisfy { $0 == "search" }
         return hasSearchExtra && noBlockingRequired
     }

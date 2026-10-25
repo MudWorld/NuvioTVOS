@@ -913,6 +913,24 @@ final class CatalogDecodingTests: XCTestCase {
         XCTAssertFalse(catalog3.eligibleForCollectionSource)
     }
 
+    func testAddonManifestCatalogSearchRequiresDeclaredCapability() throws {
+        let cases: [(String, Bool)] = [
+            (#"{"type":"movie","id":"no_extras"}"#, false),
+            (#"{"type":"movie","id":"empty_extra","extra":[]}"#, false),
+            (#"{"type":"movie","id":"genre","extra":[{"name":"genre","isRequired":false}]}"#, false),
+            (#"{"type":"movie","id":"legacy_supported","extra":[],"extraSupported":["search"]}"#, true),
+            (#"{"type":"movie","id":"legacy_required","extraRequired":["search"]}"#, true),
+            (#"{"type":"movie","id":"legacy_case","extra":[],"extraSupported":["SeArCh"]}"#, true),
+            (#"{"type":"movie","id":"required_genre","extraSupported":["search"],"extraRequired":["genre"]}"#, false),
+            (#"{"type":"movie","id":"required_actor","extraSupported":["search"],"extraRequired":["actor"]}"#, false)
+        ]
+
+        for (json, expected) in cases {
+            let catalog = try JSONDecoder().decode(AddonManifestCatalog.self, from: Data(json.utf8))
+            XCTAssertEqual(catalog.supportsSearch, expected, "Manifest: \(json)")
+        }
+    }
+
     func testManifestShowInHomeOnlyControlsHomeEligibility() throws {
         let hiddenWithoutRequiredExtras = """
         {"type":"movie","id":"hidden","showInHome":false}

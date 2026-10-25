@@ -10,24 +10,44 @@ public enum TVOSKeyboardLayoutMode: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
 }
 
-/// Detects whether tvOS is presenting a Linear (single row) or Grid (multi-row) keyboard.
+/// Detects whether tvOS is presenting a Linear (horizontal) or Grid (multi-row) keyboard.
 struct TVOSKeyboardLayoutDetector: UIViewRepresentable {
     @Binding var layoutMode: TVOSKeyboardLayoutMode
+    @Binding var linearExpandedHeight: CGFloat
+
+    init(
+        layoutMode: Binding<TVOSKeyboardLayoutMode>,
+        linearExpandedHeight: Binding<CGFloat> = .constant(220)
+    ) {
+        _layoutMode = layoutMode
+        _linearExpandedHeight = linearExpandedHeight
+    }
+
+    static func measuredLinearExpandedHeight(for keyPlaneHeight: CGFloat) -> CGFloat? {
+        guard keyPlaneHeight > 0 else { return nil }
+        // Observed key planes are about 66pt for one row and 144pt for two; 100pt separates them.
+        return keyPlaneHeight <= 100 ? 220 : 320
+    }
 
     func makeUIView(context: Context) -> TVOSKeyboardDetectorUIView {
         let view = TVOSKeyboardDetectorUIView()
+        configure(view)
+        return view
+    }
+
+    func updateUIView(_ uiView: TVOSKeyboardDetectorUIView, context: Context) {
+        configure(uiView)
+    }
+
+    private func configure(_ view: TVOSKeyboardDetectorUIView) {
         view.onDetected = { mode in
             if layoutMode != mode {
                 layoutMode = mode
             }
         }
-        return view
-    }
-
-    func updateUIView(_ uiView: TVOSKeyboardDetectorUIView, context: Context) {
-        uiView.onDetected = { mode in
-            if layoutMode != mode {
-                layoutMode = mode
+        view.onLinearKeyboardHeight = { height in
+            if linearExpandedHeight != height {
+                linearExpandedHeight = height
             }
         }
     }
@@ -35,7 +55,10 @@ struct TVOSKeyboardLayoutDetector: UIViewRepresentable {
 
 final class TVOSKeyboardDetectorUIView: UIView {
     var onDetected: ((TVOSKeyboardLayoutMode) -> Void)?
+    var onLinearKeyboardHeight: ((CGFloat) -> Void)?
     private var lastMode: TVOSKeyboardLayoutMode?
+    private var lastLinearExpandedHeight: CGFloat?
+    private var inspectionScheduled = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -54,6 +77,12 @@ final class TVOSKeyboardDetectorUIView: UIView {
             name: UIFocusSystem.didUpdateNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(inputModeDidChange),
+            name: UITextInputMode.currentInputModeDidChangeNotification,
+            object: nil
+        )
     }
 
     deinit {
@@ -64,6 +93,11 @@ final class TVOSKeyboardDetectorUIView: UIView {
         scheduleInspection()
     }
 
+    @objc private func inputModeDidChange() {
+        scheduleInspection()
+        scheduleDeferredInspections(after: [0.1, 0.3])
+    }
+
     private func updateMode(_ mode: TVOSKeyboardLayoutMode) {
         if mode != lastMode {
             lastMode = mode
@@ -71,14 +105,17 @@ final class TVOSKeyboardDetectorUIView: UIView {
         }
     }
 
+    private func updateLinearExpandedHeight(from keyPlaneHeight: CGFloat) {
+        guard let height = TVOSKeyboardLayoutDetector.measuredLinearExpandedHeight(for: keyPlaneHeight),
+              height != lastLinearExpandedHeight else { return }
+        lastLinearExpandedHeight = height
+        onLinearKeyboardHeight?(height)
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
         scheduleInspection()
-        for delay in [0.1, 0.3, 0.6, 1.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.inspectHierarchy()
-            }
-        }
+        scheduleDeferredInspections(after: [0.1, 0.3, 0.6, 1.0])
     }
 
     override func layoutSubviews() {
@@ -87,19 +124,38 @@ final class TVOSKeyboardDetectorUIView: UIView {
     }
 
     private func scheduleInspection() {
+        guard !inspectionScheduled else { return }
+        inspectionScheduled = true
         DispatchQueue.main.async { [weak self] in
-            self?.inspectHierarchy()
+            guard let self else { return }
+            self.inspectionScheduled = false
+            self.inspectHierarchy()
+        }
+    }
+
+    private func scheduleDeferredInspections(after delays: [TimeInterval]) {
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.scheduleInspection()
+            }
         }
     }
 
     private func inspectHierarchy() {
         guard let window = self.window else { return }
         var detected: TVOSKeyboardLayoutMode?
+        var linearKeyPlaneHeight: CGFloat?
 
         func inspect(view: UIView) {
+            guard !view.isHidden, view.alpha > 0 else { return }
             let className = String(describing: type(of: view))
+            let size = view.bounds.size
+
+            if className == "UIKeyboard", size.width >= 900, size.height > 0 {
+                linearKeyPlaneHeight = size.height
+            }
+
             if className.contains("Keyboard") {
-                let size = view.bounds.size
                 // Grid keyboard is tall (> 320pt) and bounded in width (< 900pt)
                 if size.height > 320 && size.width > 200 && size.width < 900 {
                     detected = .grid
@@ -123,8 +179,12 @@ final class TVOSKeyboardDetectorUIView: UIView {
         }
 
         // An absent keyboard during mounting or dismissal is not a layout change.
-        guard let detected else { return }
-        updateMode(detected)
+        if let detected {
+            updateMode(detected)
+        }
+        if let linearKeyPlaneHeight {
+            updateLinearExpandedHeight(from: linearKeyPlaneHeight)
+        }
     }
 }
 
@@ -187,6 +247,7 @@ struct NativeSearchView: View {
     @State private var discoverOverlayTransitionActive = false
     /// Controls the native `.searchable` keyboard visibility in Linear mode.
     @State private var searchPresented = true
+    @State private var linearKeyboardExpandedHeight: CGFloat = 220
     @State private var resultFocusGeneration = 0
     @Environment(\.isEnabled) private var isEnabled
     @AppStorage(SettingsKey.amoled) private var amoled = false
@@ -222,7 +283,10 @@ struct NativeSearchView: View {
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
 
-            TVOSKeyboardLayoutDetector(layoutMode: $detectedKeyboardMode)
+            TVOSKeyboardLayoutDetector(
+                layoutMode: $detectedKeyboardMode,
+                linearExpandedHeight: $linearKeyboardExpandedHeight
+            )
                 .frame(width: 0, height: 0)
                 .opacity(0)
 
@@ -281,6 +345,7 @@ struct NativeSearchView: View {
                 isPresented: $searchPresented,
                 isDisabled: overlayRestoreResultID != nil || discoverOverlayTransitionActive,
                 topPadding: 56,
+                expandedHeight: linearKeyboardExpandedHeight,
                 onSubmit: {
                     viewModel.performSearch(query: viewModel.searchText)
                 }
@@ -909,7 +974,7 @@ struct GridSearchSuggestionChips: View {
 
 // MARK: - Native Search Keyboard Hosts
 
-/// Shared tvOS `.searchable` host for Linear keyboard (single horizontal row).
+/// Shared tvOS `.searchable` host for horizontal keyboards, with caller-measured height.
 /// Bounded height with collapsible container.
 struct NativeSearchKeyboardHost: View {
     @Binding var text: String
@@ -917,6 +982,7 @@ struct NativeSearchKeyboardHost: View {
     @Binding var isPresented: Bool
     let isDisabled: Bool
     var topPadding: CGFloat = 56
+    /// Defaults to a compact height until the detector measures the native key plane.
     var expandedHeight: CGFloat = 220
     var collapsedHeight: CGFloat = 110
     var onSubmit: (() -> Void)? = nil
