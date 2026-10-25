@@ -280,7 +280,8 @@ struct PosterCard: View {
                 onPlayManually: onPlayManually,
                 onStartFromBeginning: onStartFromBeginning,
                 onRemoveFromContinueWatching: onRemoveFromContinueWatching,
-                onRefreshCatalog: onRefreshCatalog
+                onRefreshCatalog: onRefreshCatalog,
+                isEnabled: !isEffectivelyAlwaysLandscape
             )
             .onChange(of: isFocused) { _, focused in
                 if focused {
@@ -337,6 +338,17 @@ struct PosterCard: View {
             .frame(width: layoutWidth, height: totalCardHeight, alignment: .topLeading)
         }
         .frame(width: cardWidth, height: totalCardHeight, alignment: .topLeading)
+        .titleActionsContextMenu(
+            meta: meta,
+            onOpenDetails: onOpenDetails ?? onClick,
+            continueProgress: continueProgress,
+            continueIsUpNext: continueIsUpNext,
+            onPlayManually: onPlayManually,
+            onStartFromBeginning: onStartFromBeginning,
+            onRemoveFromContinueWatching: onRemoveFromContinueWatching,
+            onRefreshCatalog: onRefreshCatalog,
+            isEnabled: isEffectivelyAlwaysLandscape
+        )
         .zIndex(showsFocusedAppearance ? 1 : 0)
         // Critically damped — no overshoot when expanding to landscape on Home.
         .animation(
@@ -3146,6 +3158,7 @@ struct TitleActionsMenuContent: View {
 
 struct TitleActionsContextMenu: ViewModifier {
     let meta: NuvioMeta
+    var isEnabled = true
     var onOpenDetails: (() -> Void)? = nil
     var continueProgress: Double? = nil
     var continueIsUpNext: Bool = false
@@ -3154,20 +3167,25 @@ struct TitleActionsContextMenu: ViewModifier {
     var onRemoveFromContinueWatching: (() -> Void)? = nil
     var onRefreshCatalog: (() -> Void)? = nil
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
-            .contextMenu {
-                TitleActionsMenuContent(
-                    meta: meta,
-                    onOpenDetails: onOpenDetails,
-                    continueProgress: continueProgress,
-                    continueIsUpNext: continueIsUpNext,
-                    onPlayManually: onPlayManually,
-                    onStartFromBeginning: onStartFromBeginning,
-                    onRemoveFromContinueWatching: onRemoveFromContinueWatching,
-                    onRefreshCatalog: onRefreshCatalog
-                )
-            }
+        if isEnabled {
+            content
+                .contextMenu {
+                    TitleActionsMenuContent(
+                        meta: meta,
+                        onOpenDetails: onOpenDetails,
+                        continueProgress: continueProgress,
+                        continueIsUpNext: continueIsUpNext,
+                        onPlayManually: onPlayManually,
+                        onStartFromBeginning: onStartFromBeginning,
+                        onRemoveFromContinueWatching: onRemoveFromContinueWatching,
+                        onRefreshCatalog: onRefreshCatalog
+                    )
+                }
+        } else {
+            content
+        }
     }
 }
 
@@ -3180,11 +3198,13 @@ extension View {
         onPlayManually: (() -> Void)? = nil,
         onStartFromBeginning: (() -> Void)? = nil,
         onRemoveFromContinueWatching: (() -> Void)? = nil,
-        onRefreshCatalog: (() -> Void)? = nil
+        onRefreshCatalog: (() -> Void)? = nil,
+        isEnabled: Bool = true
     ) -> some View {
         modifier(
             TitleActionsContextMenu(
                 meta: meta,
+                isEnabled: isEnabled,
                 onOpenDetails: onOpenDetails,
                 continueProgress: continueProgress,
                 continueIsUpNext: continueIsUpNext,
