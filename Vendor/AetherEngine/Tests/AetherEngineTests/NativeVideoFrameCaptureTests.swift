@@ -224,6 +224,23 @@ struct NativeVideoFrameCaptureTests {
         #expect(AetherEngine.videoFrameAnalysisRoute(
             sourceVideoFormat: .dolbyVision, sourceDVProfile: 5, sourceDVBLCompatID: 0,
             effectiveVideoFormat: .hdr10, hasSoftwareHost: true) == "software")
+        #expect(AetherEngine.videoFrameAnalysisRoute(
+            sourceVideoFormat: .dolbyVision, sourceDVProfile: 10, sourceDVBLCompatID: 0,
+            effectiveVideoFormat: .hdr10, hasSoftwareHost: false) == "resident-dovi-rpu")
+        #expect(NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: .dolbyVision, dolbyVisionProfile: 8, baseLayerCompatibilityID: nil))
+        #expect(!NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: .dolbyVision, dolbyVisionProfile: nil, baseLayerCompatibilityID: nil))
+        #expect(!NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: .dolbyVision, dolbyVisionProfile: 5, baseLayerCompatibilityID: 1))
+        #expect(!NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: .dolbyVision, dolbyVisionProfile: 10, baseLayerCompatibilityID: nil))
+        #expect(!NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: .dolbyVision, dolbyVisionProfile: 10, baseLayerCompatibilityID: 0))
+        #expect(NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: .dolbyVision, dolbyVisionProfile: 10, baseLayerCompatibilityID: 1))
+        #expect(NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: .hdr10, dolbyVisionProfile: nil, baseLayerCompatibilityID: nil))
     }
 
     @Test("source-known P5 analysis fails closed without a resident decoder source")
@@ -264,6 +281,26 @@ struct NativeVideoFrameCaptureTests {
         #expect(!host.sessionContract.allowsVideoFrameCapture)
         #expect(host.sessionContract.videoFrameCapturePixelFormat == tenBitVideoRange)
         #expect(host.videoFrameCaptureDebugSummary == "VIDTAP enabled=no requested=x420 actual=pending")
+    }
+
+    @Test("protected session attaches no persistent output on load or swap")
+    func protectedSessionDisablesPersistentOutput() throws {
+        let host = NativeAVPlayerHost()
+        defer { host.tearDown() }
+        let url = URL(string: "http://127.0.0.1:1/capture-test.m3u8")!
+
+        host.load(url: url, startPosition: nil, contract: .init(allowsNativeVideoOutput: false))
+        let firstItem = try #require(host.avPlayer.currentItem)
+        #expect(!hasVideoFrameOutput(firstItem))
+        #expect(host.sessionContract.allowsVideoFrameCapture)
+        #expect(!host.sessionContract.allowsNativeVideoOutput)
+        #expect(host.videoFrameCaptureDebugSummary == "VIDTAP enabled=no requested=BGRA actual=pending")
+
+        host.swapItem(url: url, startPosition: nil)
+        let swappedItem = try #require(host.avPlayer.currentItem)
+        #expect(!hasVideoFrameOutput(swappedItem))
+        #expect(!host.sessionContract.allowsNativeVideoOutput)
+        #expect(host.videoFrameCaptureDebugSummary == "VIDTAP enabled=no requested=BGRA actual=pending")
     }
 
     @Test("a new session enables frame capture by default")
@@ -342,6 +379,24 @@ struct NativeVideoFrameCaptureTests {
         #expect(!hasVideoFrameOutput(outgoingItem))
         let currentItem = try #require(host.avPlayer.currentItem)
         #expect(!hasVideoFrameOutput(currentItem))
+    }
+
+    @Test("protected session refuses transient capture without attaching output")
+    func protectedSessionRefusesTransientCapture() async throws {
+        let host = NativeAVPlayerHost()
+        defer { host.tearDown() }
+        let url = URL(string: "http://127.0.0.1:1/capture-test.m3u8")!
+
+        host.load(url: url, startPosition: nil, contract: .init(allowsNativeVideoOutput: false))
+        let item = try #require(host.avPlayer.currentItem)
+        let clock = ContinuousClock()
+        let start = clock.now
+        let frame = await host.captureDisplayedFrame(timeout: .seconds(10))
+        let elapsed = start.duration(to: clock.now)
+
+        #expect(frame == nil)
+        #expect(elapsed < .seconds(1))
+        #expect(!hasVideoFrameOutput(item))
     }
 
     @Test("PQ x420 and xf20 frames tone map with retained contrast")

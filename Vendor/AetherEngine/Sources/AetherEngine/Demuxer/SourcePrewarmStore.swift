@@ -119,6 +119,28 @@ final class SourcePrewarmStore: @unchecked Sendable {
         return hit
     }
 
+    /// Move startup bytes to a proxy serving the same resource, without carrying
+    /// a remote redirect that could bypass that proxy on subsequent reads.
+    @discardableResult
+    func transfer(from sourceURL: URL, to destinationURL: URL,
+                  requestHeaders: [String: String], expectedContentLength: Int64) -> Bool {
+        let sourceKey = sourceURL.absoluteString
+        let destinationKey = destinationURL.absoluteString
+        lock.lock(); defer { lock.unlock() }
+        guard expectedContentLength > 0, sourceKey != destinationKey,
+              entries[destinationKey] == nil, let source = entries[sourceKey],
+              source.requestHeaders == requestHeaders,
+              source.contentLength == expectedContentLength else { return false }
+        let transferred = PrewarmedSource(
+            head: source.head, tail: source.tail, contentLength: source.contentLength,
+            requestHeaders: source.requestHeaders, resolvedURL: nil)
+        removeLocked(sourceKey)
+        entries[destinationKey] = transferred
+        order.append(destinationKey)
+        _retainedBytes += transferred.byteCount
+        return true
+    }
+
     /// Whether a source is warm, without consuming it. For diagnostics and tests; the playback path
     /// uses `take`.
     func isWarm(for url: URL) -> Bool {

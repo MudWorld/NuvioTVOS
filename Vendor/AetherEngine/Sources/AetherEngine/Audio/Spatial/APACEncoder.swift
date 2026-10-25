@@ -1,15 +1,22 @@
 import AVFAudio
 import AudioToolbox
+import CoreMedia
 import Foundation
 
 @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
 protocol APACEncoding: AnyObject {
     var magicCookie: Data { get }
     var leadingFrames: Int { get }
+    var sampleBufferFormatDescription: CMAudioFormatDescription? { get }
 
     func encode(planes: [UnsafePointer<Float>], frameCount: Int) throws -> [APACEncoder.Packet]
     func flush() throws -> [APACEncoder.Packet]
     func reset()
+}
+
+@available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+extension APACEncoding {
+    var sampleBufferFormatDescription: CMAudioFormatDescription? { nil }
 }
 
 /// Apple Positional Audio Codec encoder over `AVAudioConverter`, fed planar float PCM in a
@@ -64,6 +71,8 @@ final class APACEncoder: APACEncoding {
     let sampleRate: Double
     /// The complete `dapa` box, ready to append to an `apac` sample entry.
     let magicCookie: Data
+    /// CoreMedia format of the packets emitted by this converter, including its APAC cookie.
+    let sampleBufferFormatDescription: CMAudioFormatDescription?
     /// Frames of encoder delay at the head of the stream (and again after every `reset`).
     let leadingFrames: Int
 
@@ -103,6 +112,40 @@ final class APACEncoder: APACEncoding {
         converter = conv
         guard let cookie = conv.magicCookie, !cookie.isEmpty else { throw EncoderError.converterUnavailable(layout) }
         magicCookie = cookie
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatAPAC,
+            mFormatFlags: 0,
+            mBytesPerPacket: 0,
+            mFramesPerPacket: UInt32(Self.framesPerPacket),
+            mBytesPerFrame: 0,
+            mChannelsPerFrame: UInt32(layout.channelCount),
+            mBitsPerChannel: 0,
+            mReserved: 0
+        )
+        var audioLayout = AudioChannelLayout(
+            mChannelLayoutTag: layout.channelLayoutTag,
+            mChannelBitmap: [],
+            mNumberChannelDescriptions: 0,
+            mChannelDescriptions: AudioChannelDescription()
+        )
+        var formatDescription: CMAudioFormatDescription?
+        let formatStatus = cookie.withUnsafeBytes { raw in
+            CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &asbd,
+                layoutSize: MemoryLayout<AudioChannelLayout>.size,
+                layout: &audioLayout,
+                magicCookieSize: cookie.count,
+                magicCookie: raw.baseAddress,
+                extensions: nil,
+                formatDescriptionOut: &formatDescription
+            )
+        }
+        guard formatStatus == noErr, let formatDescription else {
+            throw EncoderError.converterUnavailable(layout)
+        }
+        sampleBufferFormatDescription = formatDescription
         leadingFrames = Int(conv.primeInfo.leadingFrames)
         precondition(maxInputFrames > 0, "APACEncoder needs room for at least one input frame")
         inputBuffer = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: AVAudioFrameCount(maxInputFrames))!

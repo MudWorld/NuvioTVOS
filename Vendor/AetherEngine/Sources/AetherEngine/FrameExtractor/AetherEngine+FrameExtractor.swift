@@ -279,6 +279,17 @@ extension AetherEngine {
                     + "decodedPTS=\(still.actualSeconds.map { String(format: "%.3f", $0) } ?? "unknown")")
         }
 
+        if sourceVideoFormat == .dolbyVision,
+           !NativeVideoOutputPolicy.allowsNativeVideoOutput(
+               sourceVideoFormat: sourceVideoFormat,
+               dolbyVisionProfile: sourceDVProfile,
+               baseLayerCompatibilityID: sourceDVBLCompatID
+           ) {
+            // Keep native output off DV5, unknown DV profiles, and DV10 without a compatible
+            // base layer; the resident RPU path remains available for those sources.
+            return result(reason: "dv-native-output-unsupported")
+        }
+
         let pixelBuffer = await native.captureDisplayedFrame()
         guard requestIsCurrent() else { return result(reason: "cancelled-or-superseded") }
         guard let pixelBuffer else { return result(reason: "native-output-frame-unavailable") }
@@ -307,11 +318,13 @@ extension AetherEngine {
         hasSoftwareHost: Bool
     ) -> String {
         if hasSoftwareHost { return "software" }
-        if sourceVideoFormat == .dolbyVision, sourceDVProfile == 5 {
+        if sourceVideoFormat == .dolbyVision,
+           !NativeVideoOutputPolicy.allowsNativeVideoOutput(
+               sourceVideoFormat: sourceVideoFormat,
+               dolbyVisionProfile: sourceDVProfile,
+               baseLayerCompatibilityID: sourceDVBLCompatID
+           ) {
             return "resident-dovi-rpu"
-        }
-        if sourceVideoFormat == .dolbyVision, sourceDVProfile == 10 {
-            return sourceDVBLCompatID.map { $0 > 0 } == true ? "native-output" : "resident-dovi-rpu"
         }
         return "native-output"
     }

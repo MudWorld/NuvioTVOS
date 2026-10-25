@@ -748,10 +748,27 @@ public final class Demuxer: @unchecked Sendable {
         try openWithProvider(bridge, inputFormat: inputFormat, isLive: isLive)
     }
 
-    /// A remote disc image (ISO 9660 / UDF / BDMV) by URL extension. Gates the HTTP disc-adapter
+    /// A remote disc image (ISO 9660 / UDF / BDMV) by URL extension or path. Gates the HTTP disc-adapter
     /// path so a normal media URL keeps the optimized streaming AVIOReader open with no probe cost.
     static func isDiscImageURL(_ url: URL) -> Bool {
-        ["iso", "img", "udf"].contains(url.pathExtension.lowercased())
+        let ext = url.pathExtension.lowercased()
+        if ["iso", "img", "udf"].contains(ext) { return true }
+        let last = url.lastPathComponent.lowercased()
+        if ["iso", "img", "udf"].contains((last as NSString).pathExtension.lowercased()) { return true }
+        let path = url.path.lowercased()
+        if path.hasSuffix(".iso") || path.hasSuffix(".img") || path.hasSuffix(".udf") { return true }
+        if let query = url.query?.lowercased(),
+           query.contains(".iso") || query.contains(".img") || query.contains(".udf") {
+            if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                for item in components.queryItems ?? [] {
+                    if let val = item.value?.lowercased(),
+                       val.hasSuffix(".iso") || val.hasSuffix(".img") || val.hasSuffix(".udf") {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 
     private func openHTTP(url: URL, extraHeaders: [String: String], isLive: Bool = false, selectTitleID: Int? = nil) throws {

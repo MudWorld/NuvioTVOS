@@ -285,7 +285,7 @@ enum DolbyVisionStillConverter {
                     // (the old path) shifted hue and distorted saturated highlights.
                     let y = 0.2627 * rr0 + 0.6780 * gg0 + 0.0593 * bb0   // BT.2020 luma
                     let yd = tone.map(y)
-                    let scale = y > 1e-6 ? yd / y : 0
+                    let scale = y > 1e-8 ? yd / y : 1.0 / ToneCurve.dstWhiteLinear
                     var rr = rr0 * scale
                     var gg = gg0 * scale
                     var bb = bb0 * scale
@@ -375,20 +375,20 @@ enum DolbyVisionStillConverter {
         private let minLum: Double
         private let ks: Double
 
-        /// Target SDR display: 100-nit diffuse white; a near-zero black keeps shadow detail.
-        private static let dstWhiteLinear = 100.0 / 10000.0
+        /// Target SDR display: 100-nit diffuse white; true black anchors to zero to avoid washed-out shadows.
+        fileprivate static let dstWhiteLinear = 100.0 / 10000.0
 
         init(srcMinPQ: Double, srcMaxPQ: Double) {
-            let lo = min(max(srcMinPQ, 0), 1)
+            // Anchor digital SDR black to 0 so true blacks and near-black shadow detail are not lifted.
+            let lo = 0.0
             // Guard degenerate / unpopulated ranges (e.g. source_max_pq == 0): assume a 1000-nit master.
             var hi = min(max(srcMaxPQ, 0), 1)
             if hi <= lo + 1e-4 { hi = DolbyVisionStillConverter.pqOETF(1000.0 / 10000.0) }
             srcMin = lo
             rng = hi - lo
             let dstMax = DolbyVisionStillConverter.pqOETF(Self.dstWhiteLinear)
-            let dstMin = DolbyVisionStillConverter.pqOETF(0.05 / 10000.0)
             maxLum = min(max((dstMax - lo) / (hi - lo), 0), 1)
-            minLum = max((dstMin - lo) / (hi - lo), 0)
+            minLum = 0.0
             // Knee point. The ITU BT.2390 spec value (1.5*maxLum - 0.5) maps mid-tones ~35/255
             // too bright vs the de-facto reference (libplacebo). This slope/offset was fit to
             // libplacebo's static BT.2390 curve and matches it within <1/255 across all realistic
@@ -408,8 +408,6 @@ enum DolbyVisionStillConverter {
                   + (t3 - 2 * t2 + t) * (1 - ks)
                   + (-2 * t3 + 3 * t2) * maxLum
             }
-            // BT.2390 black-point lift: raise the floor toward display min without milking mids.
-            e += minLum * pow(1 - e, 4)
             let outPQ = e * rng + srcMin
             return DolbyVisionStillConverter.pqEOTF(outPQ) / Self.dstWhiteLinear
         }

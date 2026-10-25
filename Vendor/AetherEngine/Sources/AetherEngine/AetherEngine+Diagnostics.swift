@@ -599,6 +599,11 @@ extension AetherEngine {
         softwareHost?.framesEnqueued ?? 0
     }
 
+    /// FEL frames successfully composed by the current software video decoder, or nil when it is not a dual-layer route.
+    @MainActor public var dolbyVisionFELComposedFrameCount: Int? {
+        softwareHost?.dolbyVisionFELComposedFrameCount
+    }
+
     /// Producer restart count for the current session. Zero on SW path or pre-start.
     var producerRestartCount: Int {
         nativeVideoSession?.producerRestartCount ?? 0
@@ -622,7 +627,9 @@ extension AetherEngine {
     }
 
     /// What the object renderer is doing, for `LiveTelemetry.objectAudio`; nil off `objectAudioRendering`.
-    var objectAudioActivity: ObjectAudioActivity? { nativeVideoSession?.objectAudioActivity }
+    var objectAudioActivity: ObjectAudioActivity? {
+        nativeVideoSession?.objectAudioActivity ?? softwareHost?.objectAudioActivity
+    }
 
     /// Cumulative encoded-audio bytes the bridge has emitted this session. Zero when bridge is not active
     /// (stream-copy path or video-only source). The telemetry sampler diffs it into a live bridge output bitrate.

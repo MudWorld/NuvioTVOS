@@ -71,4 +71,22 @@ public extension AetherEngine {
     nonisolated static func discardPrewarmedSources() {
         SourcePrewarmStore.shared.clear()
     }
+
+    /// Drop one source warm without affecting other URLs in the shared prewarm store.
+    nonisolated static func discardPrewarmedSource(url: URL) {
+        _ = SourcePrewarmStore.shared.take(for: url)
+    }
+    /// Hand startup bytes to a proxy for the same source. The host must ensure
+    /// the proxy serves that resource; exact headers and probed length are
+    /// checked here. Later reads use the proxy instead of a remote redirect.
+    @discardableResult
+    nonisolated static func transferPrewarmedSource(
+        from sourceURL: URL, to destinationURL: URL,
+        httpHeaders: [String: String], expectedContentLength: Int64
+    ) -> Bool {
+        SourcePrewarmStore.shared.transfer(
+            from: sourceURL, to: destinationURL, requestHeaders: httpHeaders,
+            expectedContentLength: expectedContentLength)
+    }
+
 }

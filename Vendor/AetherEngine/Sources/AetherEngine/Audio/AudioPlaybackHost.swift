@@ -26,6 +26,7 @@ final class AudioPlaybackHost {
     // MARK: - Internals
 
     private var audioDecoder: AudioDecoder?
+    private var audioProcessingSettings = AudioProcessingSettings()
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
 
@@ -154,6 +155,11 @@ final class AudioPlaybackHost {
 
     init() {}
 
+    func setAudioProcessing(_ settings: AudioProcessingSettings) {
+        audioProcessingSettings = settings
+        audioDecoder?.setAudioProcessing(settings)
+    }
+
     // MARK: - Load
 
     func load(
@@ -178,6 +184,7 @@ final class AudioPlaybackHost {
 
         let aDec = AudioDecoder()
         try aDec.open(stream: aStream)
+        aDec.setAudioProcessing(audioProcessingSettings)
         self.audioDecoder = aDec
         self.audioStreamIndex = resolvedAudioIdx
         self.audioOutput = AudioOutput()

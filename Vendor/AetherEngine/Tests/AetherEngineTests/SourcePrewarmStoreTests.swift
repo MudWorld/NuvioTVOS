@@ -105,4 +105,61 @@ struct SourcePrewarmStoreTests {
         #expect(store.retainedBytes == 0)
         #expect(store.take(for: url("a")) == nil)
     }
+    @Test("proxy transfer moves bytes once and clears the remote redirect")
+    func proxyTransferClearsRedirect() {
+        let store = SourcePrewarmStore(totalByteCap: 1 << 20)
+        let proxy = URL(string: "http://127.0.0.1:8080/stream/a")!
+        let headers = ["Referer": "https://origin.test/"]
+        let source = PrewarmedSource(
+            head: ResidentSpan(start: 0, data: Data(count: 4096)),
+            tail: ResidentSpan(start: 9000, data: Data(count: 1000)),
+            contentLength: 10000, requestHeaders: headers,
+            resolvedURL: URL(string: "https://cdn.test/signed-source"))
+        store.store(source, for: url("a"))
+        #expect(store.transfer(from: url("a"), to: proxy,
+                               requestHeaders: headers, expectedContentLength: 10000))
+        #expect(!store.isWarm(for: url("a")))
+        #expect(store.retainedBytes == 5096)
+        let adopted = store.take(for: proxy)
+        #expect(adopted?.head.data == source.head.data)
+        #expect(adopted?.tail?.data == source.tail?.data)
+        #expect(adopted?.requestHeaders == headers)
+        #expect(adopted?.resolvedURL == nil)
+        #expect(store.take(for: proxy) == nil)
+        #expect(store.retainedBytes == 0)
+    }
+
+    @Test("proxy transfer rejects mismatched requests without consuming a warm")
+    func proxyTransferRequiresMatchingRequest() {
+        let store = SourcePrewarmStore(totalByteCap: 1 << 20)
+        let proxy = URL(string: "http://127.0.0.1:8080/stream/a")!
+        store.store(entry(head: 4096, contentLength: 10000), for: url("a"))
+        #expect(!store.transfer(from: url("missing"), to: proxy,
+                                requestHeaders: [:], expectedContentLength: 10000))
+        #expect(!store.transfer(from: url("a"), to: proxy,
+                                requestHeaders: ["Referer": "https://different.test/"],
+                                expectedContentLength: 10000))
+        #expect(!store.transfer(from: url("a"), to: proxy,
+                                requestHeaders: [:], expectedContentLength: 9999))
+        #expect(!store.transfer(from: url("a"), to: url("a"),
+                                requestHeaders: [:], expectedContentLength: 10000))
+        #expect(store.isWarm(for: url("a")))
+        #expect(!store.isWarm(for: proxy))
+        #expect(store.retainedBytes == 4096)
+    }
+
+    @Test("proxy transfer preserves an existing destination warm")
+    func proxyTransferRejectsOccupiedDestination() {
+        let store = SourcePrewarmStore(totalByteCap: 1 << 20)
+        let proxy = URL(string: "http://127.0.0.1:8080/stream/a")!
+        store.store(entry(head: 4096, contentLength: 10000), for: url("a"))
+        store.store(entry(head: 2048), for: proxy)
+        #expect(!store.transfer(from: url("a"), to: proxy,
+                                requestHeaders: [:], expectedContentLength: 10000))
+        #expect(store.retainedBytes == 6144)
+        #expect(store.take(for: proxy)?.head.data.count == 2048)
+        #expect(store.take(for: url("a"))?.head.data.count == 4096)
+        #expect(store.retainedBytes == 0)
+    }
+
 }

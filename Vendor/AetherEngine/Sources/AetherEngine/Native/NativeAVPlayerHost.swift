@@ -266,7 +266,7 @@ final class NativeAVPlayerHost {
     /// AE#616: the item the latest `load` attached, for an output the engine hangs on it.
     var currentPlayerItem: AVPlayerItem? { playerItem }
     var videoFrameCaptureDebugSummary: String {
-        let enabled = sessionContract.allowsVideoFrameCapture ? "yes" : "no"
+        let enabled = sessionContract.allowsVideoFrameCapture && sessionContract.allowsNativeVideoOutput ? "yes" : "no"
         let requested = Self.videoPixelFormatFourCC(sessionContract.videoFrameCapturePixelFormat)
         let actual = firstCapturedPixelFormat.map(Self.videoPixelFormatFourCC) ?? "pending"
         return "VIDTAP enabled=\(enabled) requested=\(requested) actual=\(actual)"
@@ -488,6 +488,9 @@ final class NativeAVPlayerHost {
         /// Preserve opt-in decoded-output sampling across same-session playlist/item swaps.
         var nativeVideoFrameDiagnostics: Bool = false
         var nativeVideoFrameRecovery: Bool = false
+        /// Disables every native decoded-video output consumer for sources where attaching an output can
+        /// alter playback rendering. `allowsVideoFrameCapture` below only gates the persistent thumbnail output.
+        var allowsNativeVideoOutput: Bool = true
         /// Read the item's audio tracks back into `detectedAudioTracks`. Only the remote-HLS bypass needs
         /// them; the loopback's probe already listed its audio, and the reads are XPC round trips.
         var readsBackAudioTracks: Bool = false
@@ -657,7 +660,7 @@ final class NativeAVPlayerHost {
         if armIngestFallback {
             startCarriageProbe(asset: asset, url: url, httpHeaders: httpHeaders)
         }
-        if contract.allowsVideoFrameCapture {
+        if contract.allowsVideoFrameCapture && contract.allowsNativeVideoOutput {
             var pixelBufferAttributes: [String: any Sendable] = [
                 kCVPixelBufferPixelFormatTypeKey as String: Int(contract.videoFrameCapturePixelFormat)
             ]
@@ -2026,7 +2029,7 @@ final class NativeAVPlayerHost {
     /// long the old item was kept. An output belongs to one item and is only attached for the read.
     /// nil when no frame arrives inside `timeout`, which the caller treats as "nothing to hold".
     func captureDisplayedFrame(timeout: Duration = .milliseconds(500)) async -> CVPixelBuffer? {
-        guard !Task.isCancelled,
+        guard !Task.isCancelled, sessionContract.allowsNativeVideoOutput,
               let item = playerItem else { return nil }
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
@@ -2499,7 +2502,8 @@ final class NativeAVPlayerHost {
         #if os(iOS) || os(tvOS) || os(visionOS)
         foreground = UIApplication.shared.applicationState == .active
         #endif
-        var eligible = foreground && !pictureInPictureActive && detectedVideoFormat == .sdr && isReady
+        var eligible = sessionContract.allowsNativeVideoOutput && foreground
+            && !pictureInPictureActive && detectedVideoFormat == .sdr && isReady
             && !seekInFlight && !mountSeekPending
         #if !os(visionOS)
         eligible = eligible && !avPlayer.isExternalPlaybackActive

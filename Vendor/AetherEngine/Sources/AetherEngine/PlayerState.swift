@@ -117,8 +117,8 @@ public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// `DTSXObjectAudio` traits (off by default), TrueHD Atmos and DTS:X are rendered with
     /// their objects and heights into a speaker bed and encoded as APAC instead.
     case bridged
-    /// libavcodec decodes the audio and the engine renders it itself (the software path and the
-    /// software audio-only host).
+    /// The engine decodes or converts audio and renders its own CoreMedia sample buffers (the
+    /// software path and the software audio-only host). This includes experimental APAC output.
     case decoded
     /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, the
     /// bridge could not be built or could not write its header, no stream could be picked because the

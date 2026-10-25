@@ -1,6 +1,7 @@
 // Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
 #if TrueHDObjectAudio || DTSXObjectAudio
 import Foundation
+import CoreMedia
 import AetherLibavcodec
 import AetherLibavutil
 
@@ -40,6 +41,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     private(set) var encoderCodecpar: UnsafeMutablePointer<AVCodecParameters>?
     let encoderTimeBase = AVRational(num: 1, den: Int32(SpatialAudioBridge.sampleRate))
     let soundSampleEntryOverride: Data?
+    let sampleBufferFormatDescription: CMAudioFormatDescription?
     /// HLS `CODECS` value for the track.
     let hlsCodecs: String
     var servedChannelCount: Int? { layout.channelCount }
@@ -116,6 +118,13 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// before the producer starts feeding.
     var onDecoderProducedNothing: (@Sendable (AudioBridge.FeedStats) -> Void)?
     private var decodedNothingReported = false
+    private var _runtimeFailureDescription: String?
+
+    var runtimeFailureDescription: String? {
+        opLock.lock()
+        defer { opLock.unlock() }
+        return _runtimeFailureDescription
+    }
 
     private static let avNoPTS: Int64 = -0x7FFFFFFFFFFFFFFF - 1
 
@@ -158,6 +167,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
             encoder: encoder, channels: layout.channelCount, bufferFrames: Self.encodeChunkFrames * 4)
         self.pipeline = pipeline
         output = pipeline.takeInitialBuffer()
+        sampleBufferFormatDescription = encoder.sampleBufferFormatDescription
         soundSampleEntryOverride = APACSampleEntry.sampleEntry(
             magicCookie: encoder.magicCookie, sampleRate: Self.sampleRate)
         hlsCodecs = APACSampleEntry.codecsString(channelCount: layout.channelCount)
@@ -266,6 +276,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// Caller holds `opLock`. The first failure and every `silentFeedPacketThreshold`th after it are
     /// logged; a run that long is reported once as a bridge that produces nothing.
     private func noteFeedFailure(_ error: Error) {
+        if _runtimeFailureDescription == nil { _runtimeFailureDescription = "bridge feed failed: \(error)" }
         consecutiveFeedFailures += 1
         if consecutiveFeedFailures == 1 || consecutiveFeedFailures % Self.silentFeedPacketThreshold == 0 {
             EngineLog.emit(
@@ -287,6 +298,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         guard !decodedNothingReported, stats.decodedNothing,
               stats.packetsFedSinceLastEnqueue >= Self.silentFeedPacketThreshold else { return }
         decodedNothingReported = true
+        _runtimeFailureDescription = "object decoder produced no output after \(stats.packetsFedSinceLastEnqueue) packets"
         EngineLog.emit(
             "[SpatialAudioBridge] ERROR: AE#641 the object decoder has produced nothing: "
             + "\(stats.summary)", category: .session)
@@ -346,6 +358,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         consecutiveFeedFailures = 0
         consecutiveEncodeFailures = 0
         decodedNothingReported = false
+        _runtimeFailureDescription = nil
     }
 
     func noteTimelineJump(deltaSeconds: Double) {
@@ -572,6 +585,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// Caller holds `opLock`. Each failed chunk advances the independent encoder streak; normal
     /// decoder output cannot reset it because the asynchronous conversion may still be failing.
     private func noteEncodeFailure(_ error: Error) {
+        if _runtimeFailureDescription == nil { _runtimeFailureDescription = "APAC encode failed: \(error)" }
         consecutiveEncodeFailures += 1
         if consecutiveEncodeFailures == 1 || consecutiveEncodeFailures % Self.silentEncodeChunkThreshold == 0 {
             EngineLog.emit(

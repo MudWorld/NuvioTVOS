@@ -24,6 +24,53 @@ struct Issue834AtmosActivatorRouteTests {
         #expect(!AtmosOutputActivator.routeTakesActivator(outputPortTypes: []))
     }
 
+    @Test("software follow requires a playing Atmos APAC track on HDMI")
+    func softwareFollowPolicy() {
+        #expect(AtmosOutputActivator.softwareFollowTakesActivator(
+            playsAtmosAPAC: true,
+            isPlaying: true,
+            outputPortTypes: ["HDMIOutput"]
+        ))
+        #expect(!AtmosOutputActivator.softwareFollowTakesActivator(
+            playsAtmosAPAC: false,
+            isPlaying: true,
+            outputPortTypes: ["HDMIOutput"]
+        ))
+        #expect(!AtmosOutputActivator.softwareFollowTakesActivator(
+            playsAtmosAPAC: true,
+            isPlaying: false,
+            outputPortTypes: ["HDMIOutput"]
+        ))
+        #expect(!AtmosOutputActivator.softwareFollowTakesActivator(
+            playsAtmosAPAC: true,
+            isPlaying: true,
+            outputPortTypes: ["HDMIOutput", "AirPlay"]
+        ))
+    }
+
+    @Test("software follow replaces native observations and repeated updates keep the mode")
+    @MainActor
+    func softwareFollowReplacesNativeFollowing() async {
+        var routeEvaluations = 0
+        let activator = AtmosOutputActivator {
+            routeEvaluations += 1
+            return ["AirPlay"]
+        }
+        defer { activator.detach() }
+
+        let nativeHost = AVPlayer()
+        activator.attach(to: nativeHost) { _ in true }
+        await Task.yield()
+
+        activator.followSoftware(playsAtmosAPAC: true, isPlaying: true)
+        activator.followSoftware(playsAtmosAPAC: true, isPlaying: true)
+        #expect(routeEvaluations == 2)
+
+        nativeHost.replaceCurrentItem(with: AVPlayerItem(url: URL(fileURLWithPath: "/tmp/atmos-follow-mode-test.mp4")))
+        await Task.yield()
+        #expect(routeEvaluations == 2)
+    }
+
     #if os(iOS) || os(tvOS)
     @Test("the spelled-out port type is the session's own")
     func portTypeMatchesTheSession() {

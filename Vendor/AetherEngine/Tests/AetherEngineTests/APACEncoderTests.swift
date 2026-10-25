@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import AudioToolbox
+import CoreMedia
 @testable import AetherEngine
 
 /// The APAC encoder is Apple's, reached through `AVAudioConverter`. The spatial bridge stamps its
@@ -36,6 +38,24 @@ struct APACEncoderTests {
                 "the cookie is one complete box")
         #expect(encoder.leadingFrames == 2048)
         #expect(APACEncoder.framesPerPacket == 1024)
+    }
+
+    @Test("the CoreMedia APAC format description carries the encoder's complete dapa cookie")
+    func sampleBufferFormatDescriptionCarriesCookie() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let layout = SpatialSpeakerLayout.l714
+        let encoder = try APACEncoder(layout: layout, bitRate: layout.channelCount * 320_000)
+        let formatDescription = try #require(encoder.sampleBufferFormatDescription)
+        #expect(CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee.mFormatID == kAudioFormatAPAC)
+
+        var cookieSize = 0
+        let cookiePointer = try #require(CMAudioFormatDescriptionGetMagicCookie(formatDescription, sizeOut: &cookieSize))
+        let cookie = Data(bytes: cookiePointer, count: cookieSize)
+        #expect(cookie == encoder.magicCookie)
+        #expect(cookie.count > 8)
+        if cookie.count >= 8 {
+            #expect(Array(cookie[4..<8]) == Array("dapa".utf8))
+        }
     }
 
     @Test("packets come out as fast as frames go in: priming plus input, a packet per 1024 frames, all sync")

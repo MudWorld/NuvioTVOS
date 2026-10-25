@@ -1954,12 +1954,20 @@ extension AetherEngine {
         let inPlaceHandover = pendingInPlaceItemHandover
         pendingInPlaceItemHandover = false
 #if os(tvOS)
-        // Restore live frame capture, retaining 10-bit YUV for known Dolby Vision sources.
+        // Thumbnail output can alter DV5 compositing on tvOS. Keep native output consumers
+        // off DV5, unknown DV profiles, and DV10 without a known compatible base layer.
+        let allowsNativeVideoOutput = NativeVideoOutputPolicy.allowsNativeVideoOutput(
+            sourceVideoFormat: sourceVideoFormat,
+            dolbyVisionProfile: sourceDVProfile,
+            baseLayerCompatibilityID: sourceDVBLCompatID
+        )
+        // Retain 10-bit YUV for HDR sources so thumbnail tone mapping sees the decoded precision.
         let allowsVideoFrameCapture = true
-        let videoFrameCapturePixelFormat = sourceVideoFormat == .dolbyVision
-            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            : kCVPixelFormatType_32BGRA
+        let videoFrameCapturePixelFormat = sourceVideoFormat == .sdr
+            ? kCVPixelFormatType_32BGRA
+            : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
 #else
+        let allowsNativeVideoOutput = true
         let allowsVideoFrameCapture = true
         let videoFrameCapturePixelFormat = kCVPixelFormatType_32BGRA
 #endif
@@ -1984,6 +1992,7 @@ extension AetherEngine {
                       audioIsAtmosStreamCopy: nativeVideoSession?.audioIsAtmosStreamCopy == true,
                       nativeVideoFrameDiagnostics: loadedOptions.nativeVideoFrameDiagnostics,
                       nativeVideoFrameRecovery: loadedOptions.nativeVideoFrameRecovery,
+                      allowsNativeVideoOutput: allowsNativeVideoOutput,
                       allowsVideoFrameCapture: allowsVideoFrameCapture,
                       videoFrameCapturePixelFormat: videoFrameCapturePixelFormat))
         forceNativeLegibleDeselectedUntilHostSelects()
@@ -2090,6 +2099,8 @@ extension AetherEngine {
         // on every build. Without it a software host came up aspect-fit whatever the app had set,
         // and only a second write mid-session took effect.
         let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
+        host.setAudioProcessing(audioProcessingSettings)
+        host.objectAudioRendering = loadedOptions.objectAudioRendering
         host.configuredDVProfile = sourceDVProfile
         host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling
         host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
@@ -2127,6 +2138,55 @@ extension AetherEngine {
         // SW host provides session-relative edge on each tick; publishLiveWindow is a no-op when liveWindow is nil.
         host.onLiveEdge = { [weak self] edge in
             self?.publishLiveWindow(edgeSessionTime: edge)
+        }
+        host.onAtmosOutputStateChange = { [weak self, weak host] in
+            guard let self, let host, self.softwareHost === host else { return }
+            #if os(tvOS)
+            let activator = self.atmosOutputActivator ?? AtmosOutputActivator()
+            self.atmosOutputActivator = activator
+            activator.followSoftware(
+                playsAtmosAPAC: host.isUsingSoftwareSpatialAudio,
+                isPlaying: host.shouldActivateSoftwareAtmosOutput
+            )
+            #endif
+        }
+        host.onSpatialAudioFailure = { [weak self, weak host] token, message in
+            guard let self, let host,
+                  let current = host.currentSpatialAudioFailureContext,
+                  SoftwareSpatialAudioFailureRecoveryGate.accepts(
+                    token: token,
+                    failureLoadGeneration: generation,
+                    currentLoadGeneration: self.loadGeneration,
+                    hostIsCurrent: self.softwareHost === host,
+                    currentSeekGeneration: current.seekGeneration,
+                    currentAudioEpoch: current.audioEpoch
+                  ),
+                  host.acceptsSpatialAudioFailure(token) else { return }
+            Task { @MainActor [weak self, weak host] in
+                guard let self, let host,
+                      self.softwareHost === host,
+                      self.loadGeneration == generation,
+                      host.acceptsSpatialAudioFailure(token) else { return }
+                do {
+                    let outcome = try await self.reloadAtCurrentPosition(
+                        applying: { $0.objectAudioRendering = .off }
+                    )
+                    if !outcome.rebuilt {
+                        let error = NSError(
+                            domain: "AetherEngine.SoftwareSpatialAudioFallback",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "Spatial audio failed and PCM fallback was not applied."]
+                        )
+                        self.publishLoadFailure(error)
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // The load path publishes failures after it has taken ownership of a new generation.
+                    // A refusal before teardown leaves this generation in place and needs an explicit error.
+                    if self.loadGeneration == generation { self.publishLoadFailure(error) }
+                }
+            }
         }
         self.softwareHost = host
         armHeldPictureRelease(onSoftwareHost: host)
@@ -2282,6 +2342,7 @@ extension AetherEngine {
         await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
         try checkLoadCurrent(generation)
         let host = AudioPlaybackHost()
+        host.setAudioProcessing(audioProcessingSettings)
         self.audioHost = host
         applyDesiredVolume(to: host)
         applyDesiredRate(to: host)
@@ -2727,7 +2788,7 @@ extension AetherEngine {
                     isSoftware: !(softwareHost?.usesHardwareVideoDecoder ?? false)
                 )
                 // AE#462: the rebuilt host's own resolved index (see the load site).
-                activeAudioDecoder = Self.softwareAudioDecoderLabel(
+                activeAudioDecoder = softwareHost?.spatialAudioPipelineDescription ?? Self.softwareAudioDecoderLabel(
                     audioTracks: audioTracks, activeIndex: softwareHost?.audioStreamIndex ?? -1
                 )
                 presentCurrentLayer()

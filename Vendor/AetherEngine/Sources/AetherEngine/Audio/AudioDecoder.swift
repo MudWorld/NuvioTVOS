@@ -7,9 +7,21 @@ import AetherLibavcodec
 import AetherLibavutil
 import AetherLibswresample
 
-/// FFmpeg software audio decoder: compressed AVPackets -> multichannel interleaved Float32 PCM in CMSampleBuffers
-/// for AVSampleBufferAudioRenderer. Uses libswresample to interleaved Float32 at source rate/channels (up to 7.1)
-/// with proper AudioChannelLayout. Non-Atmos tracks only; EAC3+JOC Atmos passes through AVPlayer.
+/// Dialogue processing available on decoded PCM routes. AVPlayer-owned bitstream routes do not use it.
+public enum AudioDialogueEnhancement: String, CaseIterable, Sendable, Equatable {
+    case off
+    case enhance
+    case boost
+}
+
+struct AudioProcessingSettings: Sendable, Equatable {
+    var dialogue: AudioDialogueEnhancement = .off
+    var reduceLoudSounds = false
+}
+
+/// FFmpeg software audio decode: compressed AVPackets -> multichannel Float32 PCM in CMSampleBuffers for
+/// AVSampleBufferAudioRenderer. The opt-in FEL path may replace this with TrueHD Atmos -> APAC packets;
+/// EAC3+JOC continues through the native AVPlayer path.
 final class AudioDecoder: @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -20,6 +32,10 @@ final class AudioDecoder: @unchecked Sendable {
     private let stateLock = NSLock()
     private var swrContext: OpaquePointer?
     private var audioFormatDescription: CMAudioFormatDescription?
+#if TrueHDObjectAudio
+    private var softwareSpatialAudioDecoderStorage: AnyObject?
+    private var spatialAudioFailureMessage: String?
+#endif
 
     /// Source stream time base for PTS conversion.
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
@@ -38,6 +54,9 @@ final class AudioDecoder: @unchecked Sendable {
     /// (which clicks at every frame for non-integer-ms frame durations like 1536-sample AC-3 @ 44.1 kHz).
     private var clock = AudioClockAnchor()
 
+    /// Stateful PCM processing mirrors the player controls on decoded audio routes.
+    private var audioProcessor = AudioProcessingDSP()
+
     #if DEBUG
     private var _loggedZeroConvert = false
     #endif
@@ -48,10 +67,19 @@ final class AudioDecoder: @unchecked Sendable {
     /// more input planes than the frame carries reads a NULL plane inside swr_convert.
     private var configuredInput = ResamplerInputParameters()
 
+    func setAudioProcessing(_ settings: AudioProcessingSettings) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        audioProcessor.setSettings(settings)
+    }
+
     private(set) var sampleRate: Int32 = 0
     private(set) var channels: Int32 = 0
 
-    func open(stream: UnsafeMutablePointer<AVStream>) throws {
+    func open(
+        stream: UnsafeMutablePointer<AVStream>,
+        spatialAudioLayout: SpatialSpeakerLayout? = nil
+    ) throws {
         guard let codecpar = stream.pointee.codecpar else {
             throw AudioDecoderError.noCodecParameters
         }
@@ -60,6 +88,31 @@ final class AudioDecoder: @unchecked Sendable {
         sampleRate = codecpar.pointee.sample_rate
         channels = codecpar.pointee.ch_layout.nb_channels
         if channels <= 0 || channels > 8 { channels = 2 }
+
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *),
+           let spatialAudioLayout {
+            do {
+                softwareSpatialAudioDecoderStorage = try SoftwareSpatialAudioDecoder(
+                    stream: stream,
+                    layout: spatialAudioLayout
+                )
+                sampleRate = Int32(SpatialAudioBridge.sampleRate)
+                channels = Int32(spatialAudioLayout.channelCount)
+                EngineLog.emit(
+                    "[AudioDecoder] selected \((softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder)?.pipelineName ?? "TrueHD Atmos → APAC")",
+                    category: .swPlayback
+                )
+                return
+            } catch {
+                softwareSpatialAudioDecoderStorage = nil
+                EngineLog.emit(
+                    "[AudioDecoder] spatial APAC setup unavailable (\(error)); using PCM decode",
+                    category: .swPlayback
+                )
+            }
+        }
+#endif
 
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
             throw AudioDecoderError.unsupportedCodec
@@ -90,6 +143,18 @@ final class AudioDecoder: @unchecked Sendable {
     func decode(packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
         stateLock.lock()
         defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *),
+           let softwareSpatialAudioDecoder = softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder {
+            guard softwareSpatialAudioDecoder.isActive else { return [] }
+            do {
+                return try softwareSpatialAudioDecoder.decode(packet: packet)
+            } catch {
+                spatialAudioFailureMessage = String(describing: error)
+                return []
+            }
+        }
+#endif
         guard let ctx = codecContext else { return [] }
         var results: [CMSampleBuffer] = []
 
@@ -205,12 +270,21 @@ final class AudioDecoder: @unchecked Sendable {
     func flush() {
         stateLock.lock()
         defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *),
+           let softwareSpatialAudioDecoder = softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder {
+            softwareSpatialAudioDecoder.startSegment()
+            spatialAudioFailureMessage = nil
+            return
+        }
+#endif
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
         // Drop the coalesced samples; after a seek they'd be at the wrong PTS anyway.
         resetPending()
         // Re-anchor the gapless clock to the post-seek PTS on the next emitted buffer.
         clock.reset()
+        audioProcessor.reset()
         #if DEBUG
         _loggedZeroConvert = false
         #endif
@@ -223,6 +297,18 @@ final class AudioDecoder: @unchecked Sendable {
     func drain() -> [CMSampleBuffer] {
         stateLock.lock()
         defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *),
+           let softwareSpatialAudioDecoder = softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder {
+            guard softwareSpatialAudioDecoder.isActive else { return [] }
+            do {
+                return try softwareSpatialAudioDecoder.drain()
+            } catch {
+                spatialAudioFailureMessage = String(describing: error)
+                return []
+            }
+        }
+#endif
         guard let ctx = codecContext else { return [] }
         var results: [CMSampleBuffer] = []
 
@@ -251,6 +337,13 @@ final class AudioDecoder: @unchecked Sendable {
     func close() {
         stateLock.lock()
         defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            (softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder)?.close()
+        }
+        softwareSpatialAudioDecoderStorage = nil
+        spatialAudioFailureMessage = nil
+#endif
         if codecContext != nil {
             avcodec_free_context(&codecContext)
         }
@@ -262,6 +355,83 @@ final class AudioDecoder: @unchecked Sendable {
         codecContext = nil
         swrContext = nil
         audioFormatDescription = nil
+        audioProcessor.reset()
+    }
+
+    var isUsingSoftwareSpatialAudio: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            return (softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder)?.isRouteEligible == true
+        }
+        return false
+#else
+        return false
+#endif
+    }
+
+    var hasSoftwareSpatialAudioRoute: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            return softwareSpatialAudioDecoderStorage is SoftwareSpatialAudioDecoder
+        }
+        return false
+#else
+        return false
+#endif
+    }
+
+    var spatialAudioPipelineName: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            return (softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder)?.pipelineName
+        }
+        return nil
+#else
+        return nil
+#endif
+    }
+
+    var objectAudioActivity: ObjectAudioActivity? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            return (softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder)?.objectAudioActivity
+        }
+        return nil
+#else
+        return nil
+#endif
+    }
+
+    /// Read and clear a runtime APAC failure after `decode` / `drain` has released `stateLock`.
+    func takeSpatialAudioFailure() -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        defer { spatialAudioFailureMessage = nil }
+        return spatialAudioFailureMessage
+#else
+        return nil
+#endif
+    }
+
+    func stopSpatialAudioAfterFailure(_ message: String) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+#if TrueHDObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *),
+           let softwareSpatialAudioDecoder = softwareSpatialAudioDecoderStorage as? SoftwareSpatialAudioDecoder {
+            softwareSpatialAudioDecoder.stopAfterFailure()
+            spatialAudioFailureMessage = message
+        }
+#endif
     }
 
     deinit {
@@ -353,13 +523,23 @@ final class AudioDecoder: @unchecked Sendable {
         #endif
         guard convertedSamples > 0 else { return }
 
+        let sampleFrames = Int(convertedSamples)
+        tempBuffer.withMemoryRebound(to: Float.self, capacity: sampleFrames * Int(channels)) { interleaved in
+            audioProcessor.process(
+                interleavedSamples: interleaved,
+                frameCount: sampleFrames,
+                channelCount: Int(channels),
+                sampleRate: Int(sampleRate)
+            )
+        }
+
         // First frame in a new accumulator captures the PTS; subsequent frames only extend the buffer.
         if pendingSampleCount == 0 {
             pendingStartPTS = SourceTimestampBounds.cmTime(ticks: frame.pointee.pts, timeBase: timeBase)
         }
 
-        pendingBytes.append(tempBuffer, count: Int(convertedSamples) * bytesPerSample)
-        pendingSampleCount += Int(convertedSamples)
+        pendingBytes.append(tempBuffer, count: sampleFrames * bytesPerSample)
+        pendingSampleCount += sampleFrames
     }
 
     /// Build a CMSampleBuffer from the pending accumulator and reset it. Nil if nothing pending.
@@ -444,6 +624,186 @@ final class AudioDecoder: @unchecked Sendable {
         pendingBytes.removeAll(keepingCapacity: true)
         pendingSampleCount = 0
         pendingStartPTS = .invalid
+    }
+}
+
+/// Stateful, linked-channel PCM processing for the app-owned FFmpeg routes. The adaptive gain
+/// follows the intent of `dynaudnorm`; Boost adds a presence-band EQ, and Reduce Loud Sounds uses a
+/// linked compressor followed by a peak guard. States persist between decoded frames.
+struct AudioProcessingDSP {
+    private var settings = AudioProcessingSettings()
+    private var sampleRate = 0
+    private var channelCount = 0
+    private var channelEnergyEnvelopes: [Float] = []
+    private var adaptiveGain: Float = 1
+    private var compressorEnvelope: Float = 0
+    private var compressorGain: Float = 1
+    private var limiterGain: Float = 1
+    private var rmsAttackCoefficient: Float = 0
+    private var rmsReleaseCoefficient: Float = 0
+    private var gainAttackCoefficient: Float = 0
+    private var gainReleaseCoefficient: Float = 0
+    private var compressorAttackCoefficient: Float = 0
+    private var compressorReleaseCoefficient: Float = 0
+    private var compressorGainAttackCoefficient: Float = 0
+    private var compressorGainReleaseCoefficient: Float = 0
+    private var limiterReleaseCoefficient: Float = 0
+    private var eqB0: Float = 1
+    private var eqB1: Float = 0
+    private var eqB2: Float = 0
+    private var eqA1: Float = 0
+    private var eqA2: Float = 0
+    private var eqZ1: [Float] = []
+    private var eqZ2: [Float] = []
+
+    mutating func setSettings(_ newSettings: AudioProcessingSettings) {
+        guard settings != newSettings else { return }
+        settings = newSettings
+        reset()
+    }
+
+    mutating func reset() {
+        channelEnergyEnvelopes = Array(repeating: 0, count: channelCount)
+        adaptiveGain = 1
+        compressorEnvelope = 0
+        compressorGain = 1
+        limiterGain = 1
+        eqZ1 = Array(repeating: 0, count: channelCount)
+        eqZ2 = Array(repeating: 0, count: channelCount)
+    }
+
+    mutating func process(
+        interleavedSamples: UnsafeMutablePointer<Float>,
+        frameCount: Int,
+        channelCount: Int,
+        sampleRate: Int
+    ) {
+        guard frameCount > 0, channelCount > 0, sampleRate > 0,
+              settings.dialogue != .off || settings.reduceLoudSounds else { return }
+        configure(sampleRate: sampleRate, channelCount: channelCount)
+
+        for frame in 0..<frameCount {
+            let base = frame * channelCount
+            var loudestChannelEnergy: Float = 0
+
+            // Track each channel independently, then use the loudest channel as the linked gain
+            // detector. Silent surround channels therefore cannot dilute center dialogue.
+            for channel in 0..<channelCount {
+                let index = base + channel
+                let sample = interleavedSamples[index]
+                let energy = sample * sample
+                let coefficient = energy > channelEnergyEnvelopes[channel]
+                    ? rmsAttackCoefficient : rmsReleaseCoefficient
+                channelEnergyEnvelopes[channel] += (energy - channelEnergyEnvelopes[channel]) * coefficient
+                loudestChannelEnergy = max(loudestChannelEnergy, channelEnergyEnvelopes[channel])
+            }
+
+            if settings.dialogue != .off {
+                let loudestChannelRMS = sqrt(loudestChannelEnergy)
+                let gainCap: Float = settings.dialogue == .boost ? 20 : 10
+                // `dynaudnorm`'s `m` is a linear amplification cap. The floor limits gain requests
+                // from silence; it never attenuates the output.
+                let normalizationFloor = 0.18 / gainCap
+                let desiredGain = min(gainCap, max(1, 0.18 / max(loudestChannelRMS, normalizationFloor)))
+                let coefficient = desiredGain > adaptiveGain
+                    ? gainAttackCoefficient : gainReleaseCoefficient
+                adaptiveGain += (desiredGain - adaptiveGain) * coefficient
+            } else {
+                adaptiveGain = 1
+            }
+
+            var processedPeak: Float = 0
+            for channel in 0..<channelCount {
+                let index = base + channel
+                var sample = interleavedSamples[index] * adaptiveGain
+                if settings.dialogue == .boost { sample = equalize(sample, channel: channel) }
+                interleavedSamples[index] = sample
+                processedPeak = max(processedPeak, abs(sample))
+            }
+
+            if settings.reduceLoudSounds {
+                let detectorCoefficient = processedPeak > compressorEnvelope
+                    ? compressorAttackCoefficient : compressorReleaseCoefficient
+                compressorEnvelope += (processedPeak - compressorEnvelope) * detectorCoefficient
+                let desiredCompressorGain = Self.compressionGain(for: compressorEnvelope)
+                let coefficient = desiredCompressorGain < compressorGain
+                    ? compressorGainAttackCoefficient : compressorGainReleaseCoefficient
+                compressorGain += (desiredCompressorGain - compressorGain) * coefficient
+            } else {
+                compressorGain = 1
+                compressorEnvelope = 0
+            }
+
+            let compressedPeak = processedPeak * compressorGain
+            let requestedLimiterGain = min(1, 0.98 / max(compressedPeak, 0.0001))
+            if requestedLimiterGain < limiterGain {
+                limiterGain = requestedLimiterGain
+            } else {
+                let releasedGain = limiterGain + (requestedLimiterGain - limiterGain) * limiterReleaseCoefficient
+                limiterGain = min(requestedLimiterGain, releasedGain)
+            }
+
+            let outputGain = compressorGain * limiterGain
+            for channel in 0..<channelCount {
+                let index = base + channel
+                let output = interleavedSamples[index] * outputGain
+                interleavedSamples[index] = min(0.98, max(-0.98, output))
+            }
+        }
+    }
+
+    private mutating func configure(sampleRate newSampleRate: Int, channelCount newChannelCount: Int) {
+        guard sampleRate != newSampleRate || channelCount != newChannelCount else { return }
+        sampleRate = newSampleRate
+        channelCount = newChannelCount
+        channelEnergyEnvelopes = Array(repeating: 0, count: newChannelCount)
+        eqZ1 = Array(repeating: 0, count: newChannelCount)
+        eqZ2 = Array(repeating: 0, count: newChannelCount)
+        adaptiveGain = 1
+        compressorEnvelope = 0
+        compressorGain = 1
+        limiterGain = 1
+
+        rmsAttackCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 0.10)
+        rmsReleaseCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 0.45)
+        gainAttackCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 0.45)
+        gainReleaseCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 1.0)
+        compressorAttackCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 0.050)
+        compressorReleaseCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 1.0)
+        compressorGainAttackCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 0.005)
+        compressorGainReleaseCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 0.080)
+        limiterReleaseCoefficient = Self.coefficient(sampleRate: newSampleRate, timeConstant: 0.080)
+
+        // RBJ peaking EQ centered at 1.5 kHz, approximately 1.5 octaves wide, +8 dB.
+        let frequency = min(1500.0, Double(newSampleRate) * 0.20)
+        let omega = 2 * Double.pi * frequency / Double(newSampleRate)
+        let alpha = sin(omega) / (2 * 0.9)
+        let amplitude = pow(10, 8.0 / 40.0)
+        let a0 = 1 + alpha / amplitude
+        eqB0 = Float((1 + alpha * amplitude) / a0)
+        eqB1 = Float((-2 * cos(omega)) / a0)
+        eqB2 = Float((1 - alpha * amplitude) / a0)
+        eqA1 = Float((-2 * cos(omega)) / a0)
+        eqA2 = Float((1 - alpha / amplitude) / a0)
+    }
+
+    private mutating func equalize(_ input: Float, channel: Int) -> Float {
+        let output = eqB0 * input + eqZ1[channel]
+        eqZ1[channel] = eqB1 * input - eqA1 * output + eqZ2[channel]
+        eqZ2[channel] = eqB2 * input - eqA2 * output
+        return output
+    }
+
+    private static func compressionGain(for level: Float) -> Float {
+        let threshold: Float = 0.1 // -20 dBFS
+        guard level > threshold else { return 1 }
+        // A 4:1 dB ratio: above threshold, output dB rises one quarter as fast as input dB.
+        return pow(threshold / level, 0.75)
+    }
+
+    private static func coefficient(sampleRate: Int, timeConstant: Float) -> Float {
+        guard sampleRate > 0, timeConstant > 0 else { return 1 }
+        return 1 - exp(-1 / (Float(sampleRate) * timeConstant))
     }
 }
 

@@ -848,6 +848,15 @@ public final class AetherEngine: ObservableObject {
     /// the live pipeline's own classification, so it cannot drift from the running session.
     @Published public internal(set) var audioDelivery: AudioDelivery = .none
 
+    /// True only when the active audio route passes through app-owned Float32 PCM decoding.
+    /// AVPlayer-managed audio and bitstream passthrough do not use AudioDecoder.
+    public var supportsAudioProcessing: Bool {
+        audioDelivery == .decoded && softwareHost?.hasSoftwareSpatialAudioRoute != true
+    }
+
+    /// Retained across host rebuilds and applied when a decoded AudioDecoder is opened.
+    var audioProcessingSettings = AudioProcessingSettings()
+
     /// The classification the pipeline serving this session made about itself, or nil while none is
     /// live. Read through the backend rather than by probing all four hosts, so a host left behind by
     /// a teardown cannot answer for the session that replaced it.
@@ -5690,7 +5699,7 @@ public final class AetherEngine: ObservableObject {
                 // AE#462: the host's own resolved index, not the engine's pick. The pick says which
                 // track was ASKED for; only the host knows whether a decoder opened for it, and this
                 // label claimed one for a session that had dropped its audio and gone video-only.
-                activeAudioDecoder = Self.softwareAudioDecoderLabel(
+                activeAudioDecoder = softwareHost?.spatialAudioPipelineDescription ?? Self.softwareAudioDecoderLabel(
                     audioTracks: probedAudioTracks,
                     activeIndex: softwareHost?.audioStreamIndex ?? -1
                 )

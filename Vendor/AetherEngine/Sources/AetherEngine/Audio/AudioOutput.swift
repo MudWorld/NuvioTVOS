@@ -47,12 +47,17 @@ final class AudioOutput: @unchecked Sendable {
         // whether they keep pitch (#434). Pinned here, while the timebase is still stopped.
         AudioRatePolicy.apply(to: renderer)
         observeAutomaticFlush()
+        rendererStatusObservation = renderer.observe(\.status, options: [.new]) { [weak self] _, _ in
+            guard let self else { return }
+            rendererFailureQueue.async { [weak self] in self?.reportRendererFailure() }
+        }
     }
 
     deinit {
         if let automaticFlushObserver {
             NotificationCenter.default.removeObserver(automaticFlushObserver)
         }
+        rendererStatusObservation?.invalidate()
     }
 
     /// The synchronizer's rate. A stopped clock and a running clock whose timebase has stalled read
@@ -87,7 +92,11 @@ final class AudioOutput: @unchecked Sendable {
     }
 
     private var automaticFlushObserver: NSObjectProtocol?
+    private var rendererStatusObservation: NSKeyValueObservation?
+    private let rendererFailureQueue = DispatchQueue(label: "engine.audio.renderer-failure")
     private var _automaticFlushCount = 0
+    private var _rendererFailureReportedEpoch: UInt64?
+    var onRendererFailure: (@Sendable (UInt64, String) -> Void)?
 
     /// Where the AE#549 flush runs. The posting thread must never wait on `lock`: `enqueue` holds it
     /// across `renderer.enqueue` (DEC-106), and a renderer that posts from inside that call would make the
@@ -217,7 +226,7 @@ final class AudioOutput: @unchecked Sendable {
         loggedOffsetInEffect = false
     }
 
-    /// Enqueue a decoded audio CMSampleBuffer. Always enqueues (renderer buffers internally); gating on
+    /// Enqueue an engine-owned audio CMSampleBuffer (PCM or APAC). Always enqueues (renderer buffers internally); gating on
     /// isReadyForMoreMediaData dropped early samples before the synchronizer started, giving silence.
     ///
     /// Audit DEC-106: with `epoch`, the buffer is enqueued only if no flush has retired that epoch, and the
@@ -237,6 +246,7 @@ final class AudioOutput: @unchecked Sendable {
             return false
         }
         let offset = presentationOffset
+        let acceptedEpoch = _epoch
         // AE#395: the lip-sync offset and the move onto the renderer axis are one retime, not two copies.
         let shift = CMTimeSubtract(offset, timeline.offset(latchingFrom: sampleBuffer))
         let delivered = shift == .zero ? sampleBuffer : Self.retimed(sampleBuffer, by: shift)
@@ -257,6 +267,7 @@ final class AudioOutput: @unchecked Sendable {
         #endif
         lock.unlock()
         if let offsetLine { EngineLog.emit(offsetLine, category: .swPlayback) }
+        reportRendererFailure(expectedEpoch: acceptedEpoch)
 
         #if DEBUG
         // Once per session: first enqueue + any renderer rejection, to distinguish "nothing enqueued" from
@@ -276,6 +287,23 @@ final class AudioOutput: @unchecked Sendable {
         }
         #endif
         return true
+    }
+
+    /// KVO and post-enqueue checks converge here. The callback runs only after releasing `lock`;
+    /// recovery may flush and replace this output immediately.
+    private func reportRendererFailure(expectedEpoch: UInt64? = nil) {
+        lock.lock()
+        let failureEpoch = expectedEpoch ?? _epoch
+        guard failureEpoch == _epoch, _rendererFailureReportedEpoch != failureEpoch,
+              renderer.status == .failed else {
+            lock.unlock()
+            return
+        }
+        let message = renderer.error.map { String(describing: $0) } ?? "AVSampleBufferAudioRenderer failed"
+        _rendererFailureReportedEpoch = failureEpoch
+        let callback = onRendererFailure
+        lock.unlock()
+        callback?(failureEpoch, message)
     }
 
     #if DEBUG

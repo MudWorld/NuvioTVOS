@@ -1,10 +1,42 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 import CoreMedia
 import Combine
 import AetherLibavformat
 import AetherLibavcodec
 import AetherLibavutil
+
+struct SoftwareSpatialAudioFailureToken: Sendable, Equatable {
+    let seekGeneration: UInt64
+    let audioEpoch: UInt64
+}
+
+struct SoftwareSpatialAudioFailureEpochGate: Sendable {
+    private(set) var lastReportedEpoch: UInt64?
+
+    mutating func claim(epoch: UInt64) -> Bool {
+        guard lastReportedEpoch != epoch else { return false }
+        lastReportedEpoch = epoch
+        return true
+    }
+}
+
+enum SoftwareSpatialAudioFailureRecoveryGate {
+    static func accepts(
+        token: SoftwareSpatialAudioFailureToken,
+        failureLoadGeneration: UInt64,
+        currentLoadGeneration: UInt64,
+        hostIsCurrent: Bool,
+        currentSeekGeneration: UInt64,
+        currentAudioEpoch: UInt64
+    ) -> Bool {
+        hostIsCurrent
+            && failureLoadGeneration == currentLoadGeneration
+            && token.seekGeneration == currentSeekGeneration
+            && token.audioEpoch == currentAudioEpoch
+    }
+}
 
 /// Software-decode playback host (FFmpeg/dav1d pipeline): AV1 on Apple TV (no HW AV1 on tvOS), VP9.
 /// AVSampleBufferRenderSynchronizer is the master clock; display layer attached for A/V sync.
@@ -196,6 +228,9 @@ final class SoftwarePlaybackHost {
     /// Opt-in to full dual-layer Dolby Vision (Profile 7 FEL) decoding and Metal GPU composition over single-layer fallback.
     var preferDualLayerDolbyVision: Bool = false
 
+    /// Spatial output is considered only on the active dual-layer VOD software route.
+    var objectAudioRendering: ObjectAudioRendering = .off
+
     /// Forwarded Dolby Vision profile number (e.g. 7, 8) if detected from bitstream or container
     var configuredDVProfile: Int?
 
@@ -282,6 +317,7 @@ final class SoftwarePlaybackHost {
     /// Swapped per codec at load(): SoftwareVideoDecoder for AV1/VP9, HardwareVideoDecoder for HEVC. Protocol keeps the demux loop codec-agnostic.
     private var videoDecoder: any VideoDecodingPipeline
     private var audioDecoder: AudioDecoder?
+    private var audioProcessingSettings = AudioProcessingSettings()
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
@@ -384,6 +420,21 @@ final class SoftwarePlaybackHost {
     /// AE#462: how this host delivers audio, as a typed fact for the engine's published
     /// `audioDelivery`. Set once the audio decoder has been given its chance.
     private(set) var audioDelivery: AudioDelivery = .none
+
+    var isUsingSoftwareSpatialAudio: Bool { audioDecoder?.isUsingSoftwareSpatialAudio == true }
+    var hasSoftwareSpatialAudioRoute: Bool { audioDecoder?.hasSoftwareSpatialAudioRoute == true }
+    var spatialAudioPipelineDescription: String? { audioDecoder?.spatialAudioPipelineName }
+    var objectAudioActivity: ObjectAudioActivity? { audioDecoder?.objectAudioActivity }
+    var shouldActivateSoftwareAtmosOutput: Bool {
+        isUsingSoftwareSpatialAudio && isPlaying && clockArmed && !seekInFlight
+            && audioOutput?.prerollPending != true && audioOutput?.renderer.status != .failed
+            && !demuxDiag.snapshot.rebuffering && !stopRequested && failure == nil
+    }
+
+    var onSpatialAudioFailure: (@MainActor (SoftwareSpatialAudioFailureToken, String) -> Void)?
+    var onAtmosOutputStateChange: (@MainActor () -> Void)?
+    private var spatialFailureEpochGate = SoftwareSpatialAudioFailureEpochGate()
+    private var lastAtmosOutputState: (eligible: Bool, playing: Bool)?
 
     private var videoTimeBaseSeconds: Double = 0
     private var audioTimeBaseSeconds: Double = 0
@@ -952,6 +1003,11 @@ final class SoftwarePlaybackHost {
         armDisplaySizeObserver()
     }
 
+    func setAudioProcessing(_ settings: AudioProcessingSettings) {
+        audioProcessingSettings = settings
+        audioDecoder?.setAudioProcessing(settings)
+    }
+
     /// #353: the renderer settles the picture size on the decode thread, where it builds the format
     /// description; publish it on the main actor like every other mirror on this host. Armed in init
     /// rather than at load: the renderer is this host's own and lives exactly as long as it does.
@@ -982,6 +1038,56 @@ final class SoftwarePlaybackHost {
                                           sourceCarriesAudio: Bool) -> AudioDelivery {
         guard resolvedAudioIndex >= 0 else { return sourceCarriesAudio ? .droppedNoPipeline : .noAudioInSource }
         return decoderOpened ? .decoded : .droppedNoPipeline
+    }
+
+    nonisolated static func shouldMirrorAudioTap(mediaSubtype: FourCharCode) -> Bool {
+        mediaSubtype == kAudioFormatLinearPCM
+    }
+
+    nonisolated static func softwareSpatialAudioLayout(
+        decodesDualLayer: Bool,
+        isLive: Bool,
+        rendering: ObjectAudioRendering,
+        codecID: AVCodecID,
+        profile: Int32,
+        sampleRate: Int32,
+        supportsAPAC: Bool
+    ) -> SpatialSpeakerLayout? {
+        guard decodesDualLayer, !isLive, supportsAPAC, codecID == AV_CODEC_ID_TRUEHD else { return nil }
+        return HLSVideoEngine.spatialRenderingLayout(
+            rendering: rendering,
+            codecID: codecID,
+            profile: profile,
+            sampleRate: sampleRate
+        )
+    }
+
+    private func publishSpatialAudioOutputStateIfChanged() {
+        let state = (eligible: isUsingSoftwareSpatialAudio, playing: shouldActivateSoftwareAtmosOutput)
+        guard lastAtmosOutputState?.eligible != state.eligible || lastAtmosOutputState?.playing != state.playing else { return }
+        lastAtmosOutputState = state
+        onAtmosOutputStateChange?()
+    }
+
+    private func reportSpatialAudioFailure(_ message: String, token: SoftwareSpatialAudioFailureToken) {
+        guard !stopRequested, hasSoftwareSpatialAudioRoute,
+              token.seekGeneration == seekGeneration,
+              token.audioEpoch == audioOutput?.epoch else { return }
+        guard spatialFailureEpochGate.claim(epoch: token.audioEpoch) else { return }
+        audioDecoder?.stopSpatialAudioAfterFailure(message)
+        publishSpatialAudioOutputStateIfChanged()
+        onSpatialAudioFailure?(token, message)
+    }
+
+    func acceptsSpatialAudioFailure(_ token: SoftwareSpatialAudioFailureToken) -> Bool {
+        !stopRequested && hasSoftwareSpatialAudioRoute
+            && token.seekGeneration == seekGeneration
+            && token.audioEpoch == audioOutput?.epoch
+    }
+
+    var currentSpatialAudioFailureContext: (seekGeneration: UInt64, audioEpoch: UInt64)? {
+        guard let audioOutput else { return nil }
+        return (seekGeneration, audioOutput.epoch)
     }
 
     /// Resolve the audio stream index for a SW-host session. `av_find_best_stream` (`bestStream`)
@@ -1084,6 +1190,14 @@ final class SoftwarePlaybackHost {
     }
 
     var decodesDualLayer: Bool { Self.isDualLayer(videoDecoder) }
+
+    var dolbyVisionFELComposedFrameCount: Int? {
+        #if DualLayerDolbyVision
+        (videoDecoder as? DualLayerVideoDecoder)?.composedFrameCount
+        #else
+        nil
+        #endif
+    }
 
     /// Selects and instantiates the appropriate VideoDecodingPipeline based on stream and host options.
     func selectVideoDecoder(
@@ -1361,7 +1475,23 @@ final class SoftwarePlaybackHost {
                     throw NSError(domain: "AetherEngineTestHook", code: -462, userInfo: [
                         NSLocalizedDescriptionKey: "audio pipeline forced to fail (TEST-ONLY)"])
                 }
-                try aDec.open(stream: aStream)
+                let supportsAPAC: Bool
+                if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+                    supportsAPAC = true
+                } else {
+                    supportsAPAC = false
+                }
+                let spatialLayout = Self.softwareSpatialAudioLayout(
+                    decodesDualLayer: decodesDualLayer,
+                    isLive: isLive,
+                    rendering: objectAudioRendering,
+                    codecID: acp.pointee.codec_id,
+                    profile: acp.pointee.profile,
+                    sampleRate: acp.pointee.sample_rate,
+                    supportsAPAC: supportsAPAC
+                )
+                try aDec.open(stream: aStream, spatialAudioLayout: spatialLayout)
+                aDec.setAudioProcessing(audioProcessingSettings)
                 self.audioDecoder = aDec
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
@@ -1371,6 +1501,7 @@ final class SoftwarePlaybackHost {
                 self.audioStreamIndex = -1
             }
         }
+        publishSpatialAudioOutputStateIfChanged()
         // AE#462: after the decoder has had its chance, whichever way the block above left it, so a
         // stream present but unusable (no codecpar) classifies as the drop it is rather than as a
         // source without audio.
@@ -1395,6 +1526,16 @@ final class SoftwarePlaybackHost {
         // AudioOutput owns the AVSampleBufferRenderSynchronizer (master clock). Created unconditionally: video-only previously got no clock (frozen frame, currentTime=0). Layer attached in play() after the engine hangs it in the view hierarchy (attaching free-floating fails FigVideoQueueRemote -12080 on tvOS 26+).
         let audioOutput = AudioOutput()
         self.audioOutput = audioOutput
+        audioOutput.onRendererFailure = { [weak self] epoch, message in
+            guard let self else { return }
+            let token = SoftwareSpatialAudioFailureToken(
+                seekGeneration: self.seekGeneration,
+                audioEpoch: epoch
+            )
+            Task { @MainActor [weak self] in
+                self?.reportSpatialAudioFailure(message, token: token)
+            }
+        }
         renderer.setTimeline(audioOutput.timeline)   // AE#395
         self.audioOutput?.volume = volume
         self.audioOutput?.setPresentationOffset(seconds: audioDelaySeconds)   // AE#464
@@ -1556,11 +1697,12 @@ final class SoftwarePlaybackHost {
         rate = lastRate
         isPlaying = true
         inFlightSeekResumeIntent = true
+        publishSpatialAudioOutputStateIfChanged()
     }
 
     private var demuxLoopStarted: Bool = false
 
-    /// #95 audio tap: mirrors every decoded audio CMSampleBuffer to the tap (nil = tap off).
+    /// #95 audio tap: mirrors PCM CMSampleBuffers to the tap (nil = tap off); compressed APAC is excluded.
     /// Set/cleared on the main actor by AetherEngine+AudioTap; read per packet on the demux and
     /// feeder threads (same unsynchronized-flag pattern as `_isPlaying`; worst case one buffer
     /// reaches a just-removed sink).
@@ -1647,6 +1789,7 @@ final class SoftwarePlaybackHost {
         }
         isPlaying = false
         inFlightSeekResumeIntent = false
+        publishSpatialAudioOutputStateIfChanged()
     }
 
     /// Sodalite#104 round 4: the first frame of a session paused before it is in. Moves the stopped clock
@@ -1878,6 +2021,7 @@ final class SoftwarePlaybackHost {
                                                   inFlightIntent: inFlightSeekResumeIntent)
         inFlightSeekResumeIntent = wasPlaying
         isPlaying = false
+        publishSpatialAudioOutputStateIfChanged()
 
         videoDecoder.flush()
         audioDecoder?.flush()
@@ -1942,6 +2086,7 @@ final class SoftwarePlaybackHost {
                                category: .swPlayback)
                 failure = PlaybackErrorInfo(kind: .softwarePipelineFailed,
                                             message: "Playback cache could not reposition.")
+                publishSpatialAudioOutputStateIfChanged()
                 return .stalled
             }
         }
@@ -1975,6 +2120,7 @@ final class SoftwarePlaybackHost {
             noteSeekSettled(generation)
             failure = PlaybackErrorInfo(kind: .softwarePipelineFailed,
                                        message: "Playback source could not reposition.")
+            publishSpatialAudioOutputStateIfChanged()
             return .stalled
         }
 
@@ -2000,6 +2146,7 @@ final class SoftwarePlaybackHost {
         }
         // Arm now so the demux loop doesn't re-arm at stale initialClockTime (a pre-first-audio seek snapped back to session start without this).
         clockArmed = true
+        publishSpatialAudioOutputStateIfChanged()
         // The source stands at the target and the clock is anchored on it: everything the loop
         // reads from here belongs to this position. Closing the window releases the loop.
         noteSeekSettled(generation)
@@ -2230,7 +2377,10 @@ final class SoftwarePlaybackHost {
                 // retires what this packet decodes to. A pre-seek buffer kept at the head of the fresh queue
                 // carries a higher stamp than the new clock and mutes audio for the rewind distance.
                 guard aOut.enqueue(sampleBuffer: buf, ifEpoch: audioEpoch) else { return enqueued }
-                audioTapSink?(buf)   // #95: mirrored behind the accept
+                    if let format = CMSampleBufferGetFormatDescription(buf),
+                       Self.shouldMirrorAudioTap(mediaSubtype: CMFormatDescriptionGetMediaSubType(format)) {
+                        audioTapSink?(buf)   // #95: mirrored behind the accept
+                    }
                 enqueued = true
             }
             return enqueued
@@ -2284,6 +2434,7 @@ final class SoftwarePlaybackHost {
         // #315: the session's picture goes with the session. `flush()` above already removed it.
         disarmReadyForDisplayObserver()
         isVideoReadyForDisplay = false
+        publishSpatialAudioOutputStateIfChanged()
     }
 
     /// #660: held here, not only on the output, because the engine sets it before `load()` builds one.
@@ -2336,6 +2487,11 @@ final class SoftwarePlaybackHost {
         let getAudioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?) = { [weak self] in
             self?.audioTapSink
         }
+        let onSpatialAudioFailure: @Sendable (String, SoftwareSpatialAudioFailureToken) -> Void = { [weak self] message, token in
+            Task { @MainActor [weak self] in
+                self?.reportSpatialAudioFailure(message, token: token)
+            }
+        }
         // #112 rework: same late-install resolution for the subtitle tap.
         let getSubtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { [weak self] in
             self?.subtitleTapSink
@@ -2363,6 +2519,7 @@ final class SoftwarePlaybackHost {
                 self.parkClockAtEndOfMedia()
                 self.didReachEnd = true
                 self.isPlaying = false
+                self.publishSpatialAudioOutputStateIfChanged()
             }
         }
         let onError: @Sendable (String) -> Void = { [weak self] message in
@@ -2557,6 +2714,7 @@ final class SoftwarePlaybackHost {
                 onError: onErrorForGeneration,
                 onEnd: onEndForGeneration,
                 audioTapSink: getAudioTapSink,
+                onSpatialAudioFailure: onSpatialAudioFailure,
                 subtitleStreamIndices: subIndices,
                 subtitleTimeBases: subTimeBases,
                 splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
@@ -3225,6 +3383,7 @@ final class SoftwarePlaybackHost {
         onError: @Sendable (String, UInt64) -> Void,
         onEnd: @Sendable (UInt64) -> Void,
         audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?),
+        onSpatialAudioFailure: @Sendable (String, SoftwareSpatialAudioFailureToken) -> Void = { _, _ in },
         subtitleStreamIndices: Set<Int32> = [],
         subtitleTimeBases: [Int32: AVRational] = [:],
         splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
@@ -3601,6 +3760,26 @@ diagAudioPtsSec = .nan
                 return !stopRequested()
             }
             guard let packet else {
+                if let aDec = audioDecoder, aDec.isUsingSoftwareSpatialAudio, let aOut = audioOutput {
+                    let tail = aDec.drain()
+                    if let failure = aDec.takeSpatialAudioFailure() {
+                        if seekGeneration() == genBeforeRead, aOut.epoch == audioEpochBeforeRead {
+                            let token = SoftwareSpatialAudioFailureToken(
+                                seekGeneration: genBeforeRead,
+                                audioEpoch: audioEpochBeforeRead
+                            )
+                            if terminalGeneration.record(genBeforeRead) {
+                                onSpatialAudioFailure(failure, token)
+                            }
+                            return true
+                        }
+                    }
+                    for buffer in tail {
+                        guard aOut.enqueue(sampleBuffer: buffer, ifEpoch: audioEpochBeforeRead) else {
+                            return true
+                        }
+                    }
+                }
                 // Play the parked tail out before the flush: nothing more will arrive, the queues
                 // must drain to end-of-media. The wait lifts a rebuffer hold on its own - held,
                 // the clock would never take the tail and end-of-media would never be reached.
@@ -3775,8 +3954,10 @@ diagAudioPtsSec = .nan
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
                     // requires a DECLARED audio track, not a producing one). The stream that
                     // produces NO packets at all is #337's case and exits at the read gate.
+                    let audioFallbackPacketBudget = audioDecoder?.isUsingSoftwareSpatialAudio == true
+                        ? AudioBridge.trueHDSilentFeedPacketThreshold : 50
                     if !clockArmed(), let aOut = audioOutput,
-                       audioPacketsSeen >= 50, !audioBuffersProduced {
+                       audioPacketsSeen >= audioFallbackPacketBudget, !audioBuffersProduced {
                         armFromVideoPacket(packet, aOut)
                     }
                     drainParkedVideoNonblocking()
@@ -3841,8 +4022,10 @@ diagAudioPtsSec = .nan
                 setDecodeGeneration(genBeforeRead)
                 videoDecoder.decode(packet: packet, epoch: epochBeforeRead)
                 // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
+                let audioFallbackPacketBudget = audioDecoder?.isUsingSoftwareSpatialAudio == true
+                    ? AudioBridge.trueHDSilentFeedPacketThreshold : 50
                 if !clockArmed(), let aOut = audioOutput,
-                   audioDecoder == nil || (audioPacketsSeen >= 50 && !audioBuffersProduced) {
+                   audioDecoder == nil || (audioPacketsSeen >= audioFallbackPacketBudget && !audioBuffersProduced) {
                     armFromVideoPacket(packet, aOut)
                 }
             } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
@@ -3882,6 +4065,20 @@ diagAudioPtsSec = .nan
                 }
                 audioPacketsSeen += 1
                 let buffers = aDec.decode(packet: packet)
+                if let failure = aDec.takeSpatialAudioFailure() {
+                    let token = SoftwareSpatialAudioFailureToken(
+                        seekGeneration: genBeforeRead,
+                        audioEpoch: audioEpochBeforeRead
+                    )
+                    let failureIsCurrent = seekGeneration() == token.seekGeneration
+                        && aOut.epoch == token.audioEpoch
+                    if failureIsCurrent, terminalGeneration.record(token.seekGeneration) {
+                        onSpatialAudioFailure(failure, token)
+                    }
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                    return true
+                }
                 if !buffers.isEmpty { audioBuffersProduced = true }
                 let tapSink = audioTapSink()
                 // The flush can also land inside `decode`, so the buffers are checked out again.
@@ -3896,7 +4093,10 @@ diagAudioPtsSec = .nan
                         av_packet_free_safe(packet)
                         return true
                     }
-                    tapSink?(buf)   // #95: mirrored behind the accept, so a refused buffer is not transcribed
+                    if let format = CMSampleBufferGetFormatDescription(buf),
+                       Self.shouldMirrorAudioTap(mediaSubtype: CMFormatDescriptionGetMediaSubType(format)) {
+                        tapSink?(buf)   // #95: mirrored behind the accept, so a refused buffer is not transcribed
+                    }
                 }
 if !buffers.isEmpty {
                     diag?.noteAudioProgress(generation: genBeforeRead)
@@ -3981,6 +4181,7 @@ rebuffering: rebuffering,
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
+                self.publishSpatialAudioOutputStateIfChanged()
                 // Independent of the clock below: a seek in flight must not defer the one check.
                 self.checkSurfaceVisibilityIfDue()
                 self.sampleResidentRanges()
