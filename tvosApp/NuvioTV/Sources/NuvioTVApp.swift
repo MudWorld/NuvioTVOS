@@ -4944,6 +4944,8 @@ struct TVHomeView: View {
     @State private var continueWatchingRefreshTask: Task<Void, Never>?
     @State private var traktWatchedHistorySyncTask: Task<Void, Never>?
     @State private var pendingContinueWatchingRefreshAfterOverlay = false
+    @State private var lastContinueWatchingRefreshedAt: Date = .distantPast
+    @State private var pendingContinueWatchingDebounceTask: Task<Void, Never>?
     @State private var simklLoadingDebugInfo: String?
     @State private var simklLoadingTimeoutTask: Task<Void, Never>?
     @State private var simklLoadingStartedAt: Date?
@@ -5484,6 +5486,8 @@ struct TVHomeView: View {
                 // Screen-scoped work cancellation.
                 continueWatchingRefreshTask?.cancel()
                 continueWatchingRefreshTask = nil
+                pendingContinueWatchingDebounceTask?.cancel()
+                pendingContinueWatchingDebounceTask = nil
                 continueWatchingRefreshGeneration &+= 1
             }
         }
@@ -7800,7 +7804,6 @@ struct TVHomeView: View {
             )
             store.finishLoad(generation, for: identity)
             lastLoadedInputSignature = inputSignature
-            refreshContinueWatching()
             refreshWatchedTitles()
             isLoading = false
         } catch is CancellationError {
@@ -8739,7 +8742,32 @@ struct TVHomeView: View {
         }
     }
 
-    private func refreshContinueWatching() {
+    private func refreshContinueWatching(forceImmediate: Bool = false) {
+        guard collectionHome == nil else { return }
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastContinueWatchingRefreshedAt)
+        let cooldown: TimeInterval = 0.15
+
+        if forceImmediate || elapsed >= cooldown {
+            pendingContinueWatchingDebounceTask?.cancel()
+            pendingContinueWatchingDebounceTask = nil
+            lastContinueWatchingRefreshedAt = now
+            performRefreshContinueWatching()
+        } else {
+            // Already refreshed within the cooldown window: coalesce rapid bursts into a trailing refresh.
+            guard pendingContinueWatchingDebounceTask == nil else { return }
+            let remaining = max(0.01, cooldown - elapsed)
+            pendingContinueWatchingDebounceTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                pendingContinueWatchingDebounceTask = nil
+                lastContinueWatchingRefreshedAt = Date()
+                performRefreshContinueWatching()
+            }
+        }
+    }
+
+    private func performRefreshContinueWatching() {
         guard collectionHome == nil else { return }
         TVHomeDebugTrace.measure("home.refreshContinueWatching") {
             guard !usesRemoteProgress else {
@@ -8885,7 +8913,9 @@ struct TVHomeView: View {
             }
         }
 
-        refreshContinueWatching()
+        if usesRemoteProgress {
+            refreshContinueWatching()
+        }
         guard usesRemoteProgress else {
             // The ledger this just read is only as fresh as the last account
             // pull. Ask for a new one; it lands via the store's change
