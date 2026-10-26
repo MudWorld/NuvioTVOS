@@ -3488,6 +3488,7 @@ class PlayerViewModel: ObservableObject {
                 showControls = true
                 isTimelineFocused = true
                 schedulePauseOverlay()
+                saveProgress(force: true, eventAction: .pause)
             }
         }
         if showScenePanel {
