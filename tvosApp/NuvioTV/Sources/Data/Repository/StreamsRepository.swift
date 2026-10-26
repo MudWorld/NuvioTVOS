@@ -214,6 +214,53 @@ final class StreamsRepository: ObservableObject {
         return state.requestKey == key ? state.allStreams : []
     }
 
+    /// Whether any enabled add-on has a stream for this title or episode.
+    /// Leaves the shared search that Details and the player use alone (the
+    /// calendar's "Available" tag asks this), and stops at the first add-on
+    /// that has one.
+    static func hasAnyAddonStream(type: String, videoId: String) async -> Bool {
+        let manifestURLs = CinemetaCatalogRepository.configuredStreamAddonManifestURLs
+        guard !manifestURLs.isEmpty else { return false }
+        let manifests = await loadManifestsConcurrently(urls: manifestURLs)
+        let streamURLs: [URL] = manifestURLs.compactMap { manifestURL in
+            guard let manifest = manifests[manifestURL],
+                  manifest.supportsResource("stream", type: type, id: videoId) else { return nil }
+            return AddonTransportUrls.buildResourceURL(
+                manifestURL: manifestURL, resource: "stream", type: type, id: videoId
+            )
+        }
+        guard !streamURLs.isEmpty else { return false }
+        return await withTaskGroup(of: Bool.self) { group in
+            for url in streamURLs {
+                group.addTask { await Self.hasPlayableStream(at: url) }
+            }
+            for await found in group where found {
+                group.cancelAll()
+                return true
+            }
+            return false
+        }
+    }
+
+    /// A shorter wait than a real search: a slow add-on only delays the tag.
+    nonisolated static let availabilityProbeTimeout: TimeInterval = 12
+
+    /// One add-on's answer, fetched and decoded off the main actor. Message
+    /// rows ("no results", "configure me") don't count. A 404 that still
+    /// lists streams counts, as in `fetchStreams` (Peerflix answers so).
+    nonisolated private static func hasPlayableStream(at url: URL) async -> Bool {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = availabilityProbeTimeout
+        request.setValue("Mozilla/5.0 (AppleTV; tvOS 18.0) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode || http.statusCode == 404,
+              let decoded = try? JSONDecoder().decode(StreamAddonResponse.self, from: data) else { return false }
+        return (decoded.streams ?? []).contains { raw in
+            guard let stream = raw.toNuvioStream(addonName: "") else { return false }
+            return !stream.isNotPlayable
+        }
+    }
+
     // MARK: - Discovery
 
     private func runDiscovery(requestKey: String, type: String, videoId: String,

@@ -182,6 +182,15 @@ enum SettingsKey {
     static let cardCornerRadius = "nuvio.tv.settings.layout.cardCornerRadius"
     static let cardSize = "nuvio.tv.settings.layout.cardSize"
     static let liquidGlassCards = "nuvio.tv.settings.layout.liquidGlassCards"
+    /// Settings → Appearance → Sidebar → Calendar.
+    static let showCalendarTab = "nuvio.tv.settings.layout.showCalendarTab"
+    /// Settings → Layout → Calendar → Today Row.
+    static let homeCalendarToday = "nuvio.tv.settings.layout.homeCalendarToday"
+    /// The calendar's own options, chosen from its header.
+    static let calendarFilter = "nuvio.tv.settings.calendar.filter"
+    static let calendarHideSpoilers = "nuvio.tv.settings.calendar.hideSpoilers"
+    static let calendarCheckAvailability = "nuvio.tv.settings.calendar.checkAvailability"
+    static let calendarTvmazeTimes = "nuvio.tv.settings.calendar.tvmazeTimes"
     static let hideUnreleased = "nuvio.tv.settings.layout.hideUnreleased"
     static let showFullDates = "nuvio.tv.settings.layout.showFullDates"
     static let detailsActionsBelowInfo = "nuvio.tv.settings.layout.detailsActionsBelowInfo"
@@ -360,6 +369,7 @@ enum SettingsKey {
         homeLayout, sidebarClockFormat, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, homeHeroRatingSource, posterLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
         searchStyle, preferAddonArtworkInSearch,
         continueWatchingVisible, continueWatchingLandscape, continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp,
+        showCalendarTab, homeCalendarToday, calendarFilter, calendarHideSpoilers, calendarCheckAvailability, calendarTvmazeTimes,
         cardCornerRadius, cardSize, liquidGlassCards,
         hideUnreleased, showFullDates, detailsActionsBelowInfo,
         traktConnected, traktClientID, traktClientSecret,
@@ -2238,6 +2248,7 @@ private struct AppearanceSettingsView: View {
     @AppStorage(SettingsKey.amoledSurfaces) private var amoledSurfaces = false
     @AppStorage(SettingsKey.cardCornerRadius) private var cardCornerRadius = AppCardStyle.defaultCornerRadiusRaw
     @AppStorage(SettingsKey.liquidGlassCards) private var liquidGlassCards = true
+    @AppStorage(SettingsKey.showCalendarTab) private var showCalendarTab = true
     @AppStorage(SettingsKey.customPosterURLPattern) private var customPosterURLPattern = ""
     @AppStorage(SettingsKey.customPosterEnabledScreens) private var customPosterEnabledScreens = "all"
     @State private var customPosterURLDraft = ""
@@ -2259,6 +2270,21 @@ private struct AppearanceSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(
+                title: L10n.string("settings_sidebar_tabs", fallback: "Sidebar"),
+                subtitle: L10n.string("settings_sidebar_tabs_subtitle", fallback: "Choose which sections appear in the sidebar")
+            ) {
+                SettingsToggleRow(
+                    title: L10n.string("nav_calendar", fallback: "Calendar"),
+                    subtitle: L10n.string(
+                        "settings_show_calendar_tab_subtitle",
+                        fallback: "Upcoming episodes and releases from your library"
+                    ),
+                    isOn: $showCalendarTab,
+                    accentColor: accentColor
+                )
+            }
+
             SettingsGroup(
                 title: L10n.string("settings_poster_card_style", fallback: "Card & Poster Style"),
                 subtitle: L10n.string(
@@ -3260,6 +3286,7 @@ private struct LayoutDiscoverySettingsView: View {
     @AppStorage(SettingsKey.continueWatchingSort) private var continueWatchingSort = "Default"
     @AppStorage(SettingsKey.upNextFromFurthestEpisode) private var upNextFromFurthestEpisode = true
     @AppStorage(SettingsKey.showUnairedNextUp) private var showUnairedNextUp = true
+    @AppStorage(SettingsKey.homeCalendarToday) private var homeCalendarToday = true
     @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
     @AppStorage(SettingsKey.showFullDates) private var showFullDates = true
     @AppStorage(SettingsKey.focusedPosterBackdropEnabled) private var focusedPosterBackdropEnabled = true
@@ -3572,6 +3599,24 @@ private struct LayoutDiscoverySettingsView: View {
                 )
                 .opacity(continueWatchingVisible ? 1 : 0.46)
                 .disabled(!continueWatchingVisible)
+            }
+
+            SettingsGroup(
+                title: L10n.string("nav_calendar", fallback: "Calendar"),
+                subtitle: L10n.string(
+                    "settings_calendar_home_subtitle",
+                    fallback: "Rows on the Home screen from your calendar"
+                )
+            ) {
+                SettingsToggleRow(
+                    title: L10n.string("settings_calendar_today_row", fallback: "Today Row"),
+                    subtitle: L10n.string(
+                        "settings_calendar_today_row_subtitle",
+                        fallback: "Episodes, anime and movies from your library that come out today. Uses TMDB."
+                    ),
+                    isOn: $homeCalendarToday,
+                    accentColor: accentColor
+                )
             }
 
             SettingsGroup(
@@ -10177,6 +10222,24 @@ private struct LicensesAttributionsSheet: View {
             title: L10n.string("tvos_settings_mdblist", fallback: "MDBList"),
             body: "Optional multi-source rating badges when an API key is configured.",
             license: "MDBList Terms"
+        ),
+        LicenseEntry(
+            id: "anilist",
+            title: "AniList",
+            body: "Broadcast days and times of Japanese anime in the calendar, and the anime airing lists in Add shows. Data from anilist.co.",
+            license: "AniList API Terms of Use"
+        ),
+        LicenseEntry(
+            id: "arm-server",
+            title: "arm-server",
+            body: "Matches AniList anime to their TMDB and IMDb ids for the calendar (arm.haglund.dev, built on anime-offline-database).",
+            license: "ODbL 1.0 (data)"
+        ),
+        LicenseEntry(
+            id: "tvmaze",
+            title: "TVmaze",
+            body: "Broadcast times of series episodes in the calendar, when Exact air times is on. Data from tvmaze.com.",
+            license: "CC BY-SA 4.0"
         )
     ]
 

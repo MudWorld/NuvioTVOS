@@ -51,6 +51,8 @@ struct DetailsScreen: View {
     var onOpenPerson: ((TmdbPersonMetadata) -> Void)? = nil
     let initiallyPresentStreamPicker: Bool
     let initialStreamPickerEpisode: NuvioVideo?
+    /// Episode to select in the episode list on open (from the calendar).
+    let initialFocusEpisode: DetailsEpisodeFocus?
     let onInitialStreamPickerPresented: (() -> Void)?
     var onWatchPartyMovieReady: ((NuvioMeta) -> Void)? = nil
     var creatingWatchPartyRoom = false
@@ -133,6 +135,7 @@ struct DetailsScreen: View {
         onInitialPlaybackRequestConsumed: ((UInt) -> Void)? = nil,
         initiallyPresentStreamPicker: Bool = false,
         initialStreamPickerEpisode: NuvioVideo? = nil,
+        initialFocusEpisode: DetailsEpisodeFocus? = nil,
         onInitialStreamPickerPresented: (() -> Void)? = nil,
         onWatchPartyMovieReady: ((NuvioMeta) -> Void)? = nil,
         creatingWatchPartyRoom: Bool = false,
@@ -173,6 +176,7 @@ struct DetailsScreen: View {
         self.onOpenPerson = onOpenPerson
         self.initiallyPresentStreamPicker = initiallyPresentStreamPicker
         self.initialStreamPickerEpisode = initialStreamPickerEpisode
+        self.initialFocusEpisode = initialFocusEpisode
         self.onInitialStreamPickerPresented = onInitialStreamPickerPresented
         self.onWatchPartyMovieReady = onWatchPartyMovieReady
         self.creatingWatchPartyRoom = creatingWatchPartyRoom
@@ -213,6 +217,7 @@ struct DetailsScreen: View {
                 TvDetailsContent(
                     uiState: viewModel.uiState,
                     initialPlayRequestID: readyInitialPlaybackRequestID,
+                    initialFocusEpisode: initialFocusEpisode,
                     onInitialPlayRequestConsumed: { requestID in
                         finishInitialPlaybackRequest(requestID)
                     },
@@ -3641,6 +3646,7 @@ private enum TvDetailsFocusSection: Hashable {
 struct TvDetailsContent: View {
     let uiState: DetailsUiState
     var initialPlayRequestID: UInt? = nil
+    var initialFocusEpisode: DetailsEpisodeFocus? = nil
     var onInitialPlayRequestConsumed: ((UInt) -> Void)? = nil
     let onPlayClick: () -> Void
     var onPlayManually: (() -> Void)? = nil
@@ -3700,6 +3706,9 @@ struct TvDetailsContent: View {
     @State private var progressRevision = 0
     @State private var scrollOffset: CGFloat = 0
     @State private var hasAppearedBefore = false
+    /// Opened from the calendar before the title listed that episode (a
+    /// cached copy shows first): focus it once the full title arrives.
+    @State private var calendarFocusPending = false
     @State private var reentryProgressRefreshPending = false
     @StateObject private var episodeCache = TvDetailsEpisodeCache()
 
@@ -4033,6 +4042,7 @@ struct TvDetailsContent: View {
             let episodePresentation = episodeCache.resolve(
                 meta: meta,
                 progressRevision: progressRevision,
+                focusEpisode: initialFocusEpisode,
                 continueItemProvider: { currentContinueWatchingItem(for: meta) },
                 playTargetBuilder: { episodes, continueItem, watchedKeys in
                     TvDetailsPlayTargetBuilder.makePlayTarget(
@@ -4380,14 +4390,31 @@ struct TvDetailsContent: View {
             // button. Move it onto Play explicitly once the content appears
             // (async so it runs after the focus engine's own first pass).
             .onAppear {
+                var calendarEpisodeKey: String?
                 if hasAppearedBefore {
                     refreshProgressAfterReturn()
                 } else {
                     hasAppearedBefore = true
+                    // Opened from the calendar: start on that episode card
+                    // instead of Play.
+                    calendarEpisodeKey = calendarEpisodeFocusKey(in: episodePresentation.guide.episodes)
+                    calendarFocusPending = initialFocusEpisode != nil && calendarEpisodeKey == nil
                 }
-                focusedDetailsSection = .actions
-                DispatchQueue.main.async { actionFocus = .play }
+                if let calendarEpisodeKey {
+                    focusCalendarEpisode(calendarEpisodeKey)
+                } else {
+                    focusedDetailsSection = .actions
+                    DispatchQueue.main.async { actionFocus = .play }
+                }
                 scheduleBackgroundTrailer(for: meta)
+            }
+            .onChange(of: episodePresentation.guide.revision) { _, _ in
+                guard calendarFocusPending,
+                      let key = calendarEpisodeFocusKey(in: episodePresentation.guide.episodes) else { return }
+                calendarFocusPending = false
+                // Only while focus is still on Play, where the screen put it.
+                guard focusedDetailsSection == .actions, actionFocus == nil || actionFocus == .play else { return }
+                focusCalendarEpisode(key)
             }
             .onDisappear {
                 let seconds = trailerPlayer.currentTime().seconds
@@ -4509,6 +4536,20 @@ struct TvDetailsContent: View {
     /// delayed because the cards are unfocusable for a few frames while the
     /// picker fades, and the 1s clear is a safety net for a target that is gone
     /// (the season was switched, say) so the strip can't stay unfocusable.
+    /// The card of the episode the calendar asked for, when the title lists it.
+    private func calendarEpisodeFocusKey(in episodes: [NuvioVideo]) -> String? {
+        initialFocusEpisode
+            .flatMap { $0.pick(from: episodes) }
+            .map { TvEpisodeFocus.card($0.id) }
+    }
+
+    private func focusCalendarEpisode(_ key: String) {
+        focusedDetailsSection = .episodes
+        restoreGeneration &+= 1
+        restoreEpisodeKey = key
+        restoreEpisodeFocus(to: key, generation: restoreGeneration)
+    }
+
     private func restoreEpisodeFocus(to target: String, generation: Int) {
         for delay in [0.12, 0.45] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -6979,11 +7020,13 @@ private final class TvDetailsEpisodeCache: ObservableObject {
     private var input: TvEpisodeGuideInput?
     private var lookupIdentity: TvEpisodeLookupIdentity?
     private var progressRevision: Int?
+    private var focusEpisode: DetailsEpisodeFocus?
     private var presentation: TvDetailsEpisodePresentation?
 
     func resolve(
         meta: NuvioMeta,
         progressRevision: Int,
+        focusEpisode: DetailsEpisodeFocus? = nil,
         continueItemProvider: () -> ContinueWatchingItem?,
         playTargetBuilder: ([NuvioVideo], ContinueWatchingItem?, Set<String>) -> TvDetailsPlayTarget
     ) -> TvDetailsEpisodePresentation {
@@ -6997,8 +7040,9 @@ private final class TvDetailsEpisodeCache: ObservableObject {
         let guideChanged = self.input != input
         let lookupIdentityChanged = self.lookupIdentity != lookupIdentity
         let progressChanged = self.progressRevision != progressRevision
+        let focusChanged = self.focusEpisode != focusEpisode
 
-        if guideChanged || lookupIdentityChanged || progressChanged {
+        if guideChanged || lookupIdentityChanged || progressChanged || focusChanged {
             let guideRevision = guideChanged
                 ? (presentation.map { $0.guide.revision &+ 1 } ?? 0)
                 : presentation!.guide.revision
@@ -7009,7 +7053,10 @@ private final class TvDetailsEpisodeCache: ObservableObject {
             let watchedSnapshot = WatchedStore.currentSnapshot()
             let watchedKeys = watchedSnapshot.watchedEpisodeKeys(meta: meta)
             let episodeWatchCounts = watchedSnapshot.catalogEpisodeWatchCounts(meta: meta)
-            let initialEpisode = guide.initialEpisode(
+            // A calendar entry asks for a specific episode; otherwise follow
+            // progress as before.
+            let focusedEpisode = focusEpisode.flatMap { $0.pick(from: guide.episodes) }
+            let initialEpisode = focusedEpisode ?? guide.initialEpisode(
                 continueItem: continueItem,
                 watchedKeys: watchedKeys
             )
@@ -7039,7 +7086,7 @@ private final class TvDetailsEpisodeCache: ObservableObject {
             )
             let nextRevision = TvDetailsEpisodePresentationRevision(
                 watched: (presentation?.revision.watched ?? -1) &+ 1,
-                selection: guideChanged || lookupIdentityChanged
+                selection: guideChanged || lookupIdentityChanged || focusChanged
                     ? (presentation?.revision.selection ?? -1) &+ 1
                     : (presentation?.revision.selection ?? 0)
             )
@@ -7053,6 +7100,7 @@ private final class TvDetailsEpisodeCache: ObservableObject {
             self.input = input
             self.lookupIdentity = lookupIdentity
             self.progressRevision = progressRevision
+            self.focusEpisode = focusEpisode
         }
 
         return presentation!
