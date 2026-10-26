@@ -714,6 +714,20 @@ final class UsenetSourceTests: XCTestCase {
         XCTAssertEqual(UsenetStreamSession.priority(of: 5, playhead: 10), .readAhead)
     }
 
+    func testNextWindowCoversSecondsOfVideo() {
+        let part: Int64 = 716_800
+        // Unknown bitrate: the fixed few articles.
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: nil, partSize: part, limit: 54), 4)
+        // A 60 GB, two-hour 4K remux: about 8.3 MB a second, 4 s ≈ 47 articles.
+        let remux = 59.55e9 / 7200
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: remux, partSize: part, limit: 54), 47)
+        // Never past the read-ahead, never under the fixed few.
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: remux, partSize: part, limit: 20), 20)
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: 2e9 / 3600, partSize: part, limit: 54), 4)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 57, playhead: 10, next: 47), .next)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 58, playhead: 10, next: 47), .readAhead)
+    }
+
     func testUsenetStreamURLsAreNotTakenForTheLocalCache() {
         XCTAssertTrue(UsenetStreamServer.isStreamURL(URL(string: "http://127.0.0.1:52011/usenet/abc/video.mkv")))
         XCTAssertTrue(UsenetStreamServer.isStreamURL(URL(string: "http://localhost:80/usenet/x/video.mp4")))

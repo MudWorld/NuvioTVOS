@@ -67,6 +67,8 @@ final class UsenetEngineManager: ObservableObject {
     private var statsTask: Task<Void, Never>?
     private(set) var activeStreamURL: URL?
     private var generation = 0
+    /// The duration last passed to the session.
+    private var reportedDuration: Double = 0
 
     private init() {}
 
@@ -168,12 +170,22 @@ final class UsenetEngineManager: ObservableObject {
         self.server = nil
         self.pool = nil
         activeStreamURL = nil
+        reportedDuration = 0
         isStreaming = false
         activeStats = UsenetStreamStats()
         damagedStreamURL = nil
         damagedGeneration = nil
         await server?.stop()
         await session?.stop()
+    }
+
+    /// The player's duration for the playing Usenet stream, once (and when it
+    /// changes): the session sizes its read-ahead in seconds of video.
+    func reportDuration(_ duration: Double, playbackURL: String?) {
+        guard let session, let activeStreamURL, playbackURL == activeStreamURL.absoluteString,
+              duration.isFinite, duration > 60, abs(duration - reportedDuration) > 1 else { return }
+        reportedDuration = duration
+        Task { await session.setDuration(duration) }
     }
 
     private func reportDamage(generation: Int) {
