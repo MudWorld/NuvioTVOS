@@ -10484,15 +10484,22 @@ private struct SMBRowButton: View {
 
     @FocusState private var isFocused: Bool
 
+    /// Focused, the capsule takes the accent color: with the White accent
+    /// (the default) the label turns black, or it would vanish.
+    private var contentColor: Color {
+        guard enabled else { return .white.opacity(0.4) }
+        return isFocused && accentColor == .white ? .black : .white
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 if isLoading {
-                    ProgressView().tint(.white).scaleEffect(0.7)
+                    ProgressView().tint(contentColor).scaleEffect(0.7)
                 }
                 Text(title)
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundColor(enabled ? .white : .white.opacity(0.4))
+                    .foregroundColor(contentColor)
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 10)
