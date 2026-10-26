@@ -4302,7 +4302,8 @@ private struct TVMainTabView: View {
             onLongPressCard: onLongPressCard,
             onLongPressContinueWatching: onLongPressContinueWatching,
             onRequestAccountRefresh: onRequestAccountRefresh,
-            onRequestReauth: { showingReauthSheet = true }
+            onRequestReauth: { showingReauthSheet = true },
+            onOpenCalendarEntry: onOpenCalendarEntry
         )
             .id(activeProfile?.id ?? "none")
     }
@@ -4677,6 +4678,7 @@ private final class TVHomeFocusWork {
         let hideUnreleased: Bool
         let cwLandscape: Bool
         let landscapePosters: Bool
+        let calendarToday: [NuvioMeta]
     }
     struct CachedVisibleSections {
         let signature: VisibleSectionsSignature
@@ -4932,9 +4934,12 @@ struct TVHomeView: View {
     /// notice a title deleted on another device.
     var onRequestAccountRefresh: (Bool) -> Void = { _ in }
     var onRequestReauth: () -> Void = {}
+    /// Opens a card of the Today row on its episode.
+    var onOpenCalendarEntry: ((CalendarEntry) -> Void)? = nil
 
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @AppStorage(SettingsKey.homeCalendarToday) private var homeCalendarToday = true
     @AppStorage(SettingsKey.heroEnabled) private var heroEnabled = true
     @AppStorage(SettingsKey.fullscreenHeroBackdrop) private var fullscreenHeroBackdrop = true
     @AppStorage(SettingsKey.focusedPosterBackdropEnabled) private var focusedPosterBackdropEnabled = true
@@ -4988,6 +4993,7 @@ struct TVHomeView: View {
     @State private var appliedContinueWatchingSort: String?
     @State private var continueWatching: [ContinueWatchingItem] = []
     @State private var upcomingItems: [ContinueWatchingItem] = []
+    @State private var calendarToday = CalendarHomeToday()
     /// Derived once when Continue Watching changes. Recomputing these from the
     /// entire history inside `body` made every focus update scale with the
     /// number of loaded progress items.
@@ -5401,6 +5407,12 @@ struct TVHomeView: View {
             guard isActive && !isFullScreenOverlayPresented else { return }
             Task { await loadJellyfinSection() }
         }
+        .modifier(CalendarTodayHomeFeed(
+            enabled: homeCalendarToday && collectionHome == nil,
+            homeReady: store.hasLoaded,
+            isActive: isActive && !isFullScreenOverlayPresented,
+            row: $calendarToday
+        ))
         .onAppear {
             TVHomeDebugTrace.startWatchdogIfNeeded()
             reportProfileGateReadiness()
@@ -5999,17 +6011,20 @@ struct TVHomeView: View {
                                 }
                             )
                             .id(section.id)
-                        } else if section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId {
+                        } else if section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId
+                                    || section.id == TVHomeSection.calendarTodayId {
+                            let isCalendarToday = section.id == TVHomeSection.calendarTodayId
                             TVCatalogRow(
                                 id: section.id,
-                                customPosterScreen: .continueWatching,
+                                customPosterScreen: isCalendarToday ? .home : .continueWatching,
                                 title: section.title,
                                 addonName: section.addonName,
                                 showAddonName: catalogAddonNames,
                                 showsSectionTitle: true,
                                 horizontalEdgeInset: heroBleed,
                                 items: section.items,
-                                progressByItemId: continueWatchingByMetaId,
+                                progressByItemId: isCalendarToday ? [:] : continueWatchingByMetaId,
+                                calendarLabelsByItemId: isCalendarToday ? calendarToday.labels : [:],
                                 collectionOriginsByItemId: collectionHome == nil && section.id == TVHomeSection.continueWatchingId
                                     ? continueWatchingOrigins : [:],
                                 watchedTitleKeys: watchedTitleKeys,
@@ -6039,7 +6054,9 @@ struct TVHomeView: View {
                                 onApproachEnd: { _ in },
                                 onSelect: { meta in
                                     let cardKey = TVHomeCardIdentity.key(rowID: section.id, item: meta)
-                                    if let item = continueWatchingByMetaId[meta.id] {
+                                    if isCalendarToday {
+                                        openCalendarTodayCard(meta, restoreCardID: cardKey)
+                                    } else if let item = continueWatchingByMetaId[meta.id] {
                                         if item.isUpNextEntry && !item.hasAired && !item.isAiringToday {
                                             navigateToDetailsFromHome(
                                                 id: meta.id,
@@ -6206,7 +6223,8 @@ struct TVHomeView: View {
                 }
             } else if homeLayout == "Grid View",
                       section.id != TVHomeSection.continueWatchingId,
-                      section.id != TVHomeSection.upcomingId {
+                      section.id != TVHomeSection.upcomingId,
+                      section.id != TVHomeSection.calendarTodayId {
                 keys = section.items.prefix(TVHomeGridLayout.previewItemCount(rows: gridRows)).map {
                     TVHomeCardIdentity.key(rowID: section.id, item: $0)
                 } + ["\(section.id)\u{1}\(TVHomeGridLayout.seeAllID)"]
@@ -7101,6 +7119,7 @@ struct TVHomeView: View {
                 items: section.items,
                 progressByItemId: (section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId)
                     ? continueWatchingByMetaId : [:],
+                calendarLabelsByItemId: section.id == TVHomeSection.calendarTodayId ? calendarToday.labels : [:],
                 collectionOriginsByItemId: collectionHome == nil && section.id == TVHomeSection.continueWatchingId
                     ? continueWatchingOrigins : [:],
                 watchedTitleKeys: watchedTitleKeys,
@@ -7184,7 +7203,9 @@ struct TVHomeView: View {
                 },
                 onSelect: { meta in
                     let cardKey = TVHomeCardIdentity.key(rowID: section.id, item: meta)
-                    if (section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId),
+                    if section.id == TVHomeSection.calendarTodayId {
+                        openCalendarTodayCard(meta, restoreCardID: cardKey)
+                    } else if (section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId),
                         let item = continueWatchingByMetaId[meta.id]
                     {
                         if item.isUpNextEntry && !item.hasAired && !item.isAiringToday {
@@ -7242,6 +7263,7 @@ struct TVHomeView: View {
     /// arrays or rebuilding work for every card.
     private var initialFocusContentSignature: String {
         "\(store.hasLoaded)_\(store.sectionsRevision)_\(continueWatchingVisible ? continueWatchingMetas.count : 0)_\(continueWatchingVisible ? upcomingMetas.count : 0)"
+            + "_\(homeCalendarToday ? calendarToday.metas.count : 0)"
     }
 
     /// Finds the saved card without assuming that section or card IDs contain
@@ -7262,7 +7284,8 @@ struct TVHomeView: View {
             if homeLayout == "Grid View",
                section.collectionFolders.isEmpty,
                section.id != TVHomeSection.continueWatchingId,
-               section.id != TVHomeSection.upcomingId {
+               section.id != TVHomeSection.upcomingId,
+               section.id != TVHomeSection.calendarTodayId {
                 let previewItems = section.items.prefix(TVHomeGridLayout.previewItemCount(rows: gridRows))
                 if let cardIndex = previewItems.firstIndex(where: {
                     TVHomeCardIdentity.key(rowID: section.id, item: $0) == focusKey
@@ -7287,7 +7310,8 @@ struct TVHomeView: View {
         for section in sections {
             guard section.collectionFolders.isEmpty,
                   section.id != TVHomeSection.continueWatchingId,
-                  section.id != TVHomeSection.upcomingId else {
+                  section.id != TVHomeSection.upcomingId,
+                  section.id != TVHomeSection.calendarTodayId else {
                 continue
             }
             let matchingIndex = section.items.firstIndex {
@@ -7365,6 +7389,7 @@ struct TVHomeView: View {
             && targetSection.collectionFolders.isEmpty
             && targetSection.id != TVHomeSection.continueWatchingId
             && targetSection.id != TVHomeSection.upcomingId
+            && targetSection.id != TVHomeSection.calendarTodayId
         let gridRowIndex = isGridCatalogSection
             ? location.cardIndex / TVHomeGridLayout.columns
             : 0
@@ -7448,6 +7473,16 @@ struct TVHomeView: View {
         }
     }
 
+    /// A Today card opens Details on its episode, as in the Calendar tab.
+    private func openCalendarTodayCard(_ meta: NuvioMeta, restoreCardID: String) {
+        guard let entry = calendarToday.entries[meta.id], let onOpenCalendarEntry else {
+            navigateToDetailsFromHome(id: meta.id, type: meta.type, restoreCardID: restoreCardID)
+            return
+        }
+        prepareForOverlayPresentation(restoreCardID: restoreCardID)
+        onOpenCalendarEntry(entry)
+    }
+
     private func playTitleFromHome(id: String, type: String) {
         prepareForOverlayPresentation()
         onPlayTitle(id, type)
@@ -7463,7 +7498,8 @@ struct TVHomeView: View {
     }
 
     private func effectiveTileShape(for section: TVHomeSection) -> CollectionTileShape {
-        if section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId {
+        if section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId
+            || section.id == TVHomeSection.calendarTodayId {
             return continueWatchingLandscape ? .landscape : .poster
         }
         if section.isCollectionRow {
@@ -7494,7 +7530,8 @@ struct TVHomeView: View {
             storeRevision: store.sectionsRevision,
             hideUnreleased: hideUnreleased,
             cwLandscape: continueWatchingLandscape,
-            landscapePosters: landscapePosters
+            landscapePosters: landscapePosters,
+            calendarToday: homeCalendarToday ? calendarToday.metas : []
         )
 
         if let cached = focusWork.cachedVisibleSections, cached.signature == signature {
@@ -7513,8 +7550,15 @@ struct TVHomeView: View {
             items: upcomingMetas,
             posterShape: continueWatchingLandscape ? "landscape" : "poster"
         )
+        let calendarTodaySection = TVHomeSection(
+            id: TVHomeSection.calendarTodayId,
+            title: L10n.string("calendar_home_today_row", fallback: "Today"),
+            items: calendarToday.metas,
+            posterShape: continueWatchingLandscape ? "landscape" : "poster"
+        )
         let pinnedSections = ((continueWatching.isEmpty || !continueWatchingVisible) ? [] : [resumeSection])
             + ((upcomingMetas.isEmpty || !continueWatchingVisible) ? [] : [upcomingSection])
+            + ((calendarToday.isEmpty || !homeCalendarToday) ? [] : [calendarTodaySection])
             + [localTitlesSection].compactMap { $0 }
             + jellyfinSections
         let allSections = collectionHome == nil ? pinnedSections + store.sections : store.sections
@@ -7591,7 +7635,8 @@ struct TVHomeView: View {
     /// the catalog order without duplicates.
     private var gridHeroItems: [NuvioMeta] {
         let catalogSections = visibleSections.filter {
-            $0.id != TVHomeSection.continueWatchingId && $0.id != TVHomeSection.upcomingId && $0.collectionFolders.isEmpty
+            $0.id != TVHomeSection.continueWatchingId && $0.id != TVHomeSection.upcomingId
+                && $0.id != TVHomeSection.calendarTodayId && $0.collectionFolders.isEmpty
         }
         let selectedIDs = (try? JSONDecoder().decode([String].self, from: heroCatalogsData)) ?? []
         let selectedSet = collectionHome == nil ? Set(selectedIDs) : Set<String>()
@@ -8433,7 +8478,7 @@ struct TVHomeView: View {
             loadMoreContinueWatchingIfNeeded(currentItem: currentItem)
             return
         }
-        if sectionId == TVHomeSection.upcomingId {
+        if sectionId == TVHomeSection.upcomingId || sectionId == TVHomeSection.calendarTodayId {
             return
         }
         guard let sectionIndex = store.sections.firstIndex(where: { $0.id == sectionId }) else { return }
@@ -8564,6 +8609,10 @@ struct TVHomeView: View {
         }
         if sectionId == TVHomeSection.upcomingId {
             scheduleContinueWatchingRefresh()
+            return
+        }
+        if sectionId == TVHomeSection.calendarTodayId {
+            CalendarViewModel.shared.load()
             return
         }
         guard let sectionIndex = store.sections.firstIndex(where: { $0.id == sectionId }) else { return }
@@ -9219,6 +9268,8 @@ private struct JellyfinHomeLibraryKey: Hashable {
 struct TVHomeSection: Identifiable {
     static let continueWatchingId = "continue_watching"
     static let upcomingId = "upcoming"
+    /// The Today row: the calendar's titles coming out today.
+    static let calendarTodayId = "calendar_today"
     static let localTitlesId = "local_titles"
     static let jellyfinId = "jellyfin_titles"
     static let jellyfinLibraryIdPrefix = "jellyfin_library_"

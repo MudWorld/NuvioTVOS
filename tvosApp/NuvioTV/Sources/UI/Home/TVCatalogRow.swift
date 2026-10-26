@@ -387,6 +387,9 @@ struct TVCatalogRow: View {
     let horizontalEdgeInset: CGFloat
     let items: [NuvioMeta]
     var progressByItemId: [String: ContinueWatchingItem] = [:]
+    /// The Today row's episode, time and picture per card, shown
+    /// like Up Next cards.
+    var calendarLabelsByItemId: [String: CalendarHomeToday.CardLabel] = [:]
     /// Supplied only by the main Home's Continue Watching row.
     var collectionOriginsByItemId: [String: CollectionOriginPresentation] = [:]
     var watchedTitleKeys: Set<String> = []
@@ -426,7 +429,8 @@ struct TVCatalogRow: View {
         if let explicitTileShape {
             return explicitTileShape
         }
-        if id == TVHomeSection.continueWatchingId || id == TVHomeSection.upcomingId {
+        if id == TVHomeSection.continueWatchingId || id == TVHomeSection.upcomingId
+            || id == TVHomeSection.calendarTodayId {
             return continueWatchingLandscape ? .landscape : .poster
         }
         if landscapePosters {
@@ -577,6 +581,14 @@ struct TVCatalogRow: View {
                 let cardKey = card.id
                 let shouldRequestInitialFocus = cardKey == initialFocusCardKey
                 let progressItem = progressByItemId[item.id]
+                let calendarLabel = calendarLabelsByItemId[item.id]
+                // Explicit types keep the card's long initializer quick to type-check.
+                let episodeText: String? = progressItem?.episodeLabel ?? calendarLabel?.episode
+                let episodeTitleText: String? = progressItem?.episodeDisplayTitle ?? calendarLabel?.episodeTitle
+                let upcomingArtworkURL: String? = id == TVHomeSection.upcomingId ? progressItem?.meta.backdropUrl : nil
+                let episodeArtworkURL: String? = progressItem?.episodeArtworkURL ?? upcomingArtworkURL ?? calendarLabel?.artworkURL
+                let isUpNext: Bool = progressItem?.isUpNextEntry == true || calendarLabel != nil
+                let upNextBadgeText: String? = progressItem?.upNextBadgeText ?? calendarLabel?.badge
                 let handleFocus: (NuvioMeta) -> Void = { focused in
                     let focusStarted = TVHomeDebugTrace.now()
                     let targetIndex = items.firstIndex(where: {
@@ -635,15 +647,15 @@ struct TVCatalogRow: View {
                     tileShape: item.tileShape != .poster ? item.tileShape : rowTileShape,
                     continueProgress: progressItem?.progress,
                     continueRemainingText: progressItem?.remainingText,
-                    continueEpisodeText: progressItem?.episodeLabel,
-                    continueEpisodeTitleText: progressItem?.episodeDisplayTitle,
-                    continueEpisodeArtworkURL: progressItem?.episodeArtworkURL
-                        ?? (id == TVHomeSection.upcomingId ? progressItem?.meta.backdropUrl : nil),
-                    continueIsUpNext: progressItem?.isUpNextEntry == true,
-                    continueUpNextBadgeText: progressItem?.upNextBadgeText,
+                    continueEpisodeText: episodeText,
+                    continueEpisodeTitleText: episodeTitleText,
+                    continueEpisodeArtworkURL: episodeArtworkURL,
+                    continueIsUpNext: isUpNext,
+                    continueUpNextBadgeText: upNextBadgeText,
                     collectionOrigin: id == TVHomeSection.continueWatchingId && progressItem?.isUpNextEntry == false
                         ? collectionOriginsByItemId[item.id] : nil,
-                    showsWatchedBadge: id != TVHomeSection.continueWatchingId && id != TVHomeSection.upcomingId,
+                    showsWatchedBadge: id != TVHomeSection.continueWatchingId && id != TVHomeSection.upcomingId
+                        && id != TVHomeSection.calendarTodayId,
                     shouldRequestInitialFocus: shouldRequestInitialFocus,
                     onInitialFocusRequested: shouldRequestInitialFocus ? onInitialFocusRequested : nil,
                     onFocus: handleFocus,
@@ -743,7 +755,8 @@ extension TVCatalogRow: Equatable {
               lhs.explicitTileShape == rhs.explicitTileShape,
               lhs.initialFocusCardKey == rhs.initialFocusCardKey,
               lhs.items.count == rhs.items.count,
-              lhs.progressByItemId.count == rhs.progressByItemId.count
+              lhs.progressByItemId.count == rhs.progressByItemId.count,
+              lhs.calendarLabelsByItemId == rhs.calendarLabelsByItemId
         else {
             return false
         }
