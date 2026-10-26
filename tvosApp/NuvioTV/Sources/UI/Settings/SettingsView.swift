@@ -16392,6 +16392,50 @@ private struct UsenetServerRow: View {
     }
 }
 
+/// How many connections to set and what more of them does, under the
+/// Connections stepper. Measured on a 4K remux: on a line that tops out at
+/// ~25 MB/s, 20 connections gave the same speed as 50 and jumps about a
+/// second faster, because each article shares the line with fewer others.
+private struct UsenetConnectionsGuide: View {
+    private var lines: [String] {
+        [
+            L10n.string(
+                "usenet_connections_guide_plan",
+                fallback: "Never more than your plan allows: the server turns the rest away and Nuvio keeps to the ones it accepted."
+            ),
+            L10n.string(
+                "usenet_connections_guide_line",
+                fallback: "More connections help only until your internet line is full. A good start is one per 10 Mbit/s of your line: 20 for 200 Mbit/s, 50 for 500 Mbit/s."
+            ),
+            L10n.string(
+                "usenet_connections_guide_more",
+                fallback: "Beyond that, the speed stays the same but each article arrives later, so jumps in large 4K files take longer."
+            ),
+            L10n.string(
+                "usenet_connections_guide_check",
+                fallback: "To check, turn on the Playback Debug Overlay: if the Usenet speed doesn't rise with more connections, go back down."
+            ),
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(lines, id: \.self) { line in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("•")
+                    Text(line)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(.system(size: 17, weight: .medium))
+        .foregroundColor(.white.opacity(0.56))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 private struct UsenetServerEditSheet: View {
     let server: UsenetSavedServer?
     let accentColor: Color
@@ -16464,13 +16508,17 @@ private struct UsenetServerEditSheet: View {
                         )
                         SettingsStepperRow(
                             title: L10n.string("usenet_connections", fallback: "Connections"),
-                            subtitle: L10n.string("usenet_connections_subtitle", fallback: "How many your plan allows; 5 to 10 is plenty for streaming"),
+                            subtitle: L10n.string(
+                                "usenet_connections_subtitle",
+                                fallback: "At most what your plan allows (up to 100)."
+                            ),
                             value: $connections,
-                            range: 1...30,
+                            range: 1...UsenetServerConfig.maxConnectionsLimit,
                             step: 1,
                             suffix: "",
                             accentColor: accentColor
                         )
+                        UsenetConnectionsGuide()
                         SettingsToggleRow(
                             title: L10n.string("usenet_enabled", fallback: "Use This Server"),
                             subtitle: "",

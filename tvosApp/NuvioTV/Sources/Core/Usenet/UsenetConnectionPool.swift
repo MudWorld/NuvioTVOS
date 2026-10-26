@@ -99,14 +99,24 @@ struct UsenetWaitQueue<Element> {
 /// Each server gets up to its `maxConnections`. An article is tried on the
 /// servers in order: a missing article (430) moves on to the next server, a
 /// dropped connection is replaced and retried, a rejected login stops.
+/// A server that turns away one more connection while others are open has
+/// reached the plan's limit: the stream keeps to the connections it has.
 actor UsenetConnectionPool {
     private struct ServerState {
         let config: UsenetServerConfig
+        /// Connections this stream may open: `maxConnections`, lowered when
+        /// the server turns one away.
+        var limit: Int
         var idle: [UsenetNNTPConnection] = []
         var open = 0
         /// Each waiter is handed a released connection directly, or nil when
         /// a slot frees up (or the pool closes) and it should try again.
         var waiters = UsenetWaitQueue<CheckedContinuation<UsenetNNTPConnection?, Never>>()
+
+        init(config: UsenetServerConfig) {
+            self.config = config
+            self.limit = config.maxConnections
+        }
     }
 
     private var servers: [ServerState]
@@ -197,7 +207,11 @@ actor UsenetConnectionPool {
     struct Stats: Equatable, Sendable {
         var busyConnections = 0
         var openConnections = 0
+        /// What the servers accept: the settings, or less once a server
+        /// turned a connection away.
         var totalConnections = 0
+        /// What the settings ask for.
+        var configuredConnections = 0
         /// Articles a later server had after the first one didn't.
         var fallbackArticles = 0
         var primaryHost = ""
@@ -208,7 +222,8 @@ actor UsenetConnectionPool {
         Stats(
             busyConnections: servers.reduce(0) { $0 + max(0, $1.open - $1.idle.count) },
             openConnections: servers.reduce(0) { $0 + $1.open },
-            totalConnections: totalConnections,
+            totalConnections: servers.reduce(0) { $0 + $1.limit },
+            configuredConnections: totalConnections,
             fallbackArticles: fallbackArticles,
             primaryHost: servers.first?.config.host ?? "",
             serverCount: servers.count
@@ -226,6 +241,10 @@ actor UsenetConnectionPool {
     private func run(messageID: String, statOnly: Bool, urgent: Bool,
                      onConnected: (@Sendable () -> Void)? = nil) async throws -> Answer {
         var authError: UsenetNNTPError?
+        // Every server turning the connection away (all connections in use,
+        // maybe by another device) is not a missing article.
+        var refusal: UsenetNNTPError?
+        var answered = false
         for index in servers.indices {
             var attempt = 0
             while attempt < 3 {
@@ -236,6 +255,7 @@ actor UsenetConnectionPool {
                     connection = try await acquire(index, urgent: urgent, onConnected: onConnected)
                 } catch let error as UsenetNNTPError {
                     if case .authenticationFailed = error { authError = error; break }
+                    if case .badGreeting = error { refusal = error; break }
                     if error.isTransient, attempt < 3 { continue }
                     break
                 }
@@ -244,6 +264,7 @@ actor UsenetConnectionPool {
                         let found = try await connection.stat(messageID: messageID)
                         release(connection, to: index)
                         if found { return .exists }
+                        answered = true
                         attempt = 3          // next server
                     } else {
                         let body = try await connection.fetchBody(messageID: messageID)
@@ -255,6 +276,7 @@ actor UsenetConnectionPool {
                     switch error {
                     case .articleUnavailable:
                         release(connection, to: index)
+                        answered = true
                         attempt = 3          // next server
                     case .authenticationFailed:
                         discard(connection, from: index)
@@ -272,6 +294,9 @@ actor UsenetConnectionPool {
         }
         if let authError {
             throw UsenetError.serverRejected(Self.describe(authError))
+        }
+        if let refusal, !answered {
+            throw UsenetError.serverRejected(Self.describe(refusal))
         }
         return .missing
     }
@@ -304,7 +329,7 @@ actor UsenetConnectionPool {
                 onConnected?()
                 return connection
             }
-            if servers[index].open < servers[index].config.maxConnections {
+            if servers[index].open < servers[index].limit {
                 servers[index].open += 1
                 onConnected?()
                 let connection = UsenetNNTPConnection(config: servers[index].config)
@@ -313,6 +338,16 @@ actor UsenetConnectionPool {
                     return connection
                 } catch {
                     servers[index].open -= 1
+                    if let limit = Self.limitAfterRefusal(error, open: servers[index].open, limit: servers[index].limit) {
+                        // The plan's limit: wait for one of the connections it accepted.
+                        if limit < servers[index].limit {
+                            let host = servers[index].config.host
+                            let configured = servers[index].config.maxConnections
+                            usenetLog.info("usenet: \(host, privacy: .public) turned away a connection, using \(limit) of \(configured)")
+                        }
+                        servers[index].limit = limit
+                        continue
+                    }
                     wakeOne(index)
                     throw error
                 }
@@ -333,6 +368,24 @@ actor UsenetConnectionPool {
             }
             onConnected?()
             return handed
+        }
+    }
+
+    /// What a new connection the server turned away means. While other
+    /// connections of this stream are open (or still opening), a refusal at
+    /// the greeting or the login (providers differ) means the plan's
+    /// connection limit is reached: returns the limit to keep to, the
+    /// connections still open. A refusal with none left to wait for is a real
+    /// failure, such as a wrong password: nil. Refusals at the greeting
+    /// arrive before the accepted connections finish logging in, so "open"
+    /// counts those too.
+    static func limitAfterRefusal(_ error: Error, open: Int, limit: Int) -> Int? {
+        guard open > 0, let error = error as? UsenetNNTPError else { return nil }
+        switch error {
+        case .badGreeting, .authenticationFailed:
+            return min(limit, open)
+        default:
+            return nil
         }
     }
 
