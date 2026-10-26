@@ -3750,7 +3750,7 @@ class PlayerViewModel: ObservableObject {
            let activeMeta,
            time.current > 0,
            time.duration > 0,
-           RemoteTrackingState.isProgressSourceAuthenticated {
+           RemoteTrackingState.isProgressSourceAuthenticated || hasActiveScrobbleServices {
             reportTraktProgress(
                 meta: activeMeta,
                 playbackTime: time,
