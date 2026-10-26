@@ -590,7 +590,9 @@ enum PlaybackThumbnailSourceFallback {
     private static func supportsIndependentPreview(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(),
               ["file", "http", "https"].contains(scheme),
-              !isCacheProxyURL(url), !isKnownHLSURL(url) else { return false }
+              !isCacheProxyURL(url), !isKnownHLSURL(url),
+              // Usenet: every read downloads articles and moves the read-ahead.
+              !UsenetStreamServer.isStreamURL(url) else { return false }
         return !["iso", "img", "udf"].contains(url.pathExtension.lowercased())
     }
 }

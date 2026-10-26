@@ -2738,6 +2738,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     private func usesBoundedProgressiveScrubPreview(_ context: PlaybackThumbnailSourceContext?) -> Bool {
         guard let context, context.generation == loadGeneration, !isAwaitingEngineLoad else { return false }
+        // Usenet: previews only from what playback already buffered.
+        guard !UsenetStreamServer.isStreamURL(context.playbackURL) else { return false }
         return Self.shouldUseBoundedProgressiveScrubPreview(
             requestIsLive: context.isLive,
             engineIsLive: engine.isLive,
@@ -4614,8 +4616,12 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         // CDN rate-limiting/throttling on both loopback and direct remote streams.
         let isLocalPlaybackCache = request.videoURL.host == "127.0.0.1"
             && request.videoURL.path.hasPrefix("/stream/")
+        // The local Usenet stream is loopback too, but every read downloads
+        // articles: it is played like a remote source (one held connection)
+        // and never read for thumbnails.
+        let isUsenetStream = UsenetStreamServer.isStreamURL(request.videoURL)
         self.isLocalPlaybackCache = isLocalPlaybackCache
-        self.isRemoteStream = isRemote || isLocalPlaybackCache
+        self.isRemoteStream = isRemote || isLocalPlaybackCache || isUsenetStream
         let streamKey = request.canonicalMediaKey
             ?? TrickplayDiskCache.streamKey(for: request.videoURL.absoluteString)
         self.currentStreamKey = streamKey
@@ -4744,8 +4750,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             // subtitle decoders keep their normal styled/plain cue path.
             preserveASSMarkup: true,
             prepareNativeSubtitles: false,
-            maxConcurrentSourceRequests: isRemote ? 1 : nil,
-            heldSourceConnection: isLocalPlaybackCache || isRemote,
+            maxConcurrentSourceRequests: isRemote || isUsenetStream ? 1 : nil,
+            heldSourceConnection: isLocalPlaybackCache || isRemote || isUsenetStream,
             preferredAudioLanguages: request.preferredAudioLanguages,
             preferredSubtitleLanguages: request.preferredSubtitleLanguages,
             externalSubtitles: externalRegistration.tracks,

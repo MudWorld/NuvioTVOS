@@ -714,6 +714,15 @@ final class UsenetSourceTests: XCTestCase {
         XCTAssertEqual(UsenetStreamSession.priority(of: 5, playhead: 10), .readAhead)
     }
 
+    func testUsenetStreamURLsAreNotTakenForTheLocalCache() {
+        XCTAssertTrue(UsenetStreamServer.isStreamURL(URL(string: "http://127.0.0.1:52011/usenet/abc/video.mkv")))
+        XCTAssertTrue(UsenetStreamServer.isStreamURL(URL(string: "http://localhost:80/usenet/x/video.mp4")))
+        // The hybrid cache's own proxy and remote hosts are something else.
+        XCTAssertFalse(UsenetStreamServer.isStreamURL(URL(string: "http://127.0.0.1:52011/stream/abc")))
+        XCTAssertFalse(UsenetStreamServer.isStreamURL(URL(string: "https://example.com/usenet/abc/video.mkv")))
+        XCTAssertFalse(UsenetStreamServer.isStreamURL(nil))
+    }
+
     func testSpeedLimitSetting() {
         let store = UserDefaults(suiteName: "usenet-speed-\(UUID().uuidString)")!
         XCTAssertEqual(UsenetSettings.speedLimitMbps(store: store), 0)

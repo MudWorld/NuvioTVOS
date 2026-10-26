@@ -11,8 +11,7 @@ actor UsenetStreamServer {
     private var listener: NWListener?
     private var task: Task<Void, Never>?
 
-    /// The newest playback read; an older one stops when the player seeks.
-    private var playbackGeneration = 0
+    /// The newest playback read: only it moves the read-ahead.
     private var playbackConnection: NWConnection?
     private var lastOffset: Int64 = -1
 
@@ -166,26 +165,25 @@ actor UsenetStreamServer {
         try await sendHead(connection, status, headers)
         guard method != "HEAD" else { return true }
 
-        // A read far from the last one is a seek: let it take over, so the old
-        // read doesn't keep pulling articles the player no longer wants.
+        // The newest read takes over playback and moves the read-ahead; an
+        // older one is served while the player still reads it but no longer
+        // moves the read-ahead. It is never closed from here: closing it made
+        // the player reconnect at the old position, which then took over again
+        // (a seek bouncing between the old and the new spot).
         // Reads of the last 16 MB are index lookups (MKV Cues) next to playback,
-        // not seeks, so they never take over.
+        // so they never take over.
         let isTailRead = range.lowerBound >= max(0, fileLength - 16 * 1024 * 1024) && lastOffset >= 0
-        let isSeek = !isTailRead && (lastOffset < 0 || abs(range.lowerBound - lastOffset) > 4 * 1024 * 1024)
-        if isSeek {
-            if let stale = playbackConnection, stale !== connection { stale.cancel() }
+        if !isTailRead {
             playbackConnection = connection
-            playbackGeneration &+= 1
+            lastOffset = range.lowerBound
         }
-        let generation = playbackGeneration
-        if !isTailRead { lastOffset = range.lowerBound }
 
         var position = range.lowerBound
         while position <= range.upperBound {
             try Task.checkCancellation()
-            if connection === playbackConnection, generation != playbackGeneration { return false }
             let wanted = Int(min(Int64(Self.chunkBytes), range.upperBound - position + 1))
-            let chunk = try await session.read(offset: position, maxLength: wanted, updatesPlayhead: !isTailRead)
+            let isPlayback = !isTailRead && connection === playbackConnection
+            let chunk = try await session.read(offset: position, maxLength: wanted, updatesPlayhead: isPlayback)
             guard !chunk.isEmpty else { throw NetworkIO.Failure.closed }
             try await NetworkIO.send(connection, chunk)
             position += Int64(chunk.count)
@@ -199,6 +197,15 @@ actor UsenetStreamServer {
         for (key, value) in headers.sorted(by: { $0.key < $1.key }) { text += "\(key): \(value)\r\n" }
         text += "\r\n"
         try await NetworkIO.send(connection, Data(text.utf8))
+    }
+
+    /// A playback URL of this server (loopback, `/usenet/…`). Players treat
+    /// other loopback URLs as a local cache that is cheap to read anywhere;
+    /// this one fetches articles for every read.
+    nonisolated static func isStreamURL(_ url: URL?) -> Bool {
+        guard let url, let host = url.host?.lowercased(),
+              ["127.0.0.1", "localhost", "::1"].contains(host) else { return false }
+        return url.path.hasPrefix("/usenet/")
     }
 
     nonisolated static func mimeType(for name: String) -> String {
