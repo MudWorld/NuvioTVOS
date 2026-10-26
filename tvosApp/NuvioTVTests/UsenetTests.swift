@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import XCTest
 @testable import NuvioTV
 
@@ -714,6 +715,29 @@ final class UsenetSourceTests: XCTestCase {
         XCTAssertEqual(UsenetStreamSession.priority(of: 5, playhead: 10), .readAhead)
     }
 
+    func testNextWindowCoversSecondsOfVideo() {
+        let part: Int64 = 716_800
+        // Unknown bitrate: the fixed few articles.
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: nil, partSize: part, limit: 54), 4)
+        // A 60 GB, two-hour 4K remux: about 8.3 MB a second, 4 s ≈ 47 articles.
+        let remux = 59.55e9 / 7200
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: remux, partSize: part, limit: 54), 47)
+        // Never past the read-ahead, never under the fixed few.
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: remux, partSize: part, limit: 20), 20)
+        XCTAssertEqual(UsenetStreamSession.nextWindow(bytesPerSecond: 2e9 / 3600, partSize: part, limit: 54), 4)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 57, playhead: 10, next: 47), .next)
+        XCTAssertEqual(UsenetStreamSession.priority(of: 58, playhead: 10, next: 47), .readAhead)
+    }
+
+    func testUsenetStreamURLsAreNotTakenForTheLocalCache() {
+        XCTAssertTrue(UsenetStreamServer.isStreamURL(URL(string: "http://127.0.0.1:52011/usenet/abc/video.mkv")))
+        XCTAssertTrue(UsenetStreamServer.isStreamURL(URL(string: "http://localhost:80/usenet/x/video.mp4")))
+        // The hybrid cache's own proxy and remote hosts are something else.
+        XCTAssertFalse(UsenetStreamServer.isStreamURL(URL(string: "http://127.0.0.1:52011/stream/abc")))
+        XCTAssertFalse(UsenetStreamServer.isStreamURL(URL(string: "https://example.com/usenet/abc/video.mkv")))
+        XCTAssertFalse(UsenetStreamServer.isStreamURL(nil))
+    }
+
     func testSpeedLimitSetting() {
         let store = UserDefaults(suiteName: "usenet-speed-\(UUID().uuidString)")!
         XCTAssertEqual(UsenetSettings.speedLimitMbps(store: store), 0)
@@ -724,6 +748,16 @@ final class UsenetSourceTests: XCTestCase {
         var stats = UsenetStreamStats()
         stats.speedLimitMbps = 50
         XCTAssertTrue(stats.connectionLine.contains("max 50 Mbit/s"))
+    }
+
+    func testStatsShowWhatTheServerAccepted() {
+        var stats = UsenetStreamStats()
+        stats.busyConnections = 49
+        stats.totalConnections = 50
+        stats.configuredConnections = 50
+        XCTAssertTrue(stats.connectionLine.contains("49/50 conn ·"))
+        stats.configuredConnections = 60
+        XCTAssertTrue(stats.connectionLine.contains("49/50 conn (60 set)"))
     }
 
     func testStatsSummary() {
@@ -824,7 +858,7 @@ final class UsenetServerTests: XCTestCase {
         XCTAssertEqual(plain.maxConnections, UsenetServerConfig.defaultConnections)
         XCTAssertEqual(UsenetServerConfig(url: "snews://news.example.com")?.port, 563)
         XCTAssertNil(UsenetServerConfig(url: "https://news.example.com"))
-        XCTAssertEqual(UsenetServerConfig(url: "nntps://h.example/500")?.maxConnections, 50)
+        XCTAssertEqual(UsenetServerConfig(url: "nntps://h.example/500")?.maxConnections, 100)
     }
 
     func testServerURLRoundTrip() throws {
@@ -881,5 +915,215 @@ final class UsenetServerTests: XCTestCase {
         XCTAssertEqual(UsenetSettings.servers(for: spec, store: store).map(\.host), ["addon.example", "mine.example"])
         store.set(true, forKey: UsenetSettings.preferOwnServersKey)
         XCTAssertEqual(UsenetSettings.servers(for: spec, store: store).map(\.host), ["mine.example"])
+    }
+}
+
+// MARK: - Connection limit
+
+/// A tiny NNTP server on 127.0.0.1 that lets in the first `allowed`
+/// connections and turns every later one away, the way a provider answers at
+/// the plan's connection limit: some at the greeting, some at the login.
+private final class FakeNNTPServer: @unchecked Sendable {
+    enum Refusal { case greeting, login }
+
+    private let allowed: Int
+    private let refusal: Refusal
+    private let queue = DispatchQueue(label: "nuvio.tests.fake-nntp")
+    private let lock = NSLock()
+    private var listener: NWListener?
+    private var connections: [NWConnection] = []
+    private var accepted = 0
+    private var turnedAway = 0
+
+    init(allowed: Int, refusal: Refusal) {
+        self.allowed = allowed
+        self.refusal = refusal
+    }
+
+    var counts: (accepted: Int, turnedAway: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (accepted, turnedAway)
+    }
+
+    func start() async throws -> Int {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+        let listener = try NWListener(using: parameters)
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
+        let gate = OnceGate<Bool>()
+        let ready = await withCheckedContinuation { continuation in
+            gate.arm(continuation)
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready: gate.resume(true)
+                case .failed, .cancelled: gate.resume(false)
+                default: break
+                }
+            }
+            listener.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + 5) { gate.resume(false) }
+        }
+        guard ready, let port = listener.port?.rawValue else { throw UsenetNNTPError.notConnected }
+        return Int(port)
+    }
+
+    func stop() {
+        listener?.cancel()
+        lock.lock()
+        let open = connections
+        connections = []
+        lock.unlock()
+        open.forEach { $0.cancel() }
+    }
+
+    private func accept(_ connection: NWConnection) {
+        lock.lock()
+        connections.append(connection)
+        let admitted = accepted < allowed
+        if admitted { accepted += 1 } else { turnedAway += 1 }
+        lock.unlock()
+
+        connection.start(queue: queue)
+        if !admitted, refusal == .greeting {
+            send("502 Too many connections\r\n", on: connection, thenClose: true)
+            return
+        }
+        send("200 Fake news server ready\r\n", on: connection)
+        receive(on: connection, admitted: admitted, buffer: Data())
+    }
+
+    private func receive(on connection: NWConnection, admitted: Bool, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            while let end = buffer.range(of: Data("\r\n".utf8)) {
+                let line = String(decoding: buffer[buffer.startIndex..<end.lowerBound], as: UTF8.self)
+                buffer = Data(buffer[end.upperBound...])
+                self.answer(line, on: connection, admitted: admitted)
+            }
+            if error == nil, !isComplete { self.receive(on: connection, admitted: admitted, buffer: buffer) }
+        }
+    }
+
+    private func answer(_ line: String, on connection: NWConnection, admitted: Bool) {
+        if line.hasPrefix("AUTHINFO USER") {
+            send("381 Password required\r\n", on: connection)
+        } else if line.hasPrefix("AUTHINFO PASS") {
+            if admitted {
+                send("281 Welcome\r\n", on: connection)
+            } else {
+                send("481 Too many connections\r\n", on: connection, thenClose: true)
+            }
+        } else if line.hasPrefix("BODY") {
+            // Slow enough that the pool wants more connections than it gets.
+            queue.asyncAfter(deadline: .now() + 0.05) {
+                self.send("222 0 body follows\r\nfake article line\r\n.\r\n", on: connection)
+            }
+        } else {
+            send("500 What?\r\n", on: connection)
+        }
+    }
+
+    private func send(_ text: String, on connection: NWConnection, thenClose: Bool = false) {
+        connection.send(content: Data(text.utf8), completion: .contentProcessed { _ in
+            if thenClose { connection.cancel() }
+        })
+    }
+}
+
+final class UsenetPoolTests: XCTestCase {
+    private enum Fetched: Equatable {
+        case body
+        case missing
+        case rejected
+        case failed(String)
+    }
+
+    private actor Results {
+        private(set) var all: [Fetched] = []
+        func add(_ result: Fetched) { all.append(result) }
+    }
+
+    /// Starts `count` fetches at once and collects how each ended. Waits with
+    /// an expectation, so a fetch stuck waiting for a connection fails the
+    /// test instead of hanging it.
+    private func fetchAll(_ count: Int, from pool: UsenetConnectionPool) async -> [Fetched] {
+        let results = Results()
+        let done = expectation(description: "\(count) fetches")
+        done.expectedFulfillmentCount = count
+        for index in 0..<count {
+            Task {
+                let result: Fetched
+                do {
+                    switch try await pool.fetch(messageID: "part\(index)@test", priority: .playback) {
+                    case .body: result = .body
+                    case .missing: result = .missing
+                    }
+                } catch UsenetError.serverRejected {
+                    result = .rejected
+                } catch {
+                    result = .failed(String(describing: error))
+                }
+                await results.add(result)
+                done.fulfill()
+            }
+        }
+        await fulfillment(of: [done], timeout: 30)
+        return await results.all
+    }
+
+    private func pool(port: Int, login: Bool, connections: Int) -> UsenetConnectionPool {
+        UsenetConnectionPool(servers: [UsenetServerConfig(
+            host: "127.0.0.1", port: port, useSSL: false,
+            username: login ? "user" : nil, password: login ? "secret" : nil,
+            maxConnections: connections
+        )])
+    }
+
+    func testRefusalWhileOthersAreOpenMeansThePlanLimit() {
+        XCTAssertEqual(UsenetConnectionPool.limitAfterRefusal(UsenetNNTPError.badGreeting(502), open: 3, limit: 6), 3)
+        XCTAssertEqual(UsenetConnectionPool.limitAfterRefusal(UsenetNNTPError.authenticationFailed(481), open: 2, limit: 6), 2)
+        XCTAssertEqual(UsenetConnectionPool.limitAfterRefusal(UsenetNNTPError.badGreeting(502), open: 9, limit: 4), 4)
+        // Nothing left to wait for: a real failure (a wrong password, say).
+        XCTAssertNil(UsenetConnectionPool.limitAfterRefusal(UsenetNNTPError.authenticationFailed(481), open: 0, limit: 6))
+        // A network problem is not a refusal.
+        XCTAssertNil(UsenetConnectionPool.limitAfterRefusal(UsenetNNTPError.timeout, open: 3, limit: 6))
+        XCTAssertNil(UsenetConnectionPool.limitAfterRefusal(UsenetNNTPError.connectionClosed, open: 3, limit: 6))
+    }
+
+    func testPoolKeepsToTheConnectionsTheServerLetsIn() async throws {
+        for refusal in [FakeNNTPServer.Refusal.greeting, .login] {
+            let server = FakeNNTPServer(allowed: 2, refusal: refusal)
+            let port = try await server.start()
+            let pool = pool(port: port, login: refusal == .login, connections: 6)
+
+            let results = await fetchAll(12, from: pool)
+            let stats = await pool.stats()
+            await pool.shutdown()
+            server.stop()
+
+            XCTAssertEqual(results, Array(repeating: .body, count: 12), "\(refusal): no article may be lost to a refused connection")
+            XCTAssertEqual(stats.totalConnections, 2, "\(refusal)")
+            XCTAssertEqual(stats.configuredConnections, 6, "\(refusal)")
+            XCTAssertEqual(server.counts.accepted, 2, "\(refusal)")
+            XCTAssertEqual(server.counts.turnedAway, 4, "\(refusal): no new connection after the limit was found")
+        }
+    }
+
+    func testEveryConnectionRefusedIsAnErrorNotAMissingArticle() async throws {
+        for refusal in [FakeNNTPServer.Refusal.greeting, .login] {
+            let server = FakeNNTPServer(allowed: 0, refusal: refusal)
+            let port = try await server.start()
+            let pool = pool(port: port, login: refusal == .login, connections: 2)
+
+            let results = await fetchAll(4, from: pool)
+            await pool.shutdown()
+            server.stop()
+
+            XCTAssertEqual(results, Array(repeating: .rejected, count: 4), "\(refusal)")
+        }
     }
 }

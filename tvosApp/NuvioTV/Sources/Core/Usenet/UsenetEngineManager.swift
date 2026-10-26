@@ -5,7 +5,10 @@ import Combine
 struct UsenetStreamStats: Equatable, Sendable {
     var downloadRate: Double = 0
     var busyConnections = 0
+    /// What the servers accept, fewer than `configuredConnections` once a
+    /// server turned a connection away.
     var totalConnections = 0
+    var configuredConnections = 0
     var bufferedAheadBytes: Int64 = 0
     var cacheHitRate: Double?
     var missingArticles = 0
@@ -30,7 +33,9 @@ struct UsenetStreamStats: Equatable, Sendable {
     /// HUD line 1: where the articles come from and how fast.
     var connectionLine: String {
         let host = server.isEmpty ? "Usenet" : server + (serverCount > 1 ? " +\(serverCount - 1)" : "")
-        var parts = [host, "\(connectionsText) conn", downloadRateFormatted]
+        var connections = "\(connectionsText) conn"
+        if configuredConnections > totalConnections { connections += " (\(configuredConnections) set)" }
+        var parts = [host, connections, downloadRateFormatted]
         if speedLimitMbps > 0 { parts.append("max \(speedLimitMbps) Mbit/s") }
         return parts.joined(separator: " · ")
     }
@@ -67,6 +72,8 @@ final class UsenetEngineManager: ObservableObject {
     private var statsTask: Task<Void, Never>?
     private(set) var activeStreamURL: URL?
     private var generation = 0
+    /// The duration last passed to the session.
+    private var reportedDuration: Double = 0
 
     private init() {}
 
@@ -112,6 +119,7 @@ final class UsenetEngineManager: ObservableObject {
             self.activeStreamURL = url
             activeStats = UsenetStreamStats(
                 totalConnections: pool.totalConnections,
+                configuredConnections: pool.totalConnections,
                 server: servers.first?.host ?? "",
                 serverCount: servers.count,
                 fileName: source.name,
@@ -168,12 +176,22 @@ final class UsenetEngineManager: ObservableObject {
         self.server = nil
         self.pool = nil
         activeStreamURL = nil
+        reportedDuration = 0
         isStreaming = false
         activeStats = UsenetStreamStats()
         damagedStreamURL = nil
         damagedGeneration = nil
         await server?.stop()
         await session?.stop()
+    }
+
+    /// The player's duration for the playing Usenet stream, once (and when it
+    /// changes): the session sizes its read-ahead in seconds of video.
+    func reportDuration(_ duration: Double, playbackURL: String?) {
+        guard let session, let activeStreamURL, playbackURL == activeStreamURL.absoluteString,
+              duration.isFinite, duration > 60, abs(duration - reportedDuration) > 1 else { return }
+        reportedDuration = duration
+        Task { await session.setDuration(duration) }
     }
 
     private func reportDamage(generation: Int) {
@@ -233,6 +251,7 @@ final class UsenetEngineManager: ObservableObject {
                 stats.downloadRate = rate
                 stats.busyConnections = poolStats.busyConnections
                 stats.totalConnections = poolStats.totalConnections
+                stats.configuredConnections = poolStats.configuredConnections
                 stats.fallbackArticles = poolStats.fallbackArticles
                 stats.bufferedAheadBytes = sessionStats.bufferedAheadBytes
                 stats.missingArticles = sessionStats.missingArticles

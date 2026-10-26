@@ -159,6 +159,8 @@ actor UsenetStreamSession {
     private var consecutiveMissing = 0
     private var reportedDamage = false
     private let onDamaged: @Sendable () -> Void
+    /// Bytes of video per second, once the player knows the duration.
+    private var bytesPerSecond: Double?
 
     init(source: UsenetStreamSource, pool: UsenetConnectionPool, profile: UsenetMemoryProfile,
          onDamaged: @escaping @Sendable () -> Void = {}) {
@@ -263,6 +265,13 @@ actor UsenetStreamSession {
         }
         snapshot.bufferedAheadBytes = ahead
         return snapshot
+    }
+
+    /// The video's length, from the player: sizes the read-ahead that the
+    /// speed cap never holds back in seconds of video.
+    func setDuration(_ seconds: Double) {
+        guard seconds.isFinite, seconds > 60, totalSize > 0 else { return }
+        bytesPerSecond = Double(totalSize) / seconds
     }
 
     func stop() async {
@@ -462,11 +471,26 @@ actor UsenetStreamSession {
     private var prefetchSlots: Int { max(1, pool.totalConnections - 1) }
 
     /// Read-ahead this close to the playhead is needed in a moment, so the
-    /// speed cap never holds it back.
+    /// speed cap never holds it back: `nextSeconds` of video once the bitrate
+    /// is known (dozens of articles in a 4K remux), never fewer than
+    /// `nextArticles`.
     static let nextArticles = 4
+    static let nextSeconds: Double = 4
 
-    static func priority(of index: Int, playhead: Int) -> UsenetConnectionPool.FetchPriority {
-        index > playhead && index - playhead <= nextArticles ? .next : .readAhead
+    static func nextWindow(bytesPerSecond: Double?, partSize: Int64, limit: Int) -> Int {
+        guard let bytesPerSecond, bytesPerSecond > 0 else { return nextArticles }
+        let articles = Int((bytesPerSecond * nextSeconds / Double(max(1, partSize))).rounded(.up))
+        return max(nextArticles, min(limit, articles))
+    }
+
+    private var nextWindow: Int {
+        Self.nextWindow(bytesPerSecond: bytesPerSecond, partSize: layouts.first?.partSize ?? 716_800,
+                        limit: readAheadSegments)
+    }
+
+    static func priority(of index: Int, playhead: Int,
+                         next: Int = UsenetStreamSession.nextArticles) -> UsenetConnectionPool.FetchPriority {
+        index > playhead && index - playhead <= next ? .next : .readAhead
     }
 
     private func noteRead(_ index: Int) {
@@ -483,7 +507,7 @@ actor UsenetStreamSession {
             // Read-ahead kept for the next articles may still wait for the
             // speed cap: they are needed now. (One already waiting for a
             // connection keeps its place in line.)
-            let nextLast = min(articleCount - 1, index + Self.nextArticles)
+            let nextLast = min(articleCount - 1, index + nextWindow)
             if index + 1 <= nextLast {
                 for next in (index + 1)...nextLast where prefetching.contains(next) {
                     if let promoted = promote(next, to: .next, onlyWhileWaitingForCap: true) {
@@ -506,7 +530,7 @@ actor UsenetStreamSession {
 
     private func startPrefetch(_ index: Int) {
         guard cache[index] == nil, inflight[index] == nil else { return }
-        let task = startFetch(index, priority: Self.priority(of: index, playhead: playhead))
+        let task = startFetch(index, priority: Self.priority(of: index, playhead: playhead, next: nextWindow))
         prefetching.insert(index)
         watchPrefetch(index, task)
     }
