@@ -14,9 +14,6 @@ struct PlayerSubtitleOverlay: View {
     private var textSize: CGFloat {
         min(max(CGFloat(style.textSize) / 100 * 55, 2), 125)
     }
-    private var textColor: Color { Color(hex: style.textColorHex) }
-    private var outlineColor: Color { Color(hex: style.outlineColorHex) }
-    private var textOpacity: Double { Double(min(max(style.textOpacity, 0), 100)) / 100 }
     private var outlineWidth: CGFloat {
         guard style.outlineEnabled else { return 0 }
         let configured = CGFloat(min(max(style.outlineWidth, 1), 8))
@@ -25,7 +22,10 @@ struct PlayerSubtitleOverlay: View {
     private var isTopAligned: Bool { style.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame }
     private var verticalOffset: CGFloat { CGFloat(22 + min(max(style.bottomOffset, 0), 160)) }
     private var horizontalMargin: CGFloat { CGFloat(min(max(style.horizontalMargin, 0), 200)) }
-    private var fontWeight: Font.Weight { style.bold ? .bold : .regular }
+
+    private func textAppearance(alignment: TextAlignment) -> SubtitleTextAppearance {
+        subtitleTextAppearance(style: style, textSize: textSize, outlineWidth: outlineWidth, alignment: alignment)
+    }
 
     private var evaluationTime: Double {
         playback.sourceTime - subtitleDelaySeconds
@@ -172,45 +172,15 @@ struct PlayerSubtitleOverlay: View {
     }
 
     private func outlinedText(_ string: String, alignment: TextAlignment) -> some View {
-        Text(string)
-            .font(style.font(size: textSize, weight: fontWeight))
-            .foregroundStyle(textColor.opacity(textOpacity))
-            .tracking(CGFloat(style.subSpacing))
-            .multilineTextAlignment(alignment)
-            .subtitleOutline(color: outlineColor, width: outlineWidth)
+        let appearance = textAppearance(alignment: alignment)
+        return OutlinedSubtitleText(SubtitleAttributedText.make(plain: string, appearance: appearance), appearance: appearance)
             .subtitleBackground(style: style)
     }
 
     private func outlinedRichText(_ runs: [SubtitleTextRun], alignment: TextAlignment) -> some View {
-        runs.reduce(Text("")) { text, run in
-            text + styledText(run)
-        }
-        .multilineTextAlignment(alignment)
-        .subtitleOutline(color: outlineColor, width: outlineWidth)
-        .subtitleBackground(style: style)
-    }
-
-    private func styledText(_ run: SubtitleTextRun) -> Text {
-        let size = run.fontSize.map { textSize * CGFloat($0) / 16 } ?? textSize
-        let font = run.fontName.map { Font.custom($0, size: size) }
-            ?? style.font(size: size, weight: run.isBold || style.bold ? .bold : .regular)
-        var text = Text(run.text)
-            .font(font.weight(run.isBold || style.bold ? .bold : .regular))
-            .foregroundColor(runColor(run).opacity(textOpacity))
-            .tracking(CGFloat(style.subSpacing))
-        if run.isItalic { text = text.italic() }
-        if run.isUnderlined { text = text.underline() }
-        if run.isStruckThrough { text = text.strikethrough() }
-        return text
-    }
-
-    private func runColor(_ run: SubtitleTextRun) -> Color {
-        guard let c = run.color else { return textColor }
-        return Color(
-            red: Double(c.r) / 255.0,
-            green: Double(c.g) / 255.0,
-            blue: Double(c.b) / 255.0
-        )
+        let appearance = textAppearance(alignment: alignment)
+        return OutlinedSubtitleText(SubtitleAttributedText.make(runs: runs, appearance: appearance), appearance: appearance)
+            .subtitleBackground(style: style)
     }
 
     private func textAlignment(for placement: SubtitleTextPlacement) -> TextAlignment {
@@ -298,9 +268,6 @@ struct MPVSubtitleOverlay: View {
     private var textSize: CGFloat {
         min(max(CGFloat(style.textSize) / 100 * 55, 2), 125)
     }
-    private var textColor: Color { Color(hex: style.textColorHex) }
-    private var outlineColor: Color { Color(hex: style.outlineColorHex) }
-    private var textOpacity: Double { Double(min(max(style.textOpacity, 0), 100)) / 100 }
     private var outlineWidth: CGFloat {
         guard style.outlineEnabled else { return 0 }
         let configured = CGFloat(min(max(style.outlineWidth, 1), 8))
@@ -309,7 +276,6 @@ struct MPVSubtitleOverlay: View {
     private var isTopAligned: Bool { style.verticalAlignment.caseInsensitiveCompare("Top") == .orderedSame }
     private var verticalOffset: CGFloat { CGFloat(22 + min(max(style.bottomOffset, 0), 160)) }
     private var horizontalMargin: CGFloat { CGFloat(min(max(style.horizontalMargin, 0), 200)) }
-    private var fontWeight: Font.Weight { style.bold ? .bold : .regular }
 
     var body: some View {
         GeometryReader { geo in
@@ -319,13 +285,11 @@ struct MPVSubtitleOverlay: View {
                     video: videoNaturalSize,
                     mode: aspectMode
                 )
+                let appearance = subtitleTextAppearance(
+                    style: style, textSize: textSize, outlineWidth: outlineWidth, alignment: .center
+                )
                 VStack(spacing: 8) {
-                    Text(text)
-                        .font(style.font(size: textSize, weight: fontWeight))
-                        .foregroundStyle(textColor.opacity(textOpacity))
-                        .tracking(CGFloat(style.subSpacing))
-                        .multilineTextAlignment(.center)
-                        .subtitleOutline(color: outlineColor, width: outlineWidth)
+                    OutlinedSubtitleText(SubtitleAttributedText.make(plain: text, appearance: appearance), appearance: appearance)
                         .subtitleBackground(style: style)
                     if translation.isTranslating {
                         HStack(spacing: 5) {
@@ -464,18 +428,24 @@ private extension View {
     }
 }
 
-private extension View {
-    /// Eight zero-radius shadows form a crisp, inexpensive tvOS text stroke.
-    func subtitleOutline(color: Color, width: CGFloat) -> some View {
-        let stroke = width > 0 ? color : .clear
-        return self
-            .shadow(color: stroke, radius: 0, x: -width, y: 0)
-            .shadow(color: stroke, radius: 0, x: width, y: 0)
-            .shadow(color: stroke, radius: 0, x: 0, y: -width)
-            .shadow(color: stroke, radius: 0, x: 0, y: width)
-            .shadow(color: stroke, radius: 0, x: -width, y: -width)
-            .shadow(color: stroke, radius: 0, x: width, y: -width)
-            .shadow(color: stroke, radius: 0, x: -width, y: width)
-            .shadow(color: stroke, radius: 0, x: width, y: width)
-    }
+/// The host-drawn subtitle look from the user's subtitle style.
+func subtitleTextAppearance(style: SubtitleStyle, textSize: CGFloat, outlineWidth: CGFloat,
+                            alignment: TextAlignment) -> SubtitleTextAppearance {
+    SubtitleTextAppearance(
+        fontSize: textSize,
+        fontFamily: SubtitleFontFamily(styleFontName: style.fontName),
+        bold: style.bold,
+        color: UIColor(Color(hex: style.textColorHex)),
+        opacity: CGFloat(min(max(style.textOpacity, 0), 100)) / 100,
+        outlineColor: UIColor(Color(hex: style.outlineColorHex)),
+        outlineWidth: outlineWidth,
+        kerning: CGFloat(style.subSpacing),
+        alignment: {
+            switch alignment {
+            case .leading: return .left
+            case .trailing: return .right
+            default: return .center
+            }
+        }()
+    )
 }
