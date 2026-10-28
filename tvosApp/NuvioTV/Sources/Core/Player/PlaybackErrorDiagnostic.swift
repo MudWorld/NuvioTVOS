@@ -116,20 +116,30 @@ struct PlaybackErrorDiagnostic: Equatable {
             )
         }
 
-        // 3. HTTP 403 Forbidden / Expired Link / Token
-        if lower.contains("403")
-            || lower.contains("forbidden")
-            || lower.contains("expired")
-            || lower.contains("unauthorized")
-            || lower.contains("401") {
+        // 3. Explicit upstream HTTP 401/403 evidence. Decoder and framework codes are not HTTP statuses.
+        if let status = boundedHTTPStatus(in: rawError), status == 401 || status == 403 {
+            let statusName = status == 401 ? "Unauthorized" : "Forbidden"
             return PlaybackErrorDiagnostic(
                 origin: .hostingProvider,
-                badgeText: "STREAM LINK EXPIRED",
-                badgeIconName: "clock.badge.exclamationmark",
-                title: L10n.string("error_link_expired_title", fallback: "Stream Link Expired"),
-                message: L10n.string("error_link_expired_msg", fallback: "The playback token or link for this stream has expired (HTTP 403)."),
-                suggestedAction: L10n.string("error_link_expired_action", fallback: "Go back and select a fresh stream source."),
-                technicalDetails: formatTechnicalLine(host: host, code: "HTTP 403 (Forbidden / Token Expired)", raw: rawError),
+                badgeText: L10n.string("error_stream_access_denied_badge", fallback: "STREAM ACCESS DENIED"),
+                badgeIconName: "lock.fill",
+                title: L10n.string("error_stream_access_denied_title", fallback: "Stream Access Denied"),
+                message: L10n.format(
+                    "error_stream_access_denied_msg",
+                    fallback: "The server returned HTTP %d (%@). The link may need refreshing, or your provider may need to authorize access.",
+                    status,
+                    statusName
+                ),
+                suggestedAction: L10n.string(
+                    "error_stream_access_denied_action",
+                    fallback: "Try another stream source or refresh its authorization with the provider."
+                ),
+                technicalDetails: formatAccessDeniedTechnicalLine(
+                    host: host,
+                    status: status,
+                    statusName: statusName,
+                    raw: rawError
+                ),
                 host: host
             )
         }
@@ -285,6 +295,56 @@ struct PlaybackErrorDiagnostic: Equatable {
             return URL(string: urlString)?.host
         }
         return nil
+    }
+
+    /// Extracts only bounded HTTP status evidence. URLs are removed first so path and token digits
+    /// cannot masquerade as a server response; bare framework codes and generic auth wording do not count.
+    private static func boundedHTTPStatus(in raw: String) -> Int? {
+        let urlExpression = try? NSRegularExpression(pattern: #"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+"#)
+        let searchText: String
+        if let urlExpression {
+            searchText = urlExpression.stringByReplacingMatches(
+                in: raw,
+                range: NSRange(raw.startIndex..., in: raw),
+                withTemplate: " "
+            )
+        } else {
+            searchText = raw
+        }
+
+        let patterns = [
+            #"(?i)(?<![\w./-])(?<!\\)HTTP\s*/\s*\d+(?:\.\d+)?\s+(\d{3})(?![\w/\\-])(?!\.[A-Za-z0-9])"#,
+            #"(?i)(?<![\w./-])(?<!\\)HTTP\s+status\s+code\s*[:=]?\s*(\d{3})(?![\w/\\-])(?!\.[A-Za-z0-9])"#,
+            #"(?i)(?<![\w./-])(?<!\\)HTTP\s*(\d{3})(?![\w/\\-])(?!\.[A-Za-z0-9])"#,
+            #"(?i)(?<![\w./-])(?<!\\)(?:origin\s+answered|server\s+returned)\s*[:=]?\s*(?:HTTP\s*)?(\d{3})(?![\w/\\-])(?!\.[A-Za-z0-9])"#,
+            #"(?i)(?<![\w./-])(?<!\\)(403)\s+forbidden(?=$|[.!?](?:\s|$)|[\s,;:)\]])"#,
+            #"(?i)(?<![\w./-])(?<!\\)(401)\s+unauthorized(?=$|[.!?](?:\s|$)|[\s,;:)\]])"#
+        ]
+
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(
+                    in: searchText,
+                    range: NSRange(searchText.startIndex..., in: searchText)
+                  ),
+                  let capture = Range(match.range(at: 1), in: searchText),
+                  let status = Int(searchText[capture]) else { continue }
+            return status
+        }
+        return nil
+    }
+
+    private static func formatAccessDeniedTechnicalLine(
+        host: String?,
+        status: Int,
+        statusName: String,
+        raw: String
+    ) -> String {
+        var parts: [String] = []
+        if let host { parts.append("Host: \(host)") }
+        parts.append("Status: HTTP \(status) (\(statusName))")
+        if !raw.isEmpty { parts.append("Detail: \(raw)") }
+        return parts.joined(separator: " • ")
     }
 
     private static func formatTechnicalLine(host: String?, code: String?, raw: String) -> String {

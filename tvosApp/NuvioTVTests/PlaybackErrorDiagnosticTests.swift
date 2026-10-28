@@ -21,7 +21,7 @@ final class PlaybackErrorDiagnosticTests: XCTestCase {
         XCTAssertTrue(diag.message.contains("refused the connection or is offline"))
     }
 
-    func testExpiredLinkHttp403() {
+    func testHttp403ReportsAccessDeniedWithoutClaimingTheLinkExpired() {
         let rawError = "HTTP 403 Forbidden"
         let streamURL = URL(string: "https://aiostreams.elfhosted.com/playback/token123")!
 
@@ -32,9 +32,75 @@ final class PlaybackErrorDiagnosticTests: XCTestCase {
 
         XCTAssertEqual(diag.origin, .hostingProvider)
         XCTAssertTrue(diag.isHostingIssue)
-        XCTAssertEqual(diag.badgeText, "STREAM LINK EXPIRED")
-        XCTAssertEqual(diag.title, "Stream Link Expired")
+        XCTAssertEqual(diag.badgeText, "STREAM ACCESS DENIED")
+        XCTAssertEqual(diag.title, "Stream Access Denied")
         XCTAssertTrue(diag.message.contains("HTTP 403"))
+        XCTAssertTrue(diag.message.contains("may need refreshing"))
+        XCTAssertFalse(diag.message.localizedCaseInsensitiveContains("expired"))
+        XCTAssertTrue(diag.technicalDetails?.contains("Status: HTTP 403 (Forbidden)") == true)
+        XCTAssertTrue(diag.technicalDetails?.contains(rawError) == true)
+    }
+
+    func testHttp401Remains401() {
+        let diag = PlaybackErrorDiagnostic.analyze(
+            errorMessage: "HTTP/1.1 401 Unauthorized",
+            streamURL: URL(string: "https://stream.example/play")!
+        )
+
+        XCTAssertEqual(diag.badgeText, "STREAM ACCESS DENIED")
+        XCTAssertEqual(diag.title, "Stream Access Denied")
+        XCTAssertTrue(diag.message.contains("HTTP 401 (Unauthorized)"))
+        XCTAssertFalse(diag.message.contains("HTTP 403"))
+        XCTAssertTrue(diag.technicalDetails?.contains("Status: HTTP 401 (Unauthorized)") == true)
+    }
+
+    func testRecognizesExplicitHttp403FormsInNestedErrors() {
+        let explicitHTTP403Errors = [
+            "HTTP403",
+            "HTTP403.",
+            "HTTP/1.1 403",
+            "HTTP status code:403",
+            "Origin answered HTTP403 for the source",
+            "Origin answered HTTP403, request denied",
+            "FFmpeg server returned403",
+            "Error Domain=AVFoundationErrorDomain Code=-11800 underlying=FFmpeg server returned 403"
+        ]
+
+        for rawError in explicitHTTP403Errors {
+            let diag = PlaybackErrorDiagnostic.analyze(
+                errorMessage: rawError,
+                streamURL: URL(string: "https://stream.example/play")!
+            )
+            XCTAssertEqual(diag.badgeText, "STREAM ACCESS DENIED", rawError)
+            XCTAssertTrue(diag.message.contains("HTTP 403 (Forbidden)"), rawError)
+            XCTAssertTrue(diag.technicalDetails?.contains(rawError) == true, rawError)
+        }
+    }
+
+    func testNonHTTPCodesGenericAuthWordsAndURLDigitsDoNotImplyAccessDenied() {
+        let rawErrors = [
+            "Decoder session failed (OSStatus -14033)",
+            "Error Domain=NSOSStatusErrorDomain Code=-14033",
+            "CoreMedia error Code=403",
+            "decoder expired",
+            "forbidden",
+            "unauthorized",
+            "Error Code403",
+            "HTTP 4030 Forbidden",
+            "HTTP -403 Forbidden",
+            "/Media/HTTP403.mkv",
+            "movie.HTTP403.mkv",
+            "HTTP403decoder",
+            "HTTP403.mkv",
+            "Failed to open https://stream.example/files/403-forbidden-movie403.mkv?token=403"
+        ]
+        let streamURL = URL(string: "https://stream.example/files/403/movie403.mkv?token=403")!
+
+        for rawError in rawErrors {
+            let diag = PlaybackErrorDiagnostic.analyze(errorMessage: rawError, streamURL: streamURL)
+            XCTAssertNotEqual(diag.title, "Stream Access Denied", rawError)
+            XCTAssertNotEqual(diag.badgeText, "STREAM ACCESS DENIED", rawError)
+        }
     }
 
     func testRateLimitedHttp429() {

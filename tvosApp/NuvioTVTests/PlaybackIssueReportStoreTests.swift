@@ -17,7 +17,7 @@ final class PlaybackIssueReportStoreTests: XCTestCase {
         for secret in ["secret", "example.com", "movie.mkv", "private-token", "private-auth", "Authorization"] {
             XCTAssertFalse(text.contains(secret))
         }
-        XCTAssertTrue(text.contains("STREAM LINK EXPIRED"))
+        XCTAssertTrue(text.contains("STREAM ACCESS DENIED"))
         XCTAssertLessThanOrEqual(data.count, PlaybackIssueReportStore.maximumReportBytes)
     }
 
