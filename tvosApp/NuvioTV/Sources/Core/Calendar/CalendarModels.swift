@@ -117,21 +117,28 @@ enum CalendarMediaKind: String, Codable, Hashable, Sendable {
 struct CalendarItem: Codable, Hashable, Identifiable, Sendable {
     let id: String
     let kind: CalendarMediaKind
+    var sourceIdentityKey: String { "\(kind.rawValue):\(id)" }
     /// The library item's own type ("series", "anime", ...), used to reopen it.
     var type: String
     var name: String?
     var posterURL: String?
     /// Release year, used to skip movies that are long out.
     var year: Int?
+    /// Retained for manual follows so the calendar can resolve a title even
+    /// when its preferred id is IMDb or a source-specific id.
+    var imdbId: String?
+    var tmdbId: Int?
 
     init(id: String, kind: CalendarMediaKind, type: String = "", name: String? = nil,
-         posterURL: String? = nil, year: Int? = nil) {
+         posterURL: String? = nil, year: Int? = nil, imdbId: String? = nil, tmdbId: Int? = nil) {
         self.id = id
         self.kind = kind
         self.type = type
         self.name = name
         self.posterURL = posterURL
         self.year = year
+        self.imdbId = imdbId
+        self.tmdbId = tmdbId
     }
 }
 
@@ -235,10 +242,11 @@ struct CalendarResult: Codable, Sendable {
     let lastDay: CalendarDay
     let days: [CalendarDaySection]
     let skipped: [CalendarSkippedItem]
-    /// "series:1396" / "movie:9" for every library title matched on TMDB.
-    var libraryKeys: Set<String> = []
-    /// The library item behind each of `libraryKeys`, to remove it again.
-    var libraryItems: [String: CalendarItem] = [:]
+    /// Manually followed titles matched on TMDB, keyed as "series:1396".
+    var manualFollowKeys: Set<String> = []
+    var manualFollowItems: [String: CalendarItem] = [:]
+    /// Watched or in-progress titles followed automatically, keyed on TMDB.
+    var automaticFollowItems: [String: CalendarItem] = [:]
 
     var entryCount: Int { days.reduce(0) { $0 + $1.entries.count } }
 

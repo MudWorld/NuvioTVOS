@@ -32,6 +32,144 @@ private func ep(_ season: Int, _ number: Int, _ date: String?, type: String? = n
     CalendarTmdb.Episode(airDate: date, episodeNumber: number, seasonNumber: season, name: "E\(number)", episodeType: type)
 }
 
+private func calendarMeta(id: String, name: String, type: String = "series", tmdbId: Int? = nil) -> NuvioMeta {
+    NuvioMeta(
+        id: id,
+        name: name,
+        description: nil,
+        posterUrl: nil,
+        backgroundUrl: nil,
+        logoUrl: nil,
+        imdbId: nil,
+        tmdbId: tmdbId,
+        type: type,
+        year: nil,
+        genres: nil,
+        rating: nil,
+        releaseInfo: nil,
+        runtime: nil,
+        cast: nil,
+        director: nil,
+        writer: nil,
+        certification: nil,
+        country: nil,
+        language: nil,
+        released: nil,
+        status: nil,
+        videos: nil,
+        trailerYtIds: nil,
+        externalRatings: nil,
+        posterShape: nil,
+        isFromAddon: nil,
+        landscapePosterUrl: nil
+    )
+}
+
+final class CalendarLibrarySourceTests: XCTestCase {
+    func testMergesAutomaticSeriesAfterManualFollows() {
+        let manual = CalendarItem(id: "tt1", kind: .series, name: "Saved Manual Name", imdbId: "tt1")
+        let enrichedWatched = calendarMeta(id: "tt1", name: "Watched Name", tmdbId: 1)
+        let watchedOnly = calendarMeta(id: "tmdb:2", name: "Watched Only")
+        let watchedMovie = calendarMeta(id: "tmdb:3", name: "Movie", type: "movie")
+        let inProgress = calendarMeta(id: "tt4", name: "In Progress")
+        let result = CalendarLibrarySource.calendarItems(
+            manualFollows: [manual],
+            watchedItems: [
+                WatchedStoreItem(meta: enrichedWatched, watchedAt: Date()),
+                WatchedStoreItem(meta: watchedOnly, watchedAt: Date()),
+                WatchedStoreItem(meta: watchedMovie, watchedAt: Date()),
+            ],
+            continueWatchingItems: [
+                ContinueWatchingItem(meta: inProgress, streamUrl: "", position: 1, duration: 10, lastWatchedAt: Date())
+            ]
+        )
+
+        XCTAssertEqual(result.items.map(\.id), ["tt1", "tmdb:2", "tt4"])
+        XCTAssertEqual(result.manualFollowItemIDs, ["series:tt1"])
+        XCTAssertEqual(result.automaticFollowItemIDs, ["series:tt1", "series:tmdb:2", "series:tt4"])
+        XCTAssertEqual(result.metas[0].name, "Saved Manual Name")
+        XCTAssertEqual(result.metas[0].tmdbId, 1)
+    }
+
+    func testRawLocalProgressSeriesAreIncludedOutsideMaterializedPages() {
+        let rawProgress = calendarMeta(id: "tt5", name: "", tmdbId: 5)
+        let result = CalendarLibrarySource.calendarItems(
+            manualFollows: [],
+            watchedItems: [],
+            continueWatchingItems: [],
+            additionalContinueWatchingMetas: [rawProgress],
+            additionalContinueWatchingIDs: ["tt5"]
+        )
+
+        XCTAssertEqual(result.items.map(\.id), ["tt5"])
+        XCTAssertEqual(result.automaticFollowItemIDs, ["series:tt5"])
+    }
+}
+
+@MainActor
+final class CalendarManualFollowStoreTests: XCTestCase {
+    func testProfileDeletionPurgesPayloadWithoutStoreObserver() throws {
+        let profileID = "calendar-deletion-\(UUID().uuidString)"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            LargePayloadStore.remove(key: "calendarManualFollows.\(profileID)", directory: "calendarManualFollows")
+        }
+
+        let manager = try ProfileManager(baseDir: directory.path)
+        try manager.replaceProfiles([
+            Profile(id: profileID, name: "Calendar Test", isPinProtected: false, isAdmin: false, avatarId: "")
+        ])
+        let key = "calendarManualFollows.\(profileID)"
+        XCTAssertTrue(LargePayloadStore.write(Data(#"{"version":1,"items":{}}"#.utf8), key: key, directory: "calendarManualFollows"))
+
+        try manager.deleteProfile(id: profileID)
+
+        XCTAssertNil(LargePayloadStore.read(key: key, directory: "calendarManualFollows"))
+    }
+
+    func testManualFollowsAreProfileScopedAndKeepAnimeAndMovieIds() {
+        let profileOne = "calendar-tests-\(UUID().uuidString)"
+        let profileTwo = "calendar-tests-\(UUID().uuidString)"
+        defer {
+            CalendarManualFollowStore.clear(profileID: profileOne)
+            CalendarManualFollowStore.clear(profileID: profileTwo)
+        }
+
+        let anime = CalendarSuggestionItem(
+            key: "series:tt123",
+            kind: .series,
+            type: "anime",
+            tmdbId: nil,
+            imdbId: "tt123",
+            title: "Anime",
+            posterURL: nil,
+            year: 2026
+        )
+        let movie = CalendarSuggestionItem(
+            key: "movie:9",
+            kind: .movie,
+            type: "movie",
+            tmdbId: 9,
+            imdbId: "tt9",
+            title: "Old Movie",
+            posterURL: nil,
+            year: 1999
+        )
+
+        XCTAssertEqual(CalendarManualFollowStore.add([anime, movie], profileID: profileOne).count, 2)
+        XCTAssertTrue(CalendarManualFollowStore.items(profileID: profileTwo).isEmpty)
+        let saved = CalendarManualFollowStore.items(profileID: profileOne)
+        XCTAssertEqual(saved["series:tt123"]?.type, "anime")
+        XCTAssertEqual(saved["series:tt123"]?.imdbId, "tt123")
+        XCTAssertEqual(saved["movie:9"]?.tmdbId, 9)
+        XCTAssertEqual(saved["movie:9"]?.imdbId, "tt9")
+        XCTAssertEqual(CalendarManualFollowStore.remove(["movie:9"], profileID: profileOne), ["movie:9"])
+        XCTAssertNil(CalendarManualFollowStore.items(profileID: profileOne)["movie:9"])
+    }
+}
+
 // MARK: - Days and grid
 
 final class CalendarDayTests: XCTestCase {
@@ -226,6 +364,52 @@ final class CalendarServiceTests: XCTestCase {
         XCTAssertEqual(reasons["kitsu:5"], .unsupportedId)
         XCTAssertNil(reasons["tmdb:1396"], "the duplicate is dropped silently")
         XCTAssertEqual(http.count(containing: "/tv/1396/season/2"), 1)
+    }
+
+    func testManualAndWatchedShowsProduceEntriesWithSeparateSources() async throws {
+        let http = CalendarMockHTTP([
+            "/tv/1": (200, #"{"id":1,"name":"Library Show","seasons":[{"season_number":1,"air_date":"2026-10-01"}]}"#),
+            "/tv/1/season/1": (200, #"{"episodes":[{"air_date":"2026-10-20","episode_number":1,"season_number":1}]}"#),
+            "/tv/2": (200, #"{"id":2,"name":"Watched Show","seasons":[{"season_number":1,"air_date":"2026-10-01"}]}"#),
+            "/tv/2/season/1": (200, #"{"episodes":[{"air_date":"2026-10-21","episode_number":1,"season_number":1}]}"#),
+        ])
+        let manualItem = CalendarItem(id: "tt1", kind: .series, name: "Saved Manual Name", imdbId: "tt1")
+        let manualAlias = CalendarItem(id: "tmdb:1", kind: .series, name: "Manual Alias", tmdbId: 1)
+        let watchedOnlyItem = CalendarItem(id: "tmdb:2", kind: .series, name: "Watched Show")
+        let result = try await service(http, ids: ["tt1": 1, "tmdb:1": 1, "tmdb:2": 2]).load(
+            items: [manualItem, manualAlias, watchedOnlyItem],
+            first: periodFirst,
+            last: periodLast,
+            manualFollowItemIDs: [manualItem.sourceIdentityKey],
+            automaticFollowItemIDs: [watchedOnlyItem.sourceIdentityKey]
+        )
+
+        XCTAssertEqual(Set(result.days.flatMap(\.entries).map(\.tmdbId)), [1, 2])
+        XCTAssertEqual(result.manualFollowKeys, ["series:1"])
+        XCTAssertEqual(result.manualFollowItems["series:1"]?.name, "Saved Manual Name")
+        XCTAssertEqual(result.manualFollowItems["series:1"]?.tmdbId, 1)
+        XCTAssertEqual(result.automaticFollowItems["series:2"]?.name, "Watched Show")
+        XCTAssertEqual(result.automaticFollowItems["series:2"]?.tmdbId, 2)
+    }
+
+    func testResolvedTMDBMetadataFillsAutomaticSuggestionTitleAndArtwork() async throws {
+        let http = CalendarMockHTTP([
+            "/tv/5": (200, #"{"id":5,"name":"Resolved title","poster_path":"/poster.jpg","seasons":[]}"#),
+        ])
+        let item = CalendarItem(id: "tt5", kind: .series, imdbId: "tt5")
+        let result = try await service(http, ids: ["tt5": 5]).load(
+            items: [item],
+            first: periodFirst,
+            last: periodLast,
+            manualFollowItemIDs: [],
+            automaticFollowItemIDs: [item.sourceIdentityKey]
+        )
+
+        XCTAssertEqual(result.automaticFollowItems["series:5"]?.name, "Resolved title")
+        XCTAssertEqual(
+            result.automaticFollowItems["series:5"]?.posterURL,
+            "https://image.tmdb.org/t/p/w342/poster.jpg"
+        )
     }
 
     func testLongReleasedMoviesAreNotRequested() async throws {
@@ -881,27 +1065,91 @@ final class DetailsEpisodeFocusTests: XCTestCase {
 // MARK: - "In calendar" list
 
 final class CalendarLibraryListTests: XCTestCase {
-    func testListsPlacedTitlesByNameThenUnplaced() {
+    func testUnnamedAutomaticItemUsesResolvedTMDBIDInsteadOfBlankTitle() {
+        let items = CalendarSuggestions.calendarItems(
+            manualFollows: [:],
+            automaticFollows: ["series:5": CalendarItem(id: "tt5", kind: .series, tmdbId: 5)],
+            resolvedManualFollows: [:],
+            nextDates: [:],
+            skipped: [:],
+            today: CalendarDay(year: 2026, month: 10, day: 19)
+        )
+
+        XCTAssertEqual(items.first?.title, "TMDB # 5")
+    }
+
+    func testResolvedTMDBKeyBridgesManualIMDbFollowToAutomaticAlias() {
         let today = CalendarDay(year: 2026, month: 10, day: 19)
-        let skip = CalendarSkippedItem(item: CalendarItem(id: "kitsu:1", kind: .series, name: "Aaa"), reason: .unsupportedId)
-        let skipKey = CalendarSuggestions.skippedKey(skip)
-        let library: [String: CalendarItem] = [
-            "series:2": CalendarItem(id: "tt2", kind: .series, name: "Zeta"),
-            "series:1": CalendarItem(id: "tt1", kind: .series, name: "Beta"),
-            "movie:3": CalendarItem(id: "tt3", kind: .movie, name: "Gamma"),
-            skipKey: skip.item,
-        ]
-        let items = CalendarSuggestions.libraryItems(
-            library: library,
-            nextDates: ["series:1": today, "series:2": today.adding(days: 1)],
-            skipped: [skipKey: skip],
+        let manualItem = CalendarItem(id: "tt123", kind: .series, type: "anime", name: "Anime", imdbId: "tt123")
+        let automaticAlias = CalendarItem(id: "tmdb:123", kind: .series, name: "Anime", tmdbId: 123)
+        let manual: [String: CalendarItem] = ["series:tt123": manualItem]
+        let resolved: [String: CalendarItem] = ["series:123": manualItem]
+        let automatic: [String: CalendarItem] = ["series:123": automaticAlias]
+
+        let current = CalendarSuggestions.calendarItems(
+            manualFollows: manual,
+            automaticFollows: automatic,
+            resolvedManualFollows: resolved,
+            nextDates: [:],
+            skipped: [:],
             today: today
         )
-        XCTAssertEqual(items.map(\.title), ["Beta", "Gamma", "Zeta", "Aaa"])
-        XCTAssertEqual(items.first?.tmdbId, 1)
-        XCTAssertEqual(items.first?.imdbId, "tt1")
-        XCTAssertEqual(items.last?.key, skipKey)
-        XCTAssertNil(items.last?.tmdbId)
-        XCTAssertEqual(CalendarSuggestionList.inCalendar.group, .library)
+        let categorySuggestion = CalendarSuggestionItem(
+            key: "series:123", kind: .series, tmdbId: 123, imdbId: nil,
+            title: "Anime", posterURL: nil, year: nil
+        )
+        let matchedManualKey = CalendarManualFollowStore.matchingKey(
+            for: categorySuggestion,
+            in: manual,
+            resolvedManualFollows: resolved
+        )
+
+        XCTAssertEqual(current.count, 1)
+        XCTAssertTrue(current[0].isAutomaticallyFollowed)
+        XCTAssertEqual(matchedManualKey, "series:tt123")
+
+        let afterManualRemoval = CalendarSuggestions.calendarItems(
+            manualFollows: [:],
+            automaticFollows: automatic,
+            resolvedManualFollows: resolved,
+            nextDates: [:],
+            skipped: [:],
+            today: today
+        )
+        XCTAssertEqual(afterManualRemoval.count, 1)
+        XCTAssertTrue(afterManualRemoval[0].isAutomaticallyFollowed)
+    }
+
+    func testListsManualAndAutomaticFollowsAndKeepsOldMoviesRemovable() {
+        let today = CalendarDay(year: 2026, month: 10, day: 19)
+        let manual: [String: CalendarItem] = [
+            "series:2": CalendarItem(id: "tt2", kind: .series, name: "Zeta", imdbId: "tt2", tmdbId: 2),
+            "series:1": CalendarItem(id: "tt1", kind: .series, name: "Beta", imdbId: "tt1", tmdbId: 1),
+            "movie:3": CalendarItem(id: "tmdb:3", kind: .movie, name: "Gamma", year: 1999, tmdbId: 3),
+        ]
+        let automatic = [
+            "series:2": CalendarItem(id: "tt2", kind: .series, name: "Zeta", imdbId: "tt2", tmdbId: 2),
+            "series:4": CalendarItem(id: "tt4", kind: .series, name: "Auto Only", imdbId: "tt4", tmdbId: 4),
+        ]
+        let items = CalendarSuggestions.calendarItems(
+            manualFollows: manual,
+            automaticFollows: automatic,
+            resolvedManualFollows: [
+                "series:1": manual["series:1"]!,
+                "series:2": manual["series:2"]!,
+                "movie:3": manual["movie:3"]!,
+            ],
+            nextDates: ["series:1": today, "series:2": today.adding(days: 1)],
+            skipped: [:],
+            today: today
+        )
+        XCTAssertEqual(items.map(\.title), ["Auto Only", "Beta", "Gamma", "Zeta"])
+        XCTAssertEqual(items[1].tmdbId, 1)
+        XCTAssertEqual(items[1].imdbId, "tt1")
+        XCTAssertEqual(items.first?.isAutomaticallyFollowed, true)
+        XCTAssertEqual(items.first?.type, "series")
+        XCTAssertEqual(items.first(where: { $0.title == "Gamma" })?.tmdbId, 3)
+        XCTAssertEqual(items.first(where: { $0.title == "Zeta" })?.isAutomaticallyFollowed, true)
+        XCTAssertEqual(CalendarSuggestionList.inCalendar.group, .calendar)
     }
 }

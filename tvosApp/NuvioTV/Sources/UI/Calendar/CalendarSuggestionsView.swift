@@ -1,13 +1,14 @@
 import SwiftUI
 
-/// Pick titles from a list and add them to the library, or take them out.
-/// Select = mark for a bulk add/remove; hold = add or remove that one now.
+/// Pick titles to follow manually in the calendar. Watched and in-progress
+/// titles are shown as automatic follows and cannot be removed here.
 struct CalendarSuggestionsView: View {
-    let libraryItems: [String: CalendarItem]
-    /// Next day each library title has something on (for "In calendar").
+    let automaticFollowItems: [String: CalendarItem]
+    let resolvedManualFollowItems: [String: CalendarItem]
+    /// Next day each followed title has something on (for "In calendar").
     let nextDates: [String: CalendarDay]
-    /// Library titles the calendar couldn't place, by their "skipped:" key.
     let skipped: [String: CalendarSkippedItem]
+    let profileContext: CalendarManualFollowStore.ProfileContext
     let accent: Color
     let onClose: (_ changed: Int) -> Void
 
@@ -18,40 +19,62 @@ struct CalendarSuggestionsView: View {
     @State private var selected = Set<String>()
     @State private var isBusy = false
     @State private var loadTask: Task<Void, Never>?
-    /// Library state as changed in this sheet (starts as the calendar's).
-    @State private var library: [String: CalendarItem]
+    @State private var saveTask: Task<Void, Never>?
+    /// Manual follow state as changed in this sheet.
+    @State private var manualFollowItems: [String: CalendarItem]
     @State private var changed = 0
     @State private var confirmingRemove = false
 
-    init(libraryItems: [String: CalendarItem], nextDates: [String: CalendarDay] = [:],
-         skipped: [String: CalendarSkippedItem] = [:], accent: Color,
+    init(manualFollowItems: [String: CalendarItem], automaticFollowItems: [String: CalendarItem],
+         resolvedManualFollowItems: [String: CalendarItem], nextDates: [String: CalendarDay] = [:],
+         skipped: [String: CalendarSkippedItem] = [:],
+         profileContext: CalendarManualFollowStore.ProfileContext,
+         accent: Color,
          onClose: @escaping (_ changed: Int) -> Void) {
-        self.libraryItems = libraryItems
+        self.automaticFollowItems = automaticFollowItems
+        self.resolvedManualFollowItems = resolvedManualFollowItems
         self.nextDates = nextDates
         self.skipped = skipped
+        self.profileContext = profileContext
         self.accent = accent
         self.onClose = onClose
-        _library = State(initialValue: libraryItems)
+        _manualFollowItems = State(initialValue: manualFollowItems)
     }
 
-    private let columns = Array(repeating: GridItem(.fixed(190), spacing: 28), count: 7)
+    private let columns = [GridItem(
+        .adaptive(minimum: LibraryGridMetrics.posterWidth, maximum: LibraryGridMetrics.posterWidth),
+        spacing: LibraryGridMetrics.posterGap,
+        alignment: .top
+    )]
 
     private var toAdd: [CalendarSuggestionItem] {
-        results.filter { selected.contains($0.key) && $0.isAddable && library[$0.key] == nil }
+        results.filter { selected.contains($0.key) && $0.isAddable && manualFollowKey(for: $0) == nil }
     }
 
     private var toRemove: [String] {
-        results.map(\.key).filter { selected.contains($0) && library[$0] != nil }
+        results.compactMap { result in
+            guard selected.contains(result.key) else { return nil }
+            return manualFollowKey(for: result)
+        }
+    }
+
+    private var automaticRemovalCount: Int {
+        toRemove.filter { key in
+            results.first(where: { manualFollowKey(for: $0) == key }).map(isAutomaticallyFollowed) == true
+        }.count
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             HStack(alignment: .firstTextBaseline, spacing: 24) {
-                Text(L10n.string("calendar_suggest_title", fallback: "Add to library"))
+                Text(L10n.string("calendar_suggest_add_to_calendar", fallback: "Add to calendar"))
                     .font(.system(size: 40, weight: .bold))
                     .foregroundColor(.white)
                 Spacer()
-                Text(L10n.string("calendar_suggest_hint", fallback: "Hold: add or remove one · Play/Pause: add selected"))
+                Text(L10n.string(
+                    "calendar_suggest_manual_auto_hint",
+                    fallback: "Manual follows stay until removed. Watched or in-progress shows follow automatically."
+                ))
                     .font(.system(size: 18))
                     .foregroundColor(.white.opacity(0.5))
             }
@@ -66,7 +89,7 @@ struct CalendarSuggestionsView: View {
                         ? "\(group.title): \(list.shortTitle)"
                         : group.title
                     if group.lists.count > 1 {
-                        Menu {
+                        FilterMenu(label: label) {
                             ForEach(group.lists) { option in
                                 Button {
                                     pick(option)
@@ -78,67 +101,72 @@ struct CalendarSuggestionsView: View {
                                     }
                                 }
                             }
-                        } label: {
-                            Label(label, systemImage: "chevron.down")
-                                .font(.system(size: 22, weight: isCurrent ? .bold : .regular))
                         }
                     } else if let only = group.lists.first {
-                        Button {
+                        SourceModeChip(title: label, isSelected: isCurrent) {
                             pick(only)
-                        } label: {
-                            Text(label)
-                                .font(.system(size: 22, weight: isCurrent ? .bold : .regular))
                         }
                     }
                 }
                 Spacer(minLength: 20)
                 Group {
-                    Button {
+                    SourceModeChip(
+                        title: isBusy
+                            ? L10n.string("calendar_suggest_working", fallback: "Saving…")
+                            : L10n.format("calendar_suggest_add", fallback: "Add %d", toAdd.count),
+                        isSelected: false
+                    ) {
                         addSelected()
-                    } label: {
-                        Label(
-                            isBusy
-                                ? L10n.string("calendar_suggest_working", fallback: "Saving…")
-                                : L10n.format("calendar_suggest_add", fallback: "Add %d", toAdd.count),
-                            systemImage: "plus"
-                        )
                     }
                     .disabled(toAdd.isEmpty || isBusy)
+                    .opacity(toAdd.isEmpty || isBusy ? 0.4 : 1)
 
                     if !toRemove.isEmpty {
-                        Button {
+                        SourceModeChip(
+                            title: L10n.format("calendar_suggest_remove", fallback: "Remove %d", toRemove.count),
+                            isSelected: false
+                        ) {
                             // Several at once (or everything) asks first.
-                            if toRemove.count > 1 {
+                            if toRemove.count > 1 || automaticRemovalCount > 0 {
                                 confirmingRemove = true
                             } else {
                                 removeSelected()
                             }
-                        } label: {
-                            Label(L10n.format("calendar_suggest_remove", fallback: "Remove %d", toRemove.count),
-                                  systemImage: "minus")
                         }
                         .disabled(isBusy)
+                        .opacity(isBusy ? 0.4 : 1)
                     }
 
-                    Button(L10n.string("calendar_suggest_select_all", fallback: "Select all")) {
-                        if list.isLibraryList {
-                            selected = Set(results.map(\.key).filter { library[$0] != nil })
+                    SourceModeChip(title: L10n.string("calendar_suggest_select_all", fallback: "Select all"), isSelected: false) {
+                        if list.isCalendarList {
+                            selected = Set(results.compactMap { result in
+                                manualFollowKey(for: result) == nil ? nil : result.key
+                            })
                         } else {
-                            selected = Set(results.filter { $0.isAddable && library[$0.key] == nil }.map(\.key))
+                            selected = Set(results.filter { $0.isAddable && manualFollowKey(for: $0) == nil }.map(\.key))
                         }
                     }
                     .disabled(results.isEmpty || isBusy)
+                    .opacity(results.isEmpty || isBusy ? 0.4 : 1)
 
-                    Button(L10n.string("action_close", fallback: "Close")) { onClose(changed) }
-                        .disabled(isBusy)
+                    SourceModeChip(
+                        title: isBusy
+                            ? L10n.string("calendar_suggest_cancel", fallback: "Cancel")
+                            : L10n.string("action_close", fallback: "Close"),
+                        isSelected: false
+                    ) {
+                        if isBusy { saveTask?.cancel() }
+                        onClose(changed)
+                    }
                 }
-                .font(.system(size: 22, weight: .semibold))
             }
+            .zIndex(1)
 
             content
         }
-        .padding(.horizontal, 70)
-        .padding(.vertical, 50)
+        .padding(.horizontal, LibraryGridMetrics.pageInset)
+        .padding(.top, 50)
+        .ignoresSafeArea(edges: .bottom)
         // Opaque, so the calendar doesn't show through behind the posters.
         .background(Color.black.ignoresSafeArea())
         .onAppear { load() }
@@ -146,17 +174,23 @@ struct CalendarSuggestionsView: View {
         .onPlayPauseCommand {
             if !toAdd.isEmpty && !isBusy { addSelected() }
         }
-        .onExitCommand { if !isBusy { onClose(changed) } }
+        .onExitCommand {
+            if isBusy { saveTask?.cancel() }
+            onClose(changed)
+        }
         .alert(
-            L10n.format("calendar_suggest_remove_confirm", fallback: "Remove %d titles from your library?", toRemove.count),
+            removalConfirmation,
             isPresented: $confirmingRemove
         ) {
-            Button(L10n.string("calendar_suggest_remove_action", fallback: "Remove"), role: .destructive) {
+            Button(L10n.string("calendar_suggest_manual_remove_action", fallback: "Remove from calendar"), role: .destructive) {
                 removeSelected()
             }
             Button(L10n.string("action_cancel", fallback: "Cancel"), role: .cancel) {}
         }
-        .onDisappear { loadTask?.cancel() }
+        .onDisappear {
+            loadTask?.cancel()
+            saveTask?.cancel()
+        }
     }
 
     @ViewBuilder
@@ -169,25 +203,26 @@ struct CalendarSuggestionsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollView(.vertical) {
-                LazyVGrid(columns: columns, spacing: 34) {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: LibraryGridMetrics.posterGap) {
                     ForEach(results) { result in
                         CalendarSuggestionCell(
-                            result: result,
+                            result: displayedResult(result),
                             isSelected: selected.contains(result.key),
-                            inLibrary: library[result.key] != nil,
-                            showsDetailInLibrary: list.isLibraryList,
+                            hasManualFollow: manualFollowKey(for: result) != nil,
+                            showsFollowStatus: list.isCalendarList,
                             accent: accent,
                             onSelect: { toggleSelection(result) },
                             onHold: { holdAction(result) }
                         )
-                        // Every title stays focusable, also ones already in the
-                        // library (to remove them) or without ids (to see why).
+                        // Unaddable and already-followed titles stay focusable
+                        // so their status is visible on the focused card.
                         .disabled(isBusy)
                     }
                 }
-                .padding(20)
+                .padding(.top, 16)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 90)
             }
-            .scrollClipDisabledIfAvailable()
         }
     }
 
@@ -198,7 +233,7 @@ struct CalendarSuggestionsView: View {
     }
 
     private func toggleSelection(_ result: CalendarSuggestionItem) {
-        guard result.isAddable || library[result.key] != nil else { return }
+        guard result.isAddable || manualFollowKey(for: result) != nil else { return }
         if selected.contains(result.key) {
             selected.remove(result.key)
         } else {
@@ -208,8 +243,13 @@ struct CalendarSuggestionsView: View {
 
     private func holdAction(_ result: CalendarSuggestionItem) {
         guard !isBusy else { return }
-        if library[result.key] != nil {
-            remove([result.key])
+        if let key = manualFollowKey(for: result) {
+            if isAutomaticallyFollowed(result) {
+                selected = [result.key]
+                confirmingRemove = true
+            } else {
+                remove([key])
+            }
         } else if result.isAddable {
             add([result])
         }
@@ -229,22 +269,28 @@ struct CalendarSuggestionsView: View {
             do {
                 let found: [CalendarSuggestionItem]
                 if list == .inCalendar {
-                    found = CalendarSuggestions.libraryItems(
-                        library: library, nextDates: nextDates, skipped: skipped, today: CalendarDay(date: Date())
+                    found = CalendarSuggestions.calendarItems(
+                        manualFollows: manualFollowItems,
+                        automaticFollows: automaticFollowItems,
+                        resolvedManualFollows: resolvedManualFollowItems,
+                        nextDates: nextDates,
+                        skipped: skipped,
+                        today: CalendarDay(date: Date())
                     )
                 } else if list == .animeToday {
                     // Exact broadcast times from AniList, ids from arm / Simkl.
-                    found = try await CalendarAnimeToday.load()
+                    found = try await CalendarAnimeToday.load(tmdb: client)
                 } else {
                     found = try await client.list(request.path, query: request.query, pages: CalendarSuggestions.pages)
-                        .map { CalendarSuggestionItem(tmdb: $0, kind: list.kind) }
+                        .map { CalendarSuggestionItem(tmdb: $0, kind: list.kind, type: list.itemType) }
                 }
                 guard !Task.isCancelled else { return }
+                guard profileContext.isCurrent else { return }
                 results = found
                 isLoading = false
                 if found.isEmpty {
-                    errorText = list.isLibraryList
-                        ? L10n.string("calendar_suggest_library_empty", fallback: "Your library has nothing the calendar follows.")
+                    errorText = list.isCalendarList
+                        ? L10n.string("calendar_suggest_follow_empty", fallback: "No manual or automatic calendar follows yet.")
                         : L10n.string("calendar_suggest_empty", fallback: "TMDB has nothing in this list right now.")
                 }
             } catch {
@@ -262,29 +308,109 @@ struct CalendarSuggestionsView: View {
     private func add(_ items: [CalendarSuggestionItem]) {
         guard !items.isEmpty else { return }
         isBusy = true
-        let client = CalendarLibrarySource.makeClient()
-        Task {
-            let added = await CalendarLibraryWriter.add(items, client: client)
-            for (key, item) in added { library[key] = item }
-            selected.subtract(added.keys)
-            changed += added.count
+        guard profileContext.isCurrent else {
             isBusy = false
+            errorText = L10n.string("calendar_manual_profile_changed", fallback: "The active profile changed. Reopen this list to continue.")
+            return
+        }
+        saveTask?.cancel()
+        saveTask = Task { @MainActor in
+            let resolvedItems = await CalendarManualFollowStore.resolvingTMDBIDs(
+                for: items,
+                profileContext: profileContext
+            )
+            guard !Task.isCancelled else { return }
+            guard profileContext.isCurrent else {
+                isBusy = false
+                errorText = L10n.string("calendar_manual_profile_changed", fallback: "The active profile changed. Reopen this list to continue.")
+                return
+            }
+            let added = CalendarManualFollowStore.add(resolvedItems, profileID: profileContext.profileID)
+            for (key, item) in added { manualFollowItems[key] = item }
+            selected.subtract(items.map(\.key))
+            changed += added.count
+            if added.isEmpty {
+                errorText = L10n.string("calendar_manual_save_failed", fallback: "Couldn't save the calendar follow. Try again.")
+            }
+            refreshCalendarListIfNeeded()
+            isBusy = false
+            saveTask = nil
         }
     }
 
     private func remove(_ keys: [String]) {
         guard !keys.isEmpty else { return }
         isBusy = true
-        let current = library
-        Task {
-            let removed = await CalendarLibraryWriter.remove(keys, items: current)
-            for key in removed { library[key] = nil }
-            // "In calendar" only lists library titles: drop the removed ones.
-            if list.isLibraryList { results.removeAll { removed.contains($0.key) } }
-            selected.subtract(removed)
-            changed += removed.count
+        guard profileContext.isCurrent else {
             isBusy = false
+            errorText = L10n.string("calendar_manual_profile_changed", fallback: "The active profile changed. Reopen this list to continue.")
+            return
         }
+        let removed = CalendarManualFollowStore.remove(Set(keys), profileID: profileContext.profileID)
+        let removedResultKeys = results.compactMap { result -> String? in
+            guard selected.contains(result.key), let key = manualFollowKey(for: result), removed.contains(key) else { return nil }
+            return result.key
+        }
+        for key in removed { manualFollowItems.removeValue(forKey: key) }
+        selected.subtract(keys)
+        selected.subtract(removedResultKeys)
+        changed += removed.count
+        if removed.isEmpty { errorText = L10n.string("calendar_manual_save_failed", fallback: "Couldn't save the calendar follow. Try again.") }
+        refreshCalendarListIfNeeded()
+        isBusy = false
+    }
+
+    private func manualFollowKey(for result: CalendarSuggestionItem) -> String? {
+        CalendarManualFollowStore.matchingKey(
+            for: result,
+            in: manualFollowItems,
+            resolvedManualFollows: resolvedManualFollowItems
+        )
+    }
+
+    private func isAutomaticallyFollowed(_ result: CalendarSuggestionItem) -> Bool {
+        guard !result.isAutomaticallyFollowed else { return true }
+        if automaticFollowItems[CalendarManualFollowStore.key(for: result)] != nil { return true }
+        if let manualKey = manualFollowKey(for: result),
+           let manual = manualFollowItems[manualKey],
+           let resolved = resolvedManualFollowItems.first(where: { CalendarManualFollowStore.sameTitle($0.value, manual) }),
+           automaticFollowItems[resolved.key] != nil {
+            return true
+        }
+        return automaticFollowItems.values.contains(where: { CalendarManualFollowStore.matches(result, item: $0) })
+    }
+
+    private func displayedResult(_ result: CalendarSuggestionItem) -> CalendarSuggestionItem {
+        var displayed = result
+        displayed.isAutomaticallyFollowed = isAutomaticallyFollowed(result)
+        return displayed
+    }
+
+    private func refreshCalendarListIfNeeded() {
+        guard list.isCalendarList else { return }
+        results = CalendarSuggestions.calendarItems(
+            manualFollows: manualFollowItems,
+            automaticFollows: automaticFollowItems,
+            resolvedManualFollows: resolvedManualFollowItems,
+            nextDates: nextDates,
+            skipped: skipped,
+            today: CalendarDay(date: Date())
+        )
+    }
+
+    private var removalConfirmation: String {
+        if automaticRemovalCount > 0 {
+            return L10n.format(
+                "calendar_suggest_remove_manual_automatic_confirm",
+                fallback: "Remove %d manual follows? Watched or in-progress titles will remain in the calendar.",
+                toRemove.count
+            )
+        }
+        return L10n.format(
+            "calendar_suggest_manual_remove_confirm",
+            fallback: "Remove %d manual follows from your calendar?",
+            toRemove.count
+        )
     }
 }
 
@@ -292,8 +418,8 @@ struct CalendarSuggestionsView: View {
 private struct CalendarSuggestionCell: View {
     let result: CalendarSuggestionItem
     let isSelected: Bool
-    let inLibrary: Bool
-    var showsDetailInLibrary = false
+    let hasManualFollow: Bool
+    var showsFollowStatus = false
     let accent: Color
     let onSelect: () -> Void
     let onHold: () -> Void
@@ -309,8 +435,8 @@ private struct CalendarSuggestionCell: View {
             }
             onSelect()
         } label: {
-            CalendarSuggestionCard(result: result, isSelected: isSelected, inLibrary: inLibrary,
-                                   showsDetailInLibrary: showsDetailInLibrary, accent: accent)
+            CalendarSuggestionCard(result: result, isSelected: isSelected, hasManualFollow: hasManualFollow,
+                                   showsFollowStatus: showsFollowStatus, accent: accent)
         }
         .buttonStyle(CalendarHoldButtonStyle(onHold: onHold, didTriggerHold: $didTriggerHold))
         .focusEffectDisabledIfAvailable()
@@ -345,11 +471,14 @@ private struct CalendarHoldButtonStyle: ButtonStyle {
 
 private struct CalendarSuggestionCard: View {
     @Environment(\.isFocused) private var isFocused
+    @AppStorage(SettingsKey.cardCornerRadius) private var cardCornerRadiusSetting = AppCardStyle.defaultCornerRadiusRaw
     let result: CalendarSuggestionItem
     let isSelected: Bool
-    let inLibrary: Bool
-    var showsDetailInLibrary = false
+    let hasManualFollow: Bool
+    var showsFollowStatus = false
     let accent: Color
+
+    private var cardCornerRadius: CGFloat { AppCardStyle.cornerRadius(for: cardCornerRadiusSetting) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -364,26 +493,23 @@ private struct CalendarSuggestionCard: View {
                         }
                     }
                 }
-                .frame(width: 190, height: 285)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                // Dim what can't be added; in "In calendar" everything is in the
-                // library, so nothing is dimmed and only selection is marked.
-                .opacity(showsDetailInLibrary ? 1 : (inLibrary || !result.isAddable ? 0.45 : 1))
+                .frame(width: LibraryGridMetrics.posterWidth, height: LibraryGridMetrics.posterHeight)
+                .clipShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
+                .opacity(showsFollowStatus ? 1 : (hasManualFollow || !result.isAddable ? 0.45 : 1))
 
-                if isSelected || (inLibrary && !showsDetailInLibrary) {
-                    // Selected library title = marked for removal.
-                    Image(systemName: isSelected && inLibrary ? "minus.circle.fill"
-                          : (inLibrary ? "checkmark.circle" : "checkmark.circle.fill"))
+                if isSelected || (hasManualFollow && !showsFollowStatus) {
+                    Image(systemName: isSelected && hasManualFollow ? "minus.circle.fill"
+                          : (hasManualFollow ? "checkmark.circle" : "checkmark.circle.fill"))
                         .font(.system(size: 40, weight: .bold))
-                        .foregroundColor(isSelected && inLibrary ? .red : (inLibrary ? .white.opacity(0.8) : accent))
+                        .foregroundColor(isSelected && hasManualFollow ? .red : (hasManualFollow ? .white.opacity(0.8) : accent))
                         .background(Circle().fill(Color.black.opacity(0.6)))
                         .padding(10)
                 }
             }
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
                     .strokeBorder(
-                        isFocused ? Color.white : (isSelected ? (inLibrary ? Color.red : accent) : Color.clear),
+                        isFocused ? Color.white : (isSelected ? (hasManualFollow ? Color.red : accent) : Color.clear),
                         lineWidth: isFocused || isSelected ? 4 : 0
                     )
             )
@@ -391,7 +517,7 @@ private struct CalendarSuggestionCard: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(.white)
                 .lineLimit(2)
-                .frame(width: 190, alignment: .leading)
+                .frame(width: LibraryGridMetrics.posterWidth, alignment: .leading)
             Text(subtitle)
                 .font(.system(size: 16))
                 .foregroundColor(.white.opacity(0.6))
@@ -401,10 +527,22 @@ private struct CalendarSuggestionCard: View {
     }
 
     private var subtitle: String {
-        if inLibrary {
-            // "In calendar" shows the next date instead.
-            if showsDetailInLibrary, let detail = result.detail { return detail }
-            return L10n.string("calendar_suggest_in_library", fallback: "In library")
+        if showsFollowStatus {
+            return result.detail ?? L10n.string("calendar_suggest_nothing_upcoming", fallback: "Nothing upcoming")
+        }
+        let automaticLabel = L10n.string(
+            "calendar_suggest_automatic_follow",
+            fallback: "Automatically followed while watched or in progress"
+        )
+        if hasManualFollow {
+            let manualLabel = L10n.string("calendar_suggest_manual_follow", fallback: "Manual follow")
+            let source = result.isAutomaticallyFollowed
+                ? "\(manualLabel) · \(L10n.string("calendar_suggest_also_automatic", fallback: "also followed automatically"))"
+                : manualLabel
+            return [source, result.detail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        }
+        if result.isAutomaticallyFollowed {
+            return [automaticLabel, result.detail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         }
         if !result.isAddable { return L10n.string("calendar_suggest_no_ids", fallback: "No TMDB or IMDb id") }
         return result.detail ?? result.year.map(String.init) ?? ""

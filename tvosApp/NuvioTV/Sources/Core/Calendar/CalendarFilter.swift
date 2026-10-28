@@ -66,7 +66,7 @@ enum CalendarOptions {
 
 extension CalendarResult {
     /// The same result with only the entries `filter` keeps; days left empty
-    /// are dropped. Skipped titles and the library are unchanged.
+    /// are dropped. Follow sources are unchanged.
     func filtered(_ filter: CalendarFilter) -> CalendarResult {
         guard filter != .all else { return self }
         let kept = days.compactMap { section -> CalendarDaySection? in
@@ -78,8 +78,9 @@ extension CalendarResult {
             lastDay: lastDay,
             days: kept,
             skipped: skipped,
-            libraryKeys: libraryKeys,
-            libraryItems: libraryItems
+            manualFollowKeys: manualFollowKeys,
+            manualFollowItems: manualFollowItems,
+            automaticFollowItems: automaticFollowItems
         )
     }
 
@@ -91,8 +92,9 @@ extension CalendarResult {
             lastDay: lastDay,
             days: CalendarBuilder.groupByDay(entries),
             skipped: skipped,
-            libraryKeys: libraryKeys,
-            libraryItems: libraryItems
+            manualFollowKeys: manualFollowKeys,
+            manualFollowItems: manualFollowItems,
+            automaticFollowItems: automaticFollowItems
         )
     }
 

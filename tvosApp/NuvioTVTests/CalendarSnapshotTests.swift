@@ -70,8 +70,9 @@ final class CalendarSnapshotTests: XCTestCase {
                 CalendarSkippedItem(item: CalendarItem(id: "x:1", kind: .series), reason: .unsupportedId),
                 CalendarSkippedItem(item: CalendarItem(id: "tt5", kind: .movie, name: "Five"), reason: .failed("timeout")),
             ],
-            libraryKeys: ["series:1", "movie:9"],
-            libraryItems: ["series:1": CalendarItem(id: "tt1", kind: .series, type: "series", name: "One")]
+            manualFollowKeys: ["series:1", "movie:9"],
+            manualFollowItems: ["series:1": CalendarItem(id: "tt1", kind: .series, type: "series", name: "One")],
+            automaticFollowItems: ["series:2": CalendarItem(id: "tt2", kind: .series, name: "Two")]
         )
         return result
     }
@@ -88,8 +89,9 @@ final class CalendarSnapshotTests: XCTestCase {
         XCTAssertEqual(read.loadedAt, loadedAt)
         XCTAssertEqual(read.result.days, sample().days)
         XCTAssertEqual(read.result.skipped, sample().skipped)
-        XCTAssertEqual(read.result.libraryKeys, ["series:1", "movie:9"])
-        XCTAssertEqual(read.result.libraryItems["series:1"]?.name, "One")
+        XCTAssertEqual(read.result.manualFollowKeys, ["series:1", "movie:9"])
+        XCTAssertEqual(read.result.manualFollowItems["series:1"]?.name, "One")
+        XCTAssertEqual(read.result.automaticFollowItems["series:2"]?.name, "Two")
         XCTAssertEqual(read.result.allEntries.first?.airTimeSource, .tvmaze)
     }
 

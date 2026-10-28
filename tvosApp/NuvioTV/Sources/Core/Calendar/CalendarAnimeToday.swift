@@ -71,6 +71,7 @@ enum CalendarAnimeToday {
             result.append(CalendarSuggestionItem(
                 key: key,
                 kind: kind,
+                type: kind == .movie ? "movie" : "anime",
                 tmdbId: found?.tmdb,
                 imdbId: found?.imdb,
                 title: airing.title,

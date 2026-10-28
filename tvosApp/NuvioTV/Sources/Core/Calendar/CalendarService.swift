@@ -5,9 +5,9 @@ enum CalendarLoadError: Error, Equatable, Sendable {
     case invalidApiKey
 }
 
-/// Loads the calendar for a list of library items.
+/// Loads the calendar for manual follows and automatic watch sources.
 ///
-/// Read-only: it never changes the library, watched state or sync. A failure
+/// Read-only: it never changes follows, watched state or sync. A failure
 /// for one title is recorded as skipped and does not stop the others; only a
 /// missing or rejected TMDB key fails the whole load. Titles with nothing in
 /// the period are simply absent.
@@ -31,12 +31,18 @@ struct CalendarService: Sendable {
     }
 
     enum Outcome: Sendable {
-        case entries([CalendarEntry])
+        case entries([CalendarEntry], resolvedItem: CalendarItem)
         case skipped(CalendarSkipReason)
         case authFailure
     }
 
-    func load(items: [CalendarItem], first: CalendarDay, last: CalendarDay) async throws -> CalendarResult {
+    func load(
+        items: [CalendarItem],
+        first: CalendarDay,
+        last: CalendarDay,
+        manualFollowItemIDs: Set<String>? = nil,
+        automaticFollowItemIDs: Set<String> = []
+    ) async throws -> CalendarResult {
         guard !client.apiKey.isEmpty else { throw CalendarLoadError.tmdbNotConfigured }
 
         // Movies released more than a year before the period cannot have a
@@ -53,33 +59,49 @@ struct CalendarService: Sendable {
         }
 
         var skipped: [CalendarSkippedItem] = []
-        var targets: [(CalendarItem, Int)] = []
+        var targets: [(item: CalendarItem, tmdbId: Int, key: String)] = []
         var seenTargets = Set<String>()
-        var libraryItems: [String: CalendarItem] = [:]
+        var manualFollowKeys = Set<String>()
+        var manualFollowItems: [String: CalendarItem] = [:]
+        var automaticFollowItems: [String: CalendarItem] = [:]
         for (item, tmdbId) in resolutions {
+            let isManualFollow = manualFollowItemIDs?.contains(item.sourceIdentityKey) ?? true
+            let isAutomaticFollow = automaticFollowItemIDs.contains(item.sourceIdentityKey)
             guard let tmdbId else {
-                skipped.append(CalendarSkippedItem(item: item, reason: .unsupportedId))
+                if isManualFollow {
+                    skipped.append(CalendarSkippedItem(item: item, reason: .unsupportedId))
+                }
                 continue
             }
             let key = "\(item.kind.rawValue):\(tmdbId)"
             if seenTargets.insert(key).inserted {
-                targets.append((item, tmdbId))
-                libraryItems[key] = item
+                targets.append((item, tmdbId, key))
+            }
+            if isManualFollow {
+                manualFollowKeys.insert(key)
+                if manualFollowItems[key] == nil { manualFollowItems[key] = item }
+            }
+            if isAutomaticFollow, automaticFollowItems[key] == nil {
+                automaticFollowItems[key] = item
             }
         }
 
         // 2. Fetch episodes / releases inside the period.
         let outcomes = await concurrentMap(targets) { target in
-            (target.0, await fetch(item: target.0, tmdbId: target.1, first: first, last: last))
+            (target, await fetch(item: target.item, tmdbId: target.tmdbId, first: first, last: last))
         }
 
         var entries: [CalendarEntry] = []
-        for (item, outcome) in outcomes {
+        for (target, outcome) in outcomes {
             switch outcome {
-            case .entries(let found):
+            case .entries(let found, let resolvedItem):
                 entries.append(contentsOf: found)
+                if manualFollowItems[target.key] != nil { manualFollowItems[target.key] = resolvedItem }
+                if automaticFollowItems[target.key] != nil { automaticFollowItems[target.key] = resolvedItem }
             case .skipped(let reason):
-                skipped.append(CalendarSkippedItem(item: item, reason: reason))
+                if manualFollowKeys.contains(target.key) {
+                    skipped.append(CalendarSkippedItem(item: manualFollowItems[target.key] ?? target.item, reason: reason))
+                }
             case .authFailure:
                 throw CalendarLoadError.invalidApiKey
             }
@@ -87,8 +109,8 @@ struct CalendarService: Sendable {
 
         if let animeTimes, entries.contains(where: \.isAnime) {
             var imdbByTmdb: [Int: String] = [:]
-            for (item, tmdbId) in targets where item.kind == .series && item.id.hasPrefix("tt") {
-                imdbByTmdb[tmdbId] = String(item.id.prefix { $0 != ":" })
+            for target in targets where target.item.kind == .series && target.item.id.hasPrefix("tt") {
+                imdbByTmdb[target.tmdbId] = String(target.item.id.prefix { $0 != ":" })
             }
             entries = await animeTimes.apply(to: entries, imdbByTmdb: imdbByTmdb, first: first, last: last)
         }
@@ -98,8 +120,9 @@ struct CalendarService: Sendable {
             lastDay: last,
             days: CalendarBuilder.groupByDay(entries),
             skipped: skipped,
-            libraryKeys: seenTargets,
-            libraryItems: libraryItems
+            manualFollowKeys: manualFollowKeys,
+            manualFollowItems: manualFollowItems,
+            automaticFollowItems: automaticFollowItems
         )
     }
 
@@ -108,6 +131,12 @@ struct CalendarService: Sendable {
             switch item.kind {
             case .series:
                 let details = try await client.tvDetails(tmdbId)
+                let resolvedItem = self.item(
+                    filling: item,
+                    tmdbId: tmdbId,
+                    name: details.readableName ?? details.name,
+                    posterPath: details.posterPath
+                )
                 let seasons = CalendarBuilder.seasonsToFetch(for: details, first: first, last: last)
                 var episodes: [CalendarTmdb.Episode] = []
                 for number in seasons {
@@ -123,19 +152,45 @@ struct CalendarService: Sendable {
                         }
                     }
                 }
-                return .entries(CalendarBuilder.episodeEntries(
-                    item: item, details: details, episodes: episodes, first: first, last: last
-                ))
+                return .entries(
+                    CalendarBuilder.episodeEntries(
+                        item: resolvedItem, details: details, episodes: episodes, first: first, last: last
+                    ),
+                    resolvedItem: resolvedItem
+                )
             case .movie:
                 let details = try await client.movieDetails(tmdbId)
-                return .entries(CalendarBuilder.movieEntries(
-                    item: item, details: details, region: region, first: first, last: last
-                ))
+                let resolvedItem = self.item(
+                    filling: item,
+                    tmdbId: tmdbId,
+                    name: details.title,
+                    posterPath: details.posterPath
+                )
+                return .entries(
+                    CalendarBuilder.movieEntries(
+                        item: resolvedItem, details: details, region: region, first: first, last: last
+                    ),
+                    resolvedItem: resolvedItem
+                )
             }
         } catch {
             if Self.isAuthError(error) { return .authFailure }
             return .skipped(.failed(Self.describe(error)))
         }
+    }
+
+    private func item(filling item: CalendarItem, tmdbId: Int, name: String?, posterPath: String?) -> CalendarItem {
+        let existingName = item.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CalendarItem(
+            id: item.id,
+            kind: item.kind,
+            type: item.type,
+            name: existingName.flatMap { $0.isEmpty ? nil : $0 } ?? name,
+            posterURL: item.posterURL ?? CalendarTmdb.imageURL(posterPath, size: "w342")?.absoluteString,
+            year: item.year,
+            imdbId: item.imdbId,
+            tmdbId: item.tmdbId ?? tmdbId
+        )
     }
 
     /// Runs `transform` over `input` with at most `maxConcurrent` calls in

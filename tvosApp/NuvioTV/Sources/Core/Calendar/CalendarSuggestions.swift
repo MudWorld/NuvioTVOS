@@ -1,6 +1,6 @@
 import Foundation
 
-/// Ready-made TMDB lists for adding many titles to the library at once
+/// Ready-made TMDB lists for adding many titles to the calendar at once
 /// ("anime this season", "series airing now", "upcoming movies").
 enum CalendarSuggestionList: String, CaseIterable, Identifiable, Sendable {
     case animeToday
@@ -8,21 +8,29 @@ enum CalendarSuggestionList: String, CaseIterable, Identifiable, Sendable {
     case seriesToday
     case airingNow
     case upcomingMovies
-    /// What the calendar already follows from the library, to remove titles.
+    /// Manual and automatic follows already shown by the calendar.
     case inCalendar
 
     var id: String { rawValue }
 
-    /// Lists built from TMDB/AniList; `inCalendar` comes from the library.
-    var isLibraryList: Bool { self == .inCalendar }
+    /// Lists built from TMDB/AniList; `inCalendar` shows current follows.
+    var isCalendarList: Bool { self == .inCalendar }
 
     var kind: CalendarMediaKind {
         self == .upcomingMovies ? .movie : .series
     }
 
-    /// Top-level button the list sits under in Add shows.
+    var itemType: String {
+        switch self {
+        case .animeToday, .animeThisSeason: return "anime"
+        case .upcomingMovies: return "movie"
+        default: return "series"
+        }
+    }
+
+    /// Top-level button the list sits under in Add to calendar.
     enum Group: String, CaseIterable, Identifiable, Sendable {
-        case anime, series, movies, library
+        case anime, series, movies, calendar
         var id: String { rawValue }
 
         var title: String {
@@ -30,7 +38,7 @@ enum CalendarSuggestionList: String, CaseIterable, Identifiable, Sendable {
             case .anime: return L10n.string("calendar_suggest_group_anime", fallback: "Anime")
             case .series: return L10n.string("calendar_suggest_group_series", fallback: "Series")
             case .movies: return L10n.string("calendar_suggest_group_movies", fallback: "Movies")
-            case .library: return L10n.string("calendar_suggest_group_library", fallback: "In calendar")
+            case .calendar: return L10n.string("calendar_suggest_group_calendar", fallback: "In calendar")
             }
         }
 
@@ -44,7 +52,7 @@ enum CalendarSuggestionList: String, CaseIterable, Identifiable, Sendable {
         case .animeToday, .animeThisSeason: return .anime
         case .seriesToday, .airingNow: return .series
         case .upcomingMovies: return .movies
-        case .inCalendar: return .library
+        case .inCalendar: return .calendar
         }
     }
 
@@ -55,7 +63,7 @@ enum CalendarSuggestionList: String, CaseIterable, Identifiable, Sendable {
         case .animeThisSeason: return L10n.string("calendar_suggest_this_season", fallback: "This season")
         case .airingNow: return L10n.string("calendar_suggest_airing_now", fallback: "Airing now")
         case .upcomingMovies: return L10n.string("calendar_suggest_upcoming", fallback: "Upcoming")
-        case .inCalendar: return L10n.string("calendar_suggest_group_library", fallback: "In calendar")
+        case .inCalendar: return L10n.string("calendar_suggest_group_calendar", fallback: "In calendar")
         }
     }
 
@@ -66,7 +74,7 @@ enum CalendarSuggestionList: String, CaseIterable, Identifiable, Sendable {
         case .seriesToday: return L10n.string("calendar_suggest_series_today", fallback: "Series today")
         case .airingNow: return L10n.string("calendar_suggest_airing", fallback: "Series airing now")
         case .upcomingMovies: return L10n.string("calendar_suggest_movies", fallback: "Upcoming movies")
-        case .inCalendar: return L10n.string("calendar_suggest_group_library", fallback: "In calendar")
+        case .inCalendar: return L10n.string("calendar_suggest_group_calendar", fallback: "In calendar")
         }
     }
 }
@@ -129,7 +137,7 @@ enum CalendarSuggestions {
         case .upcomingMovies:
             return CalendarSuggestionRequest(path: "movie/upcoming", query: ["region": region])
         case .inCalendar:
-            // Built from the library, no request.
+            // Built from current calendar follows, no request.
             return CalendarSuggestionRequest(path: "", query: [:])
         }
     }
@@ -139,12 +147,13 @@ enum CalendarSuggestions {
     }
 }
 
-/// One title in the "Add shows" picker, from a TMDB list or from the
+/// One title in the "Add to calendar" picker, from a TMDB list or from the
 /// AniList + Simkl "Anime today" list.
 struct CalendarSuggestionItem: Identifiable, Hashable, Sendable {
-    /// Matches `CalendarResult.libraryKeys` ("series:123") when the TMDB id is known.
+    /// Stable title key, preferring TMDB and then IMDb.
     let key: String
     let kind: CalendarMediaKind
+    let type: String
     let tmdbId: Int?
     let imdbId: String?
     let title: String
@@ -152,26 +161,30 @@ struct CalendarSuggestionItem: Identifiable, Hashable, Sendable {
     let year: Int?
     /// Shown under the title instead of the year (e.g. the broadcast time).
     let detail: String?
+    var isAutomaticallyFollowed = false
 
     var id: String { key }
     var isAddable: Bool { tmdbId != nil || imdbId != nil }
 
-    init(key: String, kind: CalendarMediaKind, tmdbId: Int?, imdbId: String?, title: String,
-         posterURL: URL?, year: Int?, detail: String? = nil) {
+    init(key: String, kind: CalendarMediaKind, type: String? = nil, tmdbId: Int?, imdbId: String?, title: String,
+         posterURL: URL?, year: Int?, detail: String? = nil, isAutomaticallyFollowed: Bool = false) {
         self.key = key
         self.kind = kind
+        self.type = type ?? (kind == .series ? "series" : "movie")
         self.tmdbId = tmdbId
         self.imdbId = imdbId
         self.title = title
         self.posterURL = posterURL
         self.year = year
         self.detail = detail
+        self.isAutomaticallyFollowed = isAutomaticallyFollowed
     }
 
-    init(tmdb result: CalendarTmdb.ListResult, kind: CalendarMediaKind) {
+    init(tmdb result: CalendarTmdb.ListResult, kind: CalendarMediaKind, type: String? = nil) {
         self.init(
             key: CalendarSuggestions.key(kind: kind, tmdbId: result.id),
             kind: kind,
+            type: type,
             tmdbId: result.id,
             imdbId: nil,
             title: result.displayTitle,
@@ -182,117 +195,103 @@ struct CalendarSuggestionItem: Identifiable, Hashable, Sendable {
 }
 
 extension CalendarSuggestions {
-    /// The "In calendar" list: every library title the calendar follows,
-    /// with its next date, then the titles it couldn't place.
-    static func libraryItems(
-        library: [String: CalendarItem],
+    /// Lists manual follows and automatic watched/progress titles together,
+    /// with their source made explicit. Only manual follows can be removed.
+    static func calendarItems(
+        manualFollows: [String: CalendarItem],
+        automaticFollows: [String: CalendarItem],
+        resolvedManualFollows: [String: CalendarItem],
         nextDates: [String: CalendarDay],
         skipped: [String: CalendarSkippedItem],
         today: CalendarDay
     ) -> [CalendarSuggestionItem] {
-        func item(_ key: String, _ entry: CalendarItem, detail: String) -> CalendarSuggestionItem {
-            let tmdb = key.hasPrefix("skipped:") ? nil : key.split(separator: ":").last.flatMap { Int($0) }
+        func item(
+            key: String,
+            entry: CalendarItem,
+            resultKey: String,
+            isManual: Bool,
+            isAutomatic: Bool,
+            skippedItem: CalendarSkippedItem? = nil
+        ) -> CalendarSuggestionItem {
+            let tmdb = entry.tmdbId ?? resultKey.split(separator: ":").last.flatMap { Int($0) }
+            let date = nextDates[resultKey].map { CalendarFormat.nextDate($0, today: today) }
+            let detail = skippedItem.map { CalendarFormat.skipReason($0.reason) }
+                ?? date
+                ?? L10n.string("calendar_suggest_nothing_upcoming", fallback: "Nothing upcoming")
+            let savedTitle = entry.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackTitle = tmdb.map {
+                L10n.format("calendar_suggest_tmdb_fallback", fallback: "TMDB # %d", $0)
+            } ?? (entry.id.isEmpty
+                ? L10n.string("calendar_suggest_unknown_title", fallback: "Unknown title")
+                : entry.id)
+            let title = savedTitle.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackTitle
+            let sourceLabel: String
+            if isManual && isAutomatic {
+                sourceLabel = L10n.string(
+                    "calendar_suggest_manual_and_automatic",
+                    fallback: "Manual follow · also followed while watched or in progress"
+                )
+            } else if isManual {
+                sourceLabel = L10n.string("calendar_suggest_manual_follow", fallback: "Manual follow")
+            } else {
+                sourceLabel = L10n.string(
+                    "calendar_suggest_automatic_follow",
+                    fallback: "Automatically followed while watched or in progress"
+                )
+            }
             return CalendarSuggestionItem(
                 key: key,
                 kind: entry.kind,
+                type: entry.type,
                 tmdbId: tmdb,
-                imdbId: entry.id.hasPrefix("tt") ? entry.id : nil,
-                title: entry.name ?? entry.id,
+                imdbId: entry.imdbId ?? NuvioMeta.canonicalImdbID(from: entry.id),
+                title: title,
                 posterURL: entry.posterURL.flatMap(URL.init(string:)),
                 year: entry.year,
-                detail: detail
+                detail: "\(sourceLabel) · \(detail)",
+                isAutomaticallyFollowed: isAutomatic
             )
         }
-        let placed = library
-            .filter { skipped[$0.key] == nil }
-            .map { key, entry in
-                item(key, entry, detail: nextDates[key].map { CalendarFormat.nextDate($0, today: today) }
-                    ?? L10n.string("calendar_suggest_nothing_upcoming", fallback: "Nothing upcoming"))
+
+        let manualRows = manualFollows.map { storageKey, entry -> CalendarSuggestionItem in
+            let resolved = resolvedManualFollows.first { CalendarManualFollowStore.sameTitle($0.value, entry) }
+            let automatic = resolved.flatMap { resolvedEntry in
+                automaticFollows[resolvedEntry.key].map { item in (key: resolvedEntry.key, value: item) }
             }
+                ?? automaticFollows.first { CalendarManualFollowStore.sameTitle($0.value, entry) }
+            let matchKey = resolved?.key ?? automatic?.key ?? storageKey
+            let skip = skipped.values.first { CalendarManualFollowStore.sameTitle($0.item, entry) }
+            return item(
+                key: storageKey,
+                entry: entry,
+                resultKey: matchKey,
+                isManual: true,
+                isAutomatic: automatic != nil,
+                skippedItem: skip
+            )
+        }
+
+        let automaticRows = automaticFollows.compactMap { resultKey, entry -> CalendarSuggestionItem? in
+            let stillManuallyFollowed = resolvedManualFollows[resultKey].map { resolved in
+                manualFollows.values.contains { CalendarManualFollowStore.sameTitle($0, resolved) }
+            } ?? false
+            guard !stillManuallyFollowed,
+                  !manualFollows.values.contains(where: { CalendarManualFollowStore.sameTitle($0, entry) }) else { return nil }
+            let skip = skipped.values.first { CalendarManualFollowStore.sameTitle($0.item, entry) }
+            return item(
+                key: CalendarManualFollowStore.key(for: entry),
+                entry: entry,
+                resultKey: resultKey,
+                isManual: false,
+                isAutomatic: true,
+                skippedItem: skip
+            )
+        }
+
+        return (manualRows + automaticRows)
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        let unplaced = skipped
-            .filter { library[$0.key] != nil }
-            .map { key, skip in item(key, skip.item, detail: CalendarFormat.skipReason(skip.reason)) }
-            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        return placed + unplaced
     }
 
-    /// Library keys of skipped titles ("skipped:series:tt…"), so they can be
-    /// listed and removed next to the placed ones.
+    /// Keys used by skipped-title rows in the result.
     static func skippedKey(_ skip: CalendarSkippedItem) -> String { "skipped:\(skip.id)" }
-}
-
-/// Adds titles picked from a suggestion list to the active library, the same
-/// way "Add to Library" in Details does: the remote watchlist when a Trakt,
-/// Simkl, MDBList or WeTrakr library is selected, otherwise the local one.
-enum CalendarLibraryWriter {
-    @MainActor
-    private static var useRemote: Bool {
-        TraktSettingsStore.librarySourceMode != .local && SelectedLibraryService.isSelectedAndAuthenticated
-    }
-
-    /// Adds the titles and returns the library item stored for each key.
-    @MainActor
-    static func add(_ items: [CalendarSuggestionItem], client: CalendarTmdb.Client) async -> [String: CalendarItem] {
-        var added: [String: CalendarItem] = [:]
-        let remote = useRemote
-        for item in items where item.isAddable {
-            // Addons look titles up by IMDb id, so prefer it over tmdb:.
-            var imdb = item.imdbId
-            if imdb == nil, let tmdb = item.tmdbId {
-                imdb = try? await client.imdbId(tmdbId: tmdb, kind: item.kind)
-            }
-            guard let id = imdb ?? item.tmdbId.map({ "tmdb:\($0)" }) else { continue }
-            let type = item.kind == .series ? "series" : "movie"
-            let meta = NuvioMeta(
-                id: id,
-                name: item.title,
-                posterUrl: item.posterURL?.absoluteString,
-                imdbId: imdb,
-                tmdbId: item.tmdbId,
-                type: type,
-                year: item.year
-            )
-            let ok: Bool
-            if remote {
-                ok = await SelectedLibraryService.setWatchlist(meta, isInWatchlist: true)
-            } else {
-                LibraryStore.add(meta)
-                ok = true
-            }
-            if ok {
-                added[item.key] = CalendarItem(id: id, kind: item.kind, type: type, name: item.title,
-                                               posterURL: meta.posterUrl, year: item.year)
-            }
-        }
-        return added
-    }
-
-    /// Removes library titles; returns the keys that were removed.
-    @MainActor
-    static func remove(_ keys: [String], items: [String: CalendarItem]) async -> Set<String> {
-        var removed = Set<String>()
-        let remote = useRemote
-        for key in keys {
-            guard let item = items[key] else { continue }
-            let type = item.type.isEmpty ? (item.kind == .series ? "series" : "movie") : item.type
-            let tmdb = key.split(separator: ":").last.flatMap { Int($0) }
-            let meta = NuvioMeta(
-                id: item.id,
-                name: item.name ?? item.id,
-                posterUrl: item.posterURL,
-                imdbId: item.id.hasPrefix("tt") ? item.id : nil,
-                tmdbId: tmdb,
-                type: type,
-                year: item.year
-            )
-            if remote {
-                if await SelectedLibraryService.setWatchlist(meta, isInWatchlist: false) { removed.insert(key) }
-            } else if LibraryStore.contains(metaId: item.id, type: type) {
-                // toggle returns the new state: false = no longer in the library.
-                if !LibraryStore.toggle(meta: meta) { removed.insert(key) }
-            }
-        }
-        return removed
-    }
 }

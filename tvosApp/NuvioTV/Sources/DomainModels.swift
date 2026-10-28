@@ -299,7 +299,12 @@ public class ProfileManager {
     }
 
     private func saveProfiles(_ profiles: [Profile]) throws {
+        let previousIDs = Set(((try? getProfiles()) ?? []).map(\.id))
+        let retiredIDs = previousIDs.subtracting(profiles.map(\.id))
         try writeProfiles(profiles)
+        for profileID in retiredIDs {
+            CalendarManualFollowStore.clear(profileID: profileID)
+        }
         NotificationCenter.default.post(name: Self.profilesChangedNotification, object: nil)
     }
 
@@ -1015,6 +1020,10 @@ public class ProfileViewModel: ObservableObject {
     }
 
     private func applyProfilesInMemory(_ remoteProfiles: [Profile], preferredActiveId: String?) -> Bool {
+        let retainedIDs = Set(remoteProfiles.map(\.id))
+        for retiredID in Set(profiles.map(\.id)).subtracting(retainedIDs) {
+            CalendarManualFollowStore.clear(profileID: retiredID)
+        }
         profiles = remoteProfiles
         let profile = preferredActiveId.flatMap { preferredId in
             remoteProfiles.first(where: { $0.id == preferredId })
@@ -1068,7 +1077,11 @@ public class ProfileViewModel: ObservableObject {
         LastManualSourceStore.eraseAll()
         // Cover the whole local id space (1-6 + guest), not just the current
         // list, so suites left behind by previously deleted profiles go too.
-        ProfileSettings.eraseAll(profileIds: previousIds + (1...6).map(String.init) + [guest.id])
+        let retiredProfileIDs = Set(previousIds + (1...6).map(String.init) + [guest.id])
+        ProfileSettings.eraseAll(profileIds: Array(retiredProfileIDs))
+        for profileID in retiredProfileIDs {
+            CalendarManualFollowStore.clear(profileID: profileID)
+        }
         NuvioSyncManager.eraseProfileIndexBindings()
 
         ProfileSettings.setActiveProfile(guest.id, isPrimary: guest.isAdmin)
