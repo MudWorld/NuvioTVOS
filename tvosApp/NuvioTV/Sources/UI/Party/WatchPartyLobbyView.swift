@@ -44,7 +44,6 @@ struct WatchPartyLobbyView: View {
                     header
                     HStack(alignment: .top, spacing: 22) {
                         accountGateCard
-                            .padding(.horizontal, 28)
                             .frame(maxWidth: .infinity)
 
                         Color.clear
@@ -64,8 +63,6 @@ struct WatchPartyLobbyView: View {
             .padding(.horizontal, 49) // Match LibraryGridMetrics.pageInset.
             .padding(.top, 56) // Match the Library page header inset.
             .padding(.bottom, 48)
-            .frame(maxWidth: 1500, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
         }
         .background {
             if canUseAccount, let media = service.session?.party?.media {
@@ -205,23 +202,15 @@ struct WatchPartyLobbyView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 20) {
-            Image(systemName: TVTab.party.symbol)
-                .font(.system(size: 30, weight: .semibold))
+        VStack(alignment: .leading, spacing: 6) {
+            Text(TVTab.party.title)
+                .font(.system(size: 42, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
-                .frame(width: 70, height: 70)
-                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(TVTab.party.title)
-                    .font(.system(size: 42, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-
-                Text("Create a private room or join a friend with their room code.")
-                    .font(.system(size: 20, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.72))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text("Create a private room or join a friend with their room code.")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(.white.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.bottom, 4)
     }
