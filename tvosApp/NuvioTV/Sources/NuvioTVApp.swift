@@ -278,7 +278,7 @@ private enum DetailsReturnDestination {
 }
 
 enum TVTab: Hashable, Identifiable, CaseIterable {
-    case profile, home, party, search, library, calendar, settings
+    case profile, home, party, search, library, calendar, liveTV, settings
     case collection(CollectionHomeID)
 
     static var allCases: [Self] {
@@ -286,6 +286,7 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
         if WatchPartyConfiguration.isEnabled { tabs.append(.party) }
         tabs += [.search, .library]
         if isCalendarEnabled { tabs.append(.calendar) }
+        if LiveTVStore.hasPlaylists { tabs.append(.liveTV) }
         tabs.append(.settings)
         return tabs
     }
@@ -302,6 +303,7 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
         case .search: return "Search"
         case .library: return "Library"
         case .calendar: return "Calendar"
+        case .liveTV: return "LiveTV"
         case .settings: return "Settings"
         case .party: return "Watch Party"
         case .collection(let id): return "Collection:\(id.key)"
@@ -314,6 +316,7 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
         case .search: return L10n.string("nav_search", fallback: "Search")
         case .library: return L10n.string("nav_library", fallback: "Library")
         case .calendar: return L10n.string("nav_calendar", fallback: "Calendar")
+        case .liveTV: return L10n.string("tvos_livetv_title", fallback: "Live TV")
         case .settings: return L10n.string("nav_settings", fallback: "Settings")
         case .party: return "Watch Party"
         case .collection: return L10n.string("tmdb_collections_title", fallback: "Collections")
@@ -326,6 +329,7 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
         case .search: return "magnifyingglass"
         case .library: return "rectangle.stack"
         case .calendar: return "calendar"
+        case .liveTV: return "tv"
         case .settings: return "gearshape"
         case .party: return "person.2.fill"
         case .collection: return "rectangle.stack.fill"
@@ -4190,6 +4194,7 @@ private struct TVMainTabView: View {
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
     @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
     @AppStorage(SettingsKey.showCalendarTab) private var showCalendarTab = true
+    @ObservedObject private var liveTVStore = LiveTVStore.shared
     @AppStorage(SettingsKey.searchStyle) private var searchStyle = "Netflix"
     @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
@@ -4223,6 +4228,9 @@ private struct TVMainTabView: View {
         }
         .onChange(of: showCalendarTab) { _, isShown in
             if !isShown, selectedTab == .calendar { selectedTab = .home }
+        }
+        .onChange(of: liveTVStore.playlists.isEmpty) { _, isEmpty in
+            if isEmpty, selectedTab == .liveTV { selectedTab = .home }
         }
     }
 
@@ -4434,7 +4442,21 @@ private struct TVMainTabView: View {
                     .tabItem { Label(TVTab.calendar.title, systemImage: TVTab.calendar.symbol) }
                     .tag(TVTab.calendar)
             }
+            if !liveTVStore.playlists.isEmpty {
+                liveTVTabContent
+                    .tabItem { Label(TVTab.liveTV.title, systemImage: TVTab.liveTV.symbol) }
+                    .tag(TVTab.liveTV)
+            }
             settingsTabContent.tabItem { settingsTabLabel }.tag(TVTab.settings)
+        }
+    }
+
+    /// Settings → Integrations → Live TV playlists, played like a cloud file
+    /// with live metadata.
+    private var liveTVTabContent: some View {
+        LiveTVView { channel in
+            guard let url = URL(string: channel.streamURL) else { return }
+            onPlayCloudFile(url, channel.playbackMeta)
         }
     }
 
@@ -4483,6 +4505,11 @@ private struct TVMainTabView: View {
             if showCalendarTab {
                 Tab(TVTab.calendar.title, systemImage: TVTab.calendar.symbol, value: TVTab.calendar) {
                     calendarTabContent
+                }
+            }
+            if !liveTVStore.playlists.isEmpty {
+                Tab(TVTab.liveTV.title, systemImage: TVTab.liveTV.symbol, value: TVTab.liveTV) {
+                    liveTVTabContent
                 }
             }
             Tab(value: TVTab.settings) { settingsTabContent } label: { settingsTabLabel }

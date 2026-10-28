@@ -4105,6 +4105,8 @@ private struct IntegrationSettingsView: View {
     @State private var addonSummaryCount = 0
     @State private var showingPluginsSettings = false
     @ObservedObject private var pluginStore = PluginStore.shared
+    @State private var showingLiveTVSettings = false
+    @ObservedObject private var liveTVStore = LiveTVStore.shared
     @State private var addonSummarySyncedAddons: [SyncedAddon]? = nil
     @StateObject private var debridConnection = DebridAccountConnectionViewModel()
 
@@ -4206,6 +4208,15 @@ private struct IntegrationSettingsView: View {
                 accentColor: accentColor
             ) {
                 showingPluginsSettings = true
+            }
+
+            SettingsFeatureSummaryCard(
+                featureName: L10n.string("tvos_livetv_title", fallback: "Live TV"),
+                status: settingsCountSummary(liveTVStore.channels.count, singular: "channel", plural: "channels"),
+                actionSubtitle: L10n.string("tvos_settings_livetv_open_subtitle", fallback: "Add IPTV playlists (M3U) for the Live TV tab"),
+                accentColor: accentColor
+            ) {
+                showingLiveTVSettings = true
             }
 
             SettingsGroup(
@@ -4689,6 +4700,15 @@ private struct IntegrationSettingsView: View {
                 subtitle: L10n.string("tvos_settings_plugins_sheet_subtitle", fallback: "Plugin repositories (manifest.json with scrapers) for extra stream sources")
             ) {
                 PluginsSettingsSection(accentColor: accentColor)
+            }
+            .modifier(ClearPresentationBackgroundIfAvailable())
+        }
+        .fullScreenCover(isPresented: $showingLiveTVSettings) {
+            SettingsFeatureSettingsSheet(
+                title: L10n.string("tvos_livetv_title", fallback: "Live TV"),
+                subtitle: L10n.string("tvos_settings_livetv_sheet_subtitle", fallback: "IPTV playlists in M3U format. Channels appear in the Live TV tab.")
+            ) {
+                LiveTVSettingsSection(accentColor: accentColor)
             }
             .modifier(ClearPresentationBackgroundIfAvailable())
         }
@@ -16990,5 +17010,106 @@ private struct PluginRepositoryGroup: View {
         if !scraper.contentLanguage.isEmpty { parts.append(scraper.contentLanguage.joined(separator: ", ").uppercased()) }
         if !scraper.description.isEmpty { parts.append(scraper.description) }
         return parts.joined(separator: " • ")
+    }
+}
+
+// MARK: - Live TV
+
+/// Settings → Integrations → Live TV: M3U playlist URLs for the Live TV tab.
+private struct LiveTVSettingsSection: View {
+    let accentColor: Color
+
+    @ObservedObject private var store = LiveTVStore.shared
+    @State private var playlistURLInput = ""
+    @State private var statusMessage: String?
+    @State private var isAdding = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            SettingsGroup(
+                title: L10n.string("tvos_settings_livetv_playlists", fallback: "Playlists"),
+                subtitle: L10n.string(
+                    "tvos_settings_livetv_playlists_subtitle",
+                    fallback: "Only use playlists you are allowed to watch, for example iptv-org lists of free-to-air channels"
+                )
+            ) {
+                SettingsTextFieldRow(
+                    title: L10n.string("tvos_settings_livetv_playlist_url", fallback: "Playlist URL"),
+                    subtitle: isAdding
+                        ? L10n.string("tvos_settings_livetv_adding", fallback: "Loading playlist…")
+                        : L10n.string("tvos_settings_livetv_url_hint", fallback: "Paste an M3U / M3U8 playlist link"),
+                    placeholder: "https://.../playlist.m3u",
+                    text: $playlistURLInput,
+                    fieldWidth: 560,
+                    onCommit: addPlaylist
+                )
+                .settingsEntryAnchor()
+
+                if let statusMessage {
+                    SettingsInfoRow(title: L10n.string("tvos_settings_plugin_status", fallback: "Status"), value: statusMessage, isDiagnostic: true)
+                }
+
+                if !store.playlists.isEmpty {
+                    SettingsActionRow(
+                        title: L10n.string("tvos_settings_livetv_refresh_all", fallback: "Refresh All"),
+                        subtitle: L10n.string("tvos_settings_livetv_refresh_all_subtitle", fallback: "Download the playlists again"),
+                        value: store.refreshingURLs.isEmpty ? "" : L10n.string("tvos_settings_plugins_refreshing", fallback: "Refreshing…"),
+                        accentColor: accentColor
+                    ) {
+                        Task { await store.refreshAll() }
+                    }
+                }
+            }
+
+            ForEach(store.playlists) { playlist in
+                SettingsGroup(title: playlist.name, subtitle: subtitle(for: playlist)) {
+                    HStack(spacing: 14) {
+                        SettingsActionRow(
+                            title: L10n.string("tvos_settings_plugins_refresh", fallback: "Refresh"),
+                            subtitle: L10n.format("tvos_settings_livetv_channel_count", fallback: "%@ channels", String(playlist.channelCount)),
+                            value: "",
+                            accentColor: accentColor
+                        ) {
+                            Task { await store.refresh(playlist) }
+                        }
+                        AddonReorderButton(systemImage: "trash", disabled: false) {
+                            store.removePlaylist(playlist)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func subtitle(for playlist: LiveTVPlaylist) -> String {
+        var parts: [String] = []
+        if store.refreshingURLs.contains(playlist.url) {
+            parts.append(L10n.string("tvos_settings_plugins_refreshing", fallback: "Refreshing…"))
+        } else if let error = playlist.errorMessage {
+            parts.append(error)
+        }
+        parts.append(playlist.url)
+        return parts.joined(separator: " • ")
+    }
+
+    private func addPlaylist() {
+        let input = playlistURLInput
+        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isAdding else { return }
+        isAdding = true
+        statusMessage = nil
+        Task { @MainActor in
+            defer { isAdding = false }
+            do {
+                let playlist = try await store.addPlaylist(rawURL: input)
+                playlistURLInput = ""
+                statusMessage = L10n.format(
+                    "tvos_settings_livetv_added",
+                    fallback: "Added %@ channels. Open the Live TV tab in the sidebar.",
+                    String(playlist.channelCount)
+                )
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
     }
 }
