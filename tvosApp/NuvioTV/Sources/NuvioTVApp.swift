@@ -409,6 +409,7 @@ struct ContentView: View {
     @State private var detailsCollectionContext: CollectionPlaybackContext?
     @State private var reopenStreamPickerOnDetails = false
     @State private var reopenStreamPickerEpisode: NuvioVideo?
+    @State private var reopenStreamPickerResumePosition: Double?
     /// Episode to select when Details opens from the calendar.
     @State private var detailsFocusEpisode: DetailsEpisodeFocus?
     /// Title whose liquid-glass quick-actions menu is showing (long-press on a
@@ -1080,6 +1081,7 @@ struct ContentView: View {
             pendingDetailsPlaybackRequestID = nextDetailsPlaybackRequestID
             reopenStreamPickerOnDetails = false
             reopenStreamPickerEpisode = nil
+            reopenStreamPickerResumePosition = nil
         } else {
             pendingDetailsPlaybackRequestID = nil
         }
@@ -1489,7 +1491,9 @@ struct ContentView: View {
             )
         }
         guard !WatchedStore.contains(meta: meta) else { return nil }
-        return ContinueWatchingStore.item(for: meta.id)?.resumePosition
+        return ContinueWatchingStore.item(for: meta)?.resumePosition
+            ?? ContinueWatchingStore.item(for: meta.id)?.resumePosition
+            ?? ContinueWatchingStore.resumePosition(for: meta, season: nil, episode: nil)
     }
 
     private static func seasonSortKey(_ season: Int) -> Int {
@@ -1536,6 +1540,7 @@ struct ContentView: View {
                 metaId: item.meta.id,
                 season: item.season,
                 episode: item.episode,
+                meta: item.meta,
                 profileId: profileId
             )
         let streamURL = storedStream?.url ?? ""
@@ -1632,6 +1637,9 @@ struct ContentView: View {
                 withAnimation(.easeInOut(duration: 0.28)) {
                     isResolvingContinueWatchingStream = false
                     resolvingContinueWatchingItem = nil
+                    reopenStreamPickerOnDetails = true
+                    reopenStreamPickerEpisode = context.current ?? Self.manualPlaybackEpisode(for: item)
+                    reopenStreamPickerResumePosition = startFromBeginning ? nil : Self.resumePosition(for: item)
                     openDetailsRoot(id: item.meta.id, type: item.meta.type, collectionContext: provenance)
                 }
             }
@@ -1648,6 +1656,7 @@ struct ContentView: View {
             continueWatchingMenuItem = nil
             reopenStreamPickerOnDetails = true
             reopenStreamPickerEpisode = episode
+            reopenStreamPickerResumePosition = Self.resumePosition(for: item)
             openDetailsRoot(
                 id: item.meta.id, type: item.meta.type,
                 collectionContext: collectionContext(id: item.meta.id, type: item.meta.type, resuming: true)
@@ -1964,6 +1973,7 @@ struct ContentView: View {
         creatingParty = false; choosingPartySource = false
         pendingDetailsPlaybackRequestID = nil
         reopenStreamPickerOnDetails = false
+        reopenStreamPickerResumePosition = nil
         reopenStreamPickerEpisode = nil
         detailsBackStack = origin.destination.backStack
         detailsReturnDestination = origin.destination.returnDestination
@@ -2333,7 +2343,9 @@ struct ContentView: View {
                 playbackIsActionPlaybackSession = false
                 playbackEpisodes = target.meta.isSeries ? (target.meta.videos ?? []) : []
                 playbackCurrentEpisode = target.episode
-                reopenStreamPickerOnDetails = false; reopenStreamPickerEpisode = nil
+                reopenStreamPickerOnDetails = false
+                reopenStreamPickerEpisode = nil
+                reopenStreamPickerResumePosition = nil
                 pendingDetailsPlaybackRequestID = nil
                 let subtitle = target.episode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? ""
                 presentBuiltInPlayer(
@@ -2715,6 +2727,7 @@ struct ContentView: View {
                 creatingParty = true; choosingPartySource = false
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
+                reopenStreamPickerResumePosition = nil
                 selectedTab = .search
             },
             onChoosePartySource: { media in
@@ -2896,7 +2909,8 @@ struct ContentView: View {
                     subtitle: "",
                     externalSubtitles: [],
                     resumeFrom: nil,
-                    origin: .cloudLibrary
+                    origin: .cloudLibrary,
+                    filename: meta.name
                 )
             },
             onOpenCalendarEntry: { entry in
@@ -2932,10 +2946,13 @@ struct ContentView: View {
             },
             initiallyPresentStreamPicker: reopenStreamPickerOnDetails,
             initialStreamPickerEpisode: reopenStreamPickerEpisode,
+            initialStreamPickerResumePosition: reopenStreamPickerResumePosition,
             initialFocusEpisode: detailsFocusEpisode.flatMap { $0.metaID == contentId ? $0 : nil },
             onInitialStreamPickerPresented: {
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
+                reopenStreamPickerResumePosition = nil
+                reopenStreamPickerResumePosition = nil
             },
             onWatchPartyMovieReady: { meta in
                 guard creatingParty, !meta.isSeries else { return }
@@ -2950,7 +2967,9 @@ struct ContentView: View {
                 if let url = URL(string: streamUrlString) {
                     let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
                     reopenStreamPickerOnDetails = false
+        reopenStreamPickerResumePosition = nil
                     reopenStreamPickerEpisode = nil
+                    reopenStreamPickerResumePosition = nil
                     playbackEpisodes = episodes
                     playbackCurrentEpisode = currentEpisode
                     presentPlayback(
@@ -3017,7 +3036,8 @@ struct ContentView: View {
                     subtitle: "",
                     externalSubtitles: [],
                     resumeFrom: nil,
-                    origin: .cloudLibrary
+                    origin: .cloudLibrary,
+                    filename: meta.name
                 )
             },
             onBack: {
@@ -3151,6 +3171,8 @@ struct ContentView: View {
             if candidate.isDebridResolvable {
                 PlaybackStartupTiming.markSourcePicked(stream: candidate, token: startupToken)
                 var resolvedURL: URL? = nil
+                var resolvedFilename = candidate.filename
+                var resolvedVideoSize = candidate.videoSize
                 var providerName = debrid.selectedKind.rawValue
                 if debrid.isEnabled {
                     let result = await debrid.resolvedURL(
@@ -3158,8 +3180,10 @@ struct ContentView: View {
                         season: season,
                         episode: episode
                     )
-                    if case let .success(url, _, _)? = result {
+                    if case let .success(url, filename, videoSize)? = result {
                         resolvedURL = url
+                        resolvedFilename = filename ?? candidate.filename
+                        resolvedVideoSize = videoSize ?? candidate.videoSize
                     } else if case .rateLimited? = result {
                         print("[NuvioTVApp] Debrid provider \(providerName) rate-limited (HTTP 429); halting candidate sweep.")
                         break
@@ -3198,9 +3222,9 @@ struct ContentView: View {
                     subtitles: candidate.subtitles,
                     streamName: candidate.name,
                     streamDescription: candidate.description,
-                    filename: candidate.filename,
+                    filename: resolvedFilename,
                     addonName: candidate.addonName,
-                    videoSize: candidate.videoSize,
+                    videoSize: resolvedVideoSize,
                     videoHash: candidate.videoHash,
                     provider: providerName,
                     bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate),
@@ -3335,6 +3359,8 @@ struct ContentView: View {
 
         if stream.isDebridResolvable {
             var resolvedURL: URL? = nil
+            var resolvedFilename = stream.filename
+            var resolvedVideoSize = stream.videoSize
             var providerName = debrid.selectedKind.rawValue
             if debrid.isEnabled {
                 let result = await debrid.resolvedURL(
@@ -3342,8 +3368,10 @@ struct ContentView: View {
                     season: season,
                     episode: episode
                 )
-                if case let .success(url, _, _)? = result {
+                if case let .success(url, filename, videoSize)? = result {
                     resolvedURL = url
+                    resolvedFilename = filename ?? stream.filename
+                    resolvedVideoSize = videoSize ?? stream.videoSize
                 } else if case .rateLimited? = result {
                     print("[NuvioTVApp] Debrid provider \(providerName) rate-limited (HTTP 429) for stream.")
                     return nil
@@ -3381,9 +3409,9 @@ struct ContentView: View {
                 subtitles: stream.subtitles,
                 streamName: stream.name,
                 streamDescription: stream.description,
-                filename: stream.filename,
+                filename: resolvedFilename,
                 addonName: stream.addonName,
-                videoSize: stream.videoSize,
+                videoSize: resolvedVideoSize,
                 videoHash: stream.videoHash,
                 provider: providerName,
                 bingeGroup: bingeGroup,
@@ -11495,7 +11523,7 @@ private struct TVGridHeroSlideshowView: View {
         if RemoteTrackingState.isProgressSourceAuthenticated {
             return TraktProgressService.currentContinueWatchingItem(for: meta)
         }
-        return ContinueWatchingStore.item(for: meta.id)
+        return ContinueWatchingStore.item(for: meta) ?? ContinueWatchingStore.item(for: meta.id)
     }
 
     private func refreshHeroPlayTargetFromCurrentData() {

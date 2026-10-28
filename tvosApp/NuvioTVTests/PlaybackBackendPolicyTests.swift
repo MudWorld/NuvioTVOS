@@ -79,6 +79,124 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertFalse(PlaybackBackendPolicy.mpvSupportsURL("smb://nas/movies/feature.mkv"))
     }
 
+    func testRemoteDiscStartupWatchdogGraceAcceptsCurrentOpenedAetherLoadWithoutBenchmarkToken() {
+        let request = PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie.iso")!)
+        XCTAssertNil(request.startupBenchmarkToken)
+        let progress = AetherStartupLoadCheckpointWitness(
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpoint: .sourceOpened
+        )
+
+        XCTAssertTrue(AetherDiscStartupWatchdogGracePolicy.shouldGrantGrace(
+            request: request,
+            backend: .aether,
+            loadGeneration: 8,
+            dispatchedLoadGeneration: 8,
+            progress: progress,
+            graceAlreadyGranted: false
+        ), "A current engine startup witness is sufficient even when no benchmark token was supplied")
+
+        let opaqueURLRequest = PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/stream?id=123")!,
+            filename: "Movie.BluRay.iso"
+        )
+        XCTAssertTrue(AetherDiscStartupWatchdogGracePolicy.shouldGrantGrace(
+            request: opaqueURLRequest,
+            backend: .aether,
+            loadGeneration: 8,
+            dispatchedLoadGeneration: 8,
+            progress: AetherStartupLoadCheckpointWitness(
+                ownerLoadGeneration: 8,
+                engineGenerationFloor: 14,
+                progressGeneration: 15,
+                checkpoint: .streamsProbed
+            ),
+            graceAlreadyGranted: false
+        ), "A remote filename hint with an opaque URL remains eligible after sourceOpened")
+    }
+
+    func testRemoteDiscStartupWatchdogGraceRequiresCurrentDispatchAndSourceOpenedProgress() {
+        let request = PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie.iso")!)
+        let currentProgress = AetherStartupLoadCheckpointWitness(
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpoint: .sourceOpened
+        )
+        let shouldGrant: (PlaybackLoadRequest?, PlayerBackendKind, UInt64, UInt64?, AetherStartupLoadCheckpointWitness?) -> Bool = {
+            request, backend, generation, dispatchedGeneration, progress in
+            AetherDiscStartupWatchdogGracePolicy.shouldGrantGrace(
+                request: request,
+                backend: backend,
+                loadGeneration: generation,
+                dispatchedLoadGeneration: dispatchedGeneration,
+                progress: progress,
+                graceAlreadyGranted: false
+            )
+        }
+
+        XCTAssertFalse(shouldGrant(request, .aether, 8, nil, currentProgress), "A coordinator load waiting for dispatch has no grace")
+        XCTAssertFalse(shouldGrant(request, .aether, 8, 7, currentProgress), "A dispatch from an older generation has no grace")
+        XCTAssertFalse(shouldGrant(request, .aether, 8, 8, nil), "No startup progress cannot claim the checkpoint")
+        XCTAssertFalse(shouldGrant(request, .aether, 8, 8, AetherStartupLoadCheckpointWitness(
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpoint: .dispatched
+        )), "The dispatched checkpoint alone is not enough")
+        XCTAssertFalse(shouldGrant(request, .aether, 8, 8, AetherStartupLoadCheckpointWitness(
+            ownerLoadGeneration: 7,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpoint: .sourceOpened
+        )), "A stale load owner cannot claim current progress")
+        XCTAssertFalse(shouldGrant(request, .aether, 8, 8, AetherStartupLoadCheckpointWitness(
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 15,
+            progressGeneration: 14,
+            checkpoint: .sourceOpened
+        )), "Progress below the engine generation floor is stale")
+    }
+
+    func testRemoteDiscStartupWatchdogGraceIsLimitedToDispatchedAetherVODDiscHintsOnce() {
+        let request = PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie.iso")!)
+        let progress = AetherStartupLoadCheckpointWitness(
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpoint: .sourceOpened
+        )
+        let shouldGrant: (PlaybackLoadRequest?, PlayerBackendKind, Bool) -> Bool = { candidate, backend, graceAlreadyGranted in
+            AetherDiscStartupWatchdogGracePolicy.shouldGrantGrace(
+                request: candidate,
+                backend: backend,
+                loadGeneration: 8,
+                dispatchedLoadGeneration: 8,
+                progress: progress,
+                graceAlreadyGranted: graceAlreadyGranted
+            )
+        }
+
+        XCTAssertFalse(shouldGrant(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/movie.mkv")!
+        ), .aether, false), "An ordinary remote URL keeps the 30-second timeout")
+        XCTAssertFalse(shouldGrant(PlaybackLoadRequest(
+            videoURL: URL(fileURLWithPath: "/movies/movie.iso")
+        ), .aether, false), "A local disc image keeps the 30-second timeout")
+        XCTAssertFalse(shouldGrant(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/movie.iso")!,
+            isLiveStream: true
+        ), .aether, false), "Live requests keep the 30-second timeout")
+        XCTAssertFalse(shouldGrant(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/movie.iso")!,
+            isSports: true
+        ), .aether, false), "Sports requests keep the 30-second timeout")
+        XCTAssertFalse(shouldGrant(request, .mpv, false), "MPV requests keep the 30-second timeout")
+        XCTAssertFalse(shouldGrant(request, .aether, true), "One load can receive only one additional window")
+    }
+
     func testDebridAndTorrentAcceptISOExtensions() {
         XCTAssertTrue(DebridVideo.isPlayable("Movie.1080p.BluRay.iso"))
         XCTAssertTrue(DebridVideo.isPlayable("Disc.IMG"))

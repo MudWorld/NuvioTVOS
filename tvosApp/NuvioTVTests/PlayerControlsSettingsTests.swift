@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import UIKit
 import AetherEngine
 @testable import NuvioTV
 
@@ -443,6 +444,7 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertEqual(SettingsKey.playerShowAudio, "nuvio.tv.settings.playback.showAudio")
         XCTAssertEqual(SettingsKey.seekPreviewEnabled, "nuvio.tv.settings.playback.seekPreviewEnabled")
         XCTAssertEqual(SettingsKey.showLoadingStatus, "nuvio.tv.settings.playback.showLoadingStatus")
+        XCTAssertEqual(SettingsKey.sceneFeatureEnabled, "nuvio.tv.settings.playback.sceneFeatureEnabled")
         XCTAssertEqual(SettingsKey.audioDelayPersistEnabled, "nuvio.tv.settings.playback.audioDelayPersistEnabled")
         XCTAssertEqual(SettingsKey.persistentAudioDelayMs, "nuvio.tv.settings.playback.persistentAudioDelayMs")
 
@@ -453,6 +455,7 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowAudio))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.seekPreviewEnabled))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.showLoadingStatus))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.sceneFeatureEnabled))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.audioDelayPersistEnabled))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.persistentAudioDelayMs))
     }
@@ -570,6 +573,7 @@ final class PlayerControlsSettingsTests: XCTestCase {
         let audioEnabled = defaults.object(forKey: SettingsKey.playerShowAudio) as? Bool ?? true
         let seekPreviewEnabled = defaults.object(forKey: SettingsKey.seekPreviewEnabled) as? Bool ?? true
         let showLoadingStatus = defaults.object(forKey: SettingsKey.showLoadingStatus) as? Bool ?? true
+        let sceneEnabled = defaults.object(forKey: SettingsKey.sceneFeatureEnabled) as? Bool ?? true
 
         XCTAssertTrue(pipEnabled)
         XCTAssertTrue(episodesEnabled)
@@ -578,6 +582,7 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertTrue(audioEnabled)
         XCTAssertTrue(seekPreviewEnabled)
         XCTAssertTrue(showLoadingStatus)
+        XCTAssertTrue(sceneEnabled)
 
         // When explicitly set to false, it should disable
         defaults.set(false, forKey: SettingsKey.playerShowPiP)
@@ -587,6 +592,7 @@ final class PlayerControlsSettingsTests: XCTestCase {
         defaults.set(false, forKey: SettingsKey.playerShowAudio)
         defaults.set(false, forKey: SettingsKey.seekPreviewEnabled)
         defaults.set(false, forKey: SettingsKey.showLoadingStatus)
+        defaults.set(false, forKey: SettingsKey.sceneFeatureEnabled)
 
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowPiP))
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowEpisodes))
@@ -595,6 +601,45 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowAudio))
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.seekPreviewEnabled))
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.showLoadingStatus))
+        XCTAssertFalse(defaults.bool(forKey: SettingsKey.sceneFeatureEnabled))
+    }
+
+    @MainActor
+    func testSceneFeatureEnabledSettingRespectsProfileSettings() {
+        let profileStore = ProfileSettings.store(for: "scene-test-profile")
+        let previousActiveID = ProfileSettings.activeProfileID
+        ProfileSettings.setActiveProfile("scene-test-profile", isPrimary: false)
+        defer {
+            ProfileSettings.setActiveProfile(previousActiveID, isPrimary: true)
+            UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.scene-test-profile")
+        }
+
+        let model = PlayerViewModel()
+
+        // Default should be enabled
+        XCTAssertTrue(model.isSceneEnabled)
+
+        // When disabled via profile settings (e.g. from SettingsView via @AppStorage)
+        profileStore.set(false, forKey: SettingsKey.sceneFeatureEnabled)
+        XCTAssertFalse(model.isSceneEnabled)
+
+        // openScene() should be blocked
+        model.openScene()
+        XCTAssertFalse(model.showScenePanel)
+
+        // When re-enabled via setSceneEnabled
+        model.setSceneEnabled(true)
+        XCTAssertTrue(model.isSceneEnabled)
+        XCTAssertTrue(profileStore.bool(forKey: SettingsKey.sceneFeatureEnabled))
+
+        // Opening scene works when enabled
+        model.openScene()
+        XCTAssertTrue(model.showScenePanel)
+
+        // Disabling closes open scene
+        model.setSceneEnabled(false)
+        XCTAssertFalse(model.isSceneEnabled)
+        XCTAssertFalse(model.showScenePanel)
     }
 
     func testHybridSeekThumbnailPolicy() {
@@ -2362,6 +2407,65 @@ extension PlayerControlsSettingsTests {
     }
 
     @MainActor
+    func testPlayerViewModelPreservesOpaqueDiscFilenameForPlaybackRouting() throws {
+        let resolvedURL = URL(string: "https://provider.example/download?token=opaque")!
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        var dispatched: [(PlaybackLoadRequest, PlayerBackendKind)] = []
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { request, backend, _ in dispatched.append((request, backend)) }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+        }
+
+        model.load(
+            url: resolvedURL,
+            meta: NuvioMeta(id: "opaque-disc-title", name: "Disc", type: "movie"),
+            subtitle: "",
+            resumeFrom: nil,
+            filename: "movie.iso"
+        )
+
+        XCTAssertEqual(dispatched.count, 1)
+        guard let (request, backend) = dispatched.first else {
+            return XCTFail("Playback request was not dispatched")
+        }
+        XCTAssertEqual(request.filename, "movie.iso")
+        XCTAssertEqual(backend, .aether)
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: request))
+    }
+
+    @MainActor
+    func testPlayerViewModelFallsBackToURLFilenameWhenNoFilenameIsSupplied() throws {
+        let resolvedURL = URL(string: "https://provider.example/movie.mkv?token=opaque")!
+        var dispatched: [PlaybackLoadRequest] = []
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { request, _, _ in dispatched.append(request) }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+        }
+
+        model.load(
+            url: resolvedURL,
+            meta: NuvioMeta(id: "opaque-video-title", name: "Video", type: "movie"),
+            subtitle: "",
+            resumeFrom: nil
+        )
+
+        XCTAssertEqual(dispatched.count, 1)
+        XCTAssertEqual(dispatched.first?.filename, "movie.mkv")
+    }
+
+    @MainActor
     func testCurrentSourceUsesOriginalIDAfterPlaybackURLResolution() {
         let originalSource = NuvioStream(
             url: "https://provider.example/original.mkv",
@@ -3162,7 +3266,270 @@ extension PlayerControlsSettingsTests {
         XCTAssertEqual(frameProvider.captureCount, 3, "Closed Insight must not capture from the poll path")
         XCTAssertFalse(scene.isFrameSamplingActive)
     }
+
+    @MainActor
+    func testSourceSwitchHidesControlsAndSuppressesReveal() async {
+        let model = PlayerViewModel()
+        defer { model.shutdown() }
+        model.status = .playing
+        model.showControls = true
+        XCTAssertTrue(model.showControls)
+
+        model.openSidePanel(.sources)
+        XCTAssertFalse(model.showControls)
+        XCTAssertEqual(model.sidePanel, .sources)
+
+        let stream = NuvioStream(
+            url: "http://example.com/stream.m3u8",
+            name: "1080p Stream",
+            description: "Test",
+            addonName: "Addon"
+        )
+        model.activeMeta = NuvioMeta(id: "movie-1", name: "Movie", type: "movie")
+        model.resolvePlaybackStream = { _, _, _, _ in nil }
+        model.selectSource(stream)
+
+        // Controls must stay hidden when side panel closes during a source switch
+        XCTAssertFalse(model.showControls, "Controls must stay hidden during source switch")
+        XCTAssertTrue(model.isSwitchingSource, "isSwitchingSource must be true")
+
+        // Attempting to reveal controls while switching source must be suppressed
+        model.revealControls()
+        XCTAssertFalse(model.showControls, "revealControls must be suppressed while isSwitchingSource is true")
+    }
+
+    @MainActor
+    func testCloseSidePanelDuringReloadOrAwaitingStreamStartKeepsControlsHidden() {
+        let model = PlayerViewModel()
+        defer { model.shutdown() }
+        model.status = .playing
+
+        model.openSidePanel(.sources)
+        XCTAssertFalse(model.showControls)
+
+        // Simulate awaiting stream start
+        model.setAwaitingStreamStartForTesting(true)
+        model.closeSidePanel()
+        XCTAssertFalse(model.showControls, "closeSidePanel must not reveal controls while isAwaitingStreamStart is true")
+
+        // revealControls should also be suppressed
+        model.revealControls()
+        XCTAssertFalse(model.showControls, "revealControls must be suppressed while isAwaitingStreamStart is true")
+    }
 }
 
+@MainActor
+final class NextEpisodeAetherTransitionRegressionTests: XCTestCase {
+    func testAdvanceLoadsNextLocalEpisodeOnSameAetherController() async throws {
+        guard let controller = AetherPlaybackController() else {
+            throw XCTSkip("AetherEngine is unavailable in this test environment")
+        }
 
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nuvio-next-up-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let firstURL = directory.appendingPathComponent("episode-1.mp4")
+        let secondURL = directory.appendingPathComponent("episode-2.mp4")
+        let fixture = try makeLocalFixture()
+        try fixture.write(to: firstURL)
+        try fixture.write(to: secondURL)
 
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: controller,
+            engineSettingProvider: { "AetherEngine" }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            model.cancelStartupBenchmark()
+            model.shutdown()
+            window.isHidden = true
+            window.rootViewController = nil
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let meta = NuvioMeta(id: "next-up-local-fixture", name: "Next Up Fixture", type: "series")
+        let episode1 = NuvioVideo(id: "fixture:1:1", title: "Episode 1", season: 1, episode: 1)
+        let episode2 = NuvioVideo(
+            id: "fixture:1:2",
+            title: "Episode 2",
+            season: 1,
+            episode: 2,
+            released: "2024-01-01T00:00:00.000Z"
+        )
+
+        model.load(
+            url: firstURL,
+            meta: meta,
+            subtitle: "S1 · E1",
+            resumeFrom: nil,
+            currentEpisode: episode1
+        )
+        let initialGeneration = coordinator.loadGeneration
+        let firstEpisodeReady = await waitForPlayback(timeout: 20) {
+            model.status == .playing
+                && controller.isPlayerPlaying
+                && controller.isTransportPlaying
+                && !controller.isPlayerLoading
+                && !controller.audioTracks.isEmpty
+                && coordinator.hasPresentedCurrentAetherLoad(generation: coordinator.loadGeneration)
+        }
+        XCTAssertTrue(firstEpisodeReady, playbackDiagnostics("episode 1", model: model, coordinator: coordinator, controller: controller))
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertTrue(coordinator.aetherController === controller)
+
+        model.configureNextEpisode(
+            episodes: [episode1, episode2],
+            current: episode1,
+            autoPlayEnabled: false,
+            autoPlayCountdownSeconds: 10,
+            resolver: { _, _ in
+                PreparedNextStream(url: secondURL, subtitleLine: "S1 · E2", subtitles: [])
+            }
+        )
+        model.advance()
+
+        let nextEpisodeReady = await waitForPlayback(timeout: 20) {
+            coordinator.loadGeneration > initialGeneration
+                && coordinator.lastRequest?.videoURL == secondURL
+                && model.status == .playing
+                && !model.isAdvancingEpisode
+                && controller.isPlayerPlaying
+                && controller.isTransportPlaying
+                && !controller.isPlayerLoading
+                && !controller.audioTracks.isEmpty
+                && coordinator.hasPresentedCurrentAetherLoad(generation: coordinator.loadGeneration)
+        }
+        XCTAssertTrue(nextEpisodeReady, playbackDiagnostics("episode 2 after advance", model: model, coordinator: coordinator, controller: controller))
+        XCTAssertTrue(coordinator.aetherController === controller, "The transition must retain the original Aether controller")
+        XCTAssertEqual(coordinator.lastRequest?.videoURL, secondURL)
+        XCTAssertEqual(model.status, .playing)
+        XCTAssertFalse(model.isAdvancingEpisode, "Aether presenting playback must release the Next Up loading state")
+        XCTAssertTrue(controller.isTransportPlaying, "The next file's AAC track must be active on the existing controller")
+        XCTAssertFalse(controller.audioTracks.isEmpty, "The next file must expose its local AAC track")
+    }
+
+    private func makeLocalFixture() throws -> Data {
+        try XCTUnwrap(Data(base64Encoded: Self.localH264AACFixture, options: .ignoreUnknownCharacters))
+    }
+
+    private func waitForPlayback(timeout: TimeInterval, condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+
+    private func playbackDiagnostics(
+        _ phase: String,
+        model: PlayerViewModel,
+        coordinator: PlaybackSessionCoordinator,
+        controller: AetherPlaybackController
+    ) -> String {
+        let requestName = coordinator.lastRequest?.videoURL.lastPathComponent ?? "none"
+        let checkpoint = controller.engine.startupProgress.map { String(describing: $0.checkpoint) } ?? "none"
+        return "\(phase): status=\(model.status), advancing=\(model.isAdvancingEpisode), backend=\(coordinator.activeBackend), generation=\(coordinator.loadGeneration), request=\(requestName), engine=\(controller.engine.state), checkpoint=\(checkpoint), presented=\(coordinator.hasPresentedCurrentAetherLoad(generation: coordinator.loadGeneration)), loading=\(controller.isPlayerLoading), playerPlaying=\(controller.isPlayerPlaying), transportPlaying=\(controller.isTransportPlaying), audioTracks=\(controller.audioTracks.count), error=\(controller.currentErrorMessage), coordinatorError=\(coordinator.lastLoadError ?? "none")"
+    }
+
+    // 1.2-second H.264/AAC tone fixture, embedded so the test needs no network or external media tool.
+    private static let localH264AACFixture = """
+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
+sKUKVO2KsyVZkn1spVGVRlcZKBgb+jf0YGBgYGBgYGBgYGNmwYGRIgYGBgYGRIpZZZZZZZZZZZZZ
+ZZZZZZZZZZZZZZZZZZZZZZZZZZZeAAACUgYF//9O3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3Jl
+IDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIw
+MDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNh
+YmFjPTAgcmVmPTEgZGVibG9jaz0wOjA6MCBhbmFseXNlPTA6MCBtZT1kaWEgc3VibWU9MCBwc3k9
+MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0wIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRy
+ZWxsaXM9MCA4eDhkY3Q9MCBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21h
+X3FwX29mZnNldD0wIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRz
+PTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWlu
+ZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0xMiBrZXlpbnRfbWluPTEgc2Nl
+bmVjdXQ9MCBpbnRyYV9yZWZyZXNoPTAgcmM9Y3JmIG1idHJlZT0wIGNyZj0yMy4wIHFjb21wPTAu
+NjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTAAgAAAAB9liIQ6
+EYoAAhjxwABA9jgACHlJycnXXXXXXXXXXXXgARKS2spzZLmyXNkuX/9P/7/HVy9e//9b/3+uuLvX
+5//q//P364vi/4//q//b461qdB29pMMgwMDAwM6JU9fqYr2E4tgRkYxGoio1xUfSKj6RUfTdxKg3
+018YjLObjU/JG9KYCbURmRRsijeijeiD0UU4eeii6A8yA10Jip55555/lzcBIvEREFKrLe+Txf2+
+3+ntc6alpqpd1wlagFBWikoKCmomqpLTYV4s1kmayEz/x8GT7+5D4+Gx7+8IyfGYZ/eEP/Bg77wh
+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
+c1HA
+"""
+}

@@ -1,8 +1,18 @@
 import SwiftUI
 
 extension PlayerView {
+    var isLoadingOverlayVisible: Bool {
+        viewModel.isSwitchingSource
+            || viewModel.isReloadingStream
+            || viewModel.didDetectReplacementStream
+            || viewModel.isAdvancingEpisode
+            || viewModel.isAwaitingStreamStart
+            || !didReportPlaybackStarted
+            || (!viewModel.hasRenderedFirstFrame && !viewModel.isLiveStream)
+    }
+
     private var loadingOverlayFocusEnabled: Bool {
-        (!viewModel.showControls || viewModel.isSwitchingSource)
+        (!viewModel.showControls || isLoadingOverlayVisible)
             && !viewModel.showSettingsPanel
             && !viewModel.showScenePanel
             && !viewModel.isSceneDetailVisible
@@ -12,14 +22,10 @@ extension PlayerView {
     private func handleLoadingOverlayMove(_ direction: MoveCommandDirection) {
         switch direction {
         case .up:
-            if !viewModel.isSwitchingSource {
-                revealControlsAndFocusSettings()
-            }
+            break
         case .down:
-            if viewModel.isSceneEnabled {
+            if viewModel.isSceneEnabled && !isLoadingOverlayVisible {
                 viewModel.openScene()
-            } else if !viewModel.isSwitchingSource {
-                revealControlsAndFocusSettings()
             }
         default:
             break
@@ -88,7 +94,7 @@ extension PlayerView {
         } else {
             switch viewModel.status {
             case .buffering, .idle:
-                if viewModel.isSwitchingSource || viewModel.isReloadingStream || viewModel.didDetectReplacementStream || viewModel.isAdvancingEpisode || !didReportPlaybackStarted || (!viewModel.hasRenderedFirstFrame && !viewModel.isLiveStream) {
+                if isLoadingOverlayVisible {
                     PlayerLoadingOverlay(
                         backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
                         logoUrl: meta.logoUrl,
@@ -110,7 +116,7 @@ extension PlayerView {
                         .glassCircle()
                 }
             case .playing, .paused:
-                if viewModel.isSwitchingSource || viewModel.isReloadingStream || viewModel.didDetectReplacementStream || viewModel.isAdvancingEpisode || !didReportPlaybackStarted || (!viewModel.hasRenderedFirstFrame && !viewModel.isLiveStream) {
+                if isLoadingOverlayVisible {
                     PlayerLoadingOverlay(
                         backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
                         logoUrl: meta.logoUrl,

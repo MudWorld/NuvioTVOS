@@ -390,6 +390,18 @@ final class PlaybackSessionCoordinator: ObservableObject {
         return aetherController.hasPresentedCurrentLoad(generation: generation)
     }
 
+    func shouldGrantDiscStartupWatchdogGrace(generation: UInt64, graceAlreadyGranted: Bool) -> Bool {
+        guard loadGeneration == generation else { return false }
+        return AetherDiscStartupWatchdogGracePolicy.shouldGrantGrace(
+            request: lastRequest,
+            backend: activeBackend,
+            loadGeneration: generation,
+            dispatchedLoadGeneration: dispatchedLoadGeneration,
+            progress: aetherController?.startupLoadCheckpointWitness,
+            graceAlreadyGranted: graceAlreadyGranted
+        )
+    }
+
     func hasDispatchedCurrentLoad(generation: UInt64) -> Bool {
         loadGeneration == generation && dispatchedLoadGeneration == generation
     }

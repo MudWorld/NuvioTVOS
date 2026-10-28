@@ -219,7 +219,7 @@ struct PlayerView: View {
     }
 
     func revealControlsAndFocusSettings() {
-        guard !viewModel.isSwitchingSource else { return }
+        guard !viewModel.isSwitchingSource, !isLoadingOverlayVisible else { return }
         viewModel.setControlsAutoHideSuspended(false)
         viewModel.revealControls()
         DispatchQueue.main.async {

@@ -296,6 +296,7 @@ extension PlayerView {
             && !viewModel.moveSuppressed
             && !viewModel.controlsAutoHideSuspended
             && !isWakingFromBackground
+            && !isLoadingOverlayVisible
     }
 
     @ViewBuilder
@@ -755,28 +756,29 @@ extension PlayerView {
             .offset(y: viewModel.showScenePanel ? -160 : 0)
             .opacity(
                 isSeekingOrControlsVisible
-                    && !viewModel.isSwitchingSource
+                    && !isLoadingOverlayVisible
                     && !viewModel.showSettingsPanel
                     && !viewModel.showPauseOverlay
                 ? 1 : 0
             )
             .scaleEffect(
                 isSeekingOrControlsVisible
-                    && !viewModel.isSwitchingSource
+                    && !isLoadingOverlayVisible
                     && !viewModel.showSettingsPanel
                     && !viewModel.showPauseOverlay
                 ? 1 : 0.95
             )
             .allowsHitTesting(
                 isSeekingOrControlsVisible
-                    && !viewModel.isSwitchingSource
+                    && !isLoadingOverlayVisible
                     && !viewModel.showSettingsPanel
                     && !viewModel.showPauseOverlay
             )
-            .disabled(!isSeekingOrControlsVisible || viewModel.showScenePanel || viewModel.isSceneDetailVisible)
+            .disabled(!isSeekingOrControlsVisible || isLoadingOverlayVisible || viewModel.showScenePanel || viewModel.isSceneDetailVisible)
             .animation(.playerControls, value: viewModel.showControls)
             .animation(.playerControls, value: didReportPlaybackStarted)
             .animation(.playerControls, value: viewModel.isSwitchingSource)
+            .animation(.playerControls, value: viewModel.isAwaitingStreamStart)
             .animation(.playerControls, value: viewModel.isAdvancingEpisode)
             .animation(.playerControls, value: viewModel.showSettingsPanel)
             .animation(.playerControls, value: viewModel.isScrubbing)

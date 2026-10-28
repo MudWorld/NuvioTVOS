@@ -2492,6 +2492,45 @@ enum AetherStartupLoadPresentationPolicy {
     }
 }
 
+struct AetherStartupLoadCheckpointWitness {
+    let ownerLoadGeneration: UInt64?
+    let engineGenerationFloor: UInt64?
+    let progressGeneration: UInt64?
+    let checkpoint: StartupCheckpoint?
+}
+
+enum AetherDiscStartupWatchdogGracePolicy {
+    /// The URL or filename hint scopes the exception; sourceOpened does not
+    /// claim that the engine has positively identified a disc container.
+    static func shouldGrantGrace(
+        request: PlaybackLoadRequest?,
+        backend: PlayerBackendKind,
+        loadGeneration: UInt64,
+        dispatchedLoadGeneration: UInt64?,
+        progress: AetherStartupLoadCheckpointWitness?,
+        graceAlreadyGranted: Bool
+    ) -> Bool {
+        guard !graceAlreadyGranted,
+              backend == .aether,
+              dispatchedLoadGeneration == loadGeneration,
+              let request,
+              !request.isLiveStream,
+              !request.isSports,
+              PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString),
+              PlaybackBackendPolicy.isDiscImage(request.videoURL.absoluteString, filename: request.filename),
+              let progress,
+              progress.ownerLoadGeneration == loadGeneration,
+              let generationFloor = progress.engineGenerationFloor,
+              let progressGeneration = progress.progressGeneration,
+              progressGeneration >= generationFloor,
+              let checkpoint = progress.checkpoint,
+              checkpoint >= .sourceOpened else {
+            return false
+        }
+        return true
+    }
+}
+
 @MainActor
 final class AetherPlaybackController: UIViewController, PlaybackEngineControlling, ScrubThumbnailProviding {
     private struct StartupBenchmarkLoadOwner {
@@ -2643,6 +2682,17 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             engineGenerationFloor: owner?.engineGenerationFloor,
             progressGeneration: progress?.generation,
             checkpointIsPresenting: progress?.checkpoint == .presenting
+        )
+    }
+
+    var startupLoadCheckpointWitness: AetherStartupLoadCheckpointWitness {
+        let progress = engine.startupProgress
+        let owner = startupBenchmarkLoadOwner
+        return AetherStartupLoadCheckpointWitness(
+            ownerLoadGeneration: owner?.loadGeneration,
+            engineGenerationFloor: owner?.engineGenerationFloor,
+            progressGeneration: progress?.generation,
+            checkpoint: progress?.checkpoint
         )
     }
 
@@ -4735,6 +4785,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let preferDualLayerDolbyVision = ProfileSettings.current.bool(forKey: SettingsKey.preferDualLayerDolbyVision)
         let options = LoadOptions(
             httpHeaders: request.httpHeaders,
+            discImageHint: PlaybackBackendPolicy.isDiscImage(
+                request.videoURL.absoluteString, filename: request.filename),
             preferDualLayerDolbyVision: preferDualLayerDolbyVision,
             matchContentEnabled: matchContent,
             panelIsInHDRMode: panelInHDR,

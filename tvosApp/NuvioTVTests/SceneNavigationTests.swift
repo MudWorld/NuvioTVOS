@@ -18,6 +18,28 @@ final class SceneNavigationTests: XCTestCase {
         XCTAssertEqual(viewModel.status, .playing, "Playback must not pause when Scene opens")
         XCTAssertEqual(viewModel.sceneViewModel.selectedTab, .scene, "Scene tab must be selected initially")
     }
+
+    func testRemoteDownDoesNotOpenSceneWhenDisabledInSettings() {
+        let previous = ProfileSettings.current.object(forKey: SettingsKey.sceneFeatureEnabled)
+        ProfileSettings.current.set(false, forKey: SettingsKey.sceneFeatureEnabled)
+        defer {
+            if let previous {
+                ProfileSettings.current.set(previous, forKey: SettingsKey.sceneFeatureEnabled)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.sceneFeatureEnabled)
+            }
+        }
+
+        let viewModel = PlayerViewModel()
+        viewModel.status = .playing
+        XCTAssertFalse(viewModel.isSceneEnabled, "isSceneEnabled must reflect ProfileSettings.current = false")
+        XCTAssertFalse(viewModel.showScenePanel)
+
+        // Simulating remote Down when controls are hidden
+        viewModel.openScene()
+
+        XCTAssertFalse(viewModel.showScenePanel, "Scene panel must not open when disabled in settings")
+    }
     
     func testTabsAndCardsFocusNavigationLifecycle() {
         let coordinator = SceneCoordinator(

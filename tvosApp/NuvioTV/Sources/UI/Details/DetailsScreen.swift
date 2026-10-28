@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import Combine
 import ImageIO
 import AVFoundation
 import AVKit
@@ -51,6 +52,7 @@ struct DetailsScreen: View {
     var onOpenPerson: ((TmdbPersonMetadata) -> Void)? = nil
     let initiallyPresentStreamPicker: Bool
     let initialStreamPickerEpisode: NuvioVideo?
+    let initialStreamPickerResumePosition: Double?
     /// Episode to select in the episode list on open (from the calendar).
     let initialFocusEpisode: DetailsEpisodeFocus?
     let onInitialStreamPickerPresented: (() -> Void)?
@@ -60,6 +62,7 @@ struct DetailsScreen: View {
 
     @StateObject private var viewModel: DetailsViewModel
     @State private var isStreamPickerPresented = false
+    @State private var pendingStreamPickerResumePosition: Double? = nil
     @State private var isSmartPlaybackPending = false
     @State private var isPreparingPlayback = false
     @State private var isPreparingInitialPlayback = false
@@ -135,6 +138,7 @@ struct DetailsScreen: View {
         onInitialPlaybackRequestConsumed: ((UInt) -> Void)? = nil,
         initiallyPresentStreamPicker: Bool = false,
         initialStreamPickerEpisode: NuvioVideo? = nil,
+        initialStreamPickerResumePosition: Double? = nil,
         initialFocusEpisode: DetailsEpisodeFocus? = nil,
         onInitialStreamPickerPresented: (() -> Void)? = nil,
         onWatchPartyMovieReady: ((NuvioMeta) -> Void)? = nil,
@@ -176,11 +180,13 @@ struct DetailsScreen: View {
         self.onOpenPerson = onOpenPerson
         self.initiallyPresentStreamPicker = initiallyPresentStreamPicker
         self.initialStreamPickerEpisode = initialStreamPickerEpisode
+        self.initialStreamPickerResumePosition = initialStreamPickerResumePosition
         self.initialFocusEpisode = initialFocusEpisode
         self.onInitialStreamPickerPresented = onInitialStreamPickerPresented
         self.onWatchPartyMovieReady = onWatchPartyMovieReady
         self.creatingWatchPartyRoom = creatingWatchPartyRoom
         self.onWatchPartyMediaSelected = onWatchPartyMediaSelected
+        _pendingStreamPickerResumePosition = State(initialValue: initialStreamPickerResumePosition)
         _isPreparingInitialPlayback = State(initialValue: initialPlaybackRequestID != nil)
         _playbackPrewarmer = State(initialValue: DetailsPlaybackPrewarmer.engineBacked())
         _viewModel = StateObject(wrappedValue: DetailsViewModel(repository: repository))
@@ -380,6 +386,7 @@ struct DetailsScreen: View {
                     },
                     onDismiss: {
                         streamPickerAvailabilityMessage = nil
+                        pendingStreamPickerResumePosition = nil
                         isStreamPickerPresented = false
                     }
                 )
@@ -411,6 +418,7 @@ struct DetailsScreen: View {
                 isResolvingDebrid = false
                 isPreparingPlayback = false
             } else if isStreamPickerPresented {
+                pendingStreamPickerResumePosition = nil
                 isStreamPickerPresented = false
             } else {
                 handleBack()
@@ -583,6 +591,7 @@ struct DetailsScreen: View {
               let meta = viewModel.uiState.meta else { return }
 
         didHandleInitialStreamPicker = true
+        pendingStreamPickerResumePosition = initialStreamPickerResumePosition
         onInitialStreamPickerPresented?()
         isSmartPlaybackPending = false
         // Prefer the entry from the guide this screen just loaded. A Continue
@@ -656,6 +665,7 @@ struct DetailsScreen: View {
                     metaId: metaID,
                     season: season,
                     episode: episodeNumber,
+                    meta: meta,
                     profileId: profileID
                 )
             }
@@ -1468,6 +1478,8 @@ struct DetailsScreen: View {
                         if self.startupBenchmarkToken == startupToken {
                             self.startupBenchmarkToken = nil
                         }
+                        let resumePos = pendingStreamPickerResumePosition
+                        pendingStreamPickerResumePosition = nil
                         dispatchPlayback(
                             localURL.absoluteString,
                             candidate.httpHeaders ?? [:],
@@ -1481,7 +1493,7 @@ struct DetailsScreen: View {
                             candidate.filename,
                             candidate.videoSize,
                             candidate.videoHash,
-                            nil,
+                            resumePos,
                             startupToken,
                             candidate.id,
                             candidate.isNotPlayable
@@ -1513,6 +1525,8 @@ struct DetailsScreen: View {
             if self.startupBenchmarkToken == startupToken {
                 self.startupBenchmarkToken = nil
             }
+            let resumePos = pendingStreamPickerResumePosition
+            pendingStreamPickerResumePosition = nil
             dispatchPlayback(
                 url,
                 stream.httpHeaders ?? [:],
@@ -1526,7 +1540,7 @@ struct DetailsScreen: View {
                 stream.filename,
                 stream.videoSize,
                 stream.videoHash,
-                nil,
+                resumePos,
                 startupToken,
                 stream.id,
                 stream.isNotPlayable
@@ -1551,6 +1565,8 @@ struct DetailsScreen: View {
             if self.startupBenchmarkToken == startupToken {
                 self.startupBenchmarkToken = nil
             }
+            let resumePos = pendingStreamPickerResumePosition
+            pendingStreamPickerResumePosition = nil
             dispatchPlayback(
                 preURL.absoluteString,
                 stream.httpHeaders ?? [:],
@@ -1564,7 +1580,7 @@ struct DetailsScreen: View {
                 preResolvedFilename ?? stream.filename,
                 preResolvedVideoSize ?? stream.videoSize,
                 stream.videoHash,
-                nil,
+                resumePos,
                 startupToken,
                 stream.id,
                 stream.isNotPlayable
@@ -1624,6 +1640,8 @@ struct DetailsScreen: View {
                     if self.startupBenchmarkToken == startupToken {
                         self.startupBenchmarkToken = nil
                     }
+                    let resumePos = pendingStreamPickerResumePosition
+                    pendingStreamPickerResumePosition = nil
                     dispatchPlayback(
                         url.absoluteString,
                         stream.httpHeaders ?? [:],
@@ -1637,7 +1655,7 @@ struct DetailsScreen: View {
                         debridFilename ?? stream.filename,
                         debridVideoSize ?? stream.videoSize,
                         stream.videoHash,
-                        nil,
+                        resumePos,
                         startupToken,
                         stream.id,
                         stream.isNotPlayable
@@ -3927,6 +3945,7 @@ struct TvDetailsContent: View {
             metaId: meta.id,
             season: season,
             episode: episode,
+            meta: meta,
             profileId: ProfileSettings.activeProfileID
         ) != nil
     }
@@ -4654,6 +4673,66 @@ struct TvDetailsContent: View {
         }
     }
 
+    private func scrollID(for section: TvDetailsFocusSection) -> String {
+        switch section {
+        case .actions: return TvDetailsScrollID.topSection
+        case .episodes: return TvDetailsScrollID.episodesSection
+        case .cast: return TvDetailsScrollID.castSection
+        case .related: return TvDetailsScrollID.moreLikeThisSection
+        case .network: return TvDetailsScrollID.networkSection
+        case .production: return TvDetailsScrollID.productionSection
+        case .comments: return TvDetailsScrollID.commentsSection
+        }
+    }
+
+    private func handleMoveUpFromEpisodes(using scrollProxy: ScrollViewProxy) {
+        guard let currentIndex = detailsFocusOrder.firstIndex(of: .episodes), currentIndex > 0 else {
+            focusPlayFromEpisodes(using: scrollProxy)
+            return
+        }
+        let targetSection = detailsFocusOrder[currentIndex - 1]
+        switch targetSection {
+        case .actions:
+            focusPlayFromEpisodes(using: scrollProxy)
+        case .cast:
+            focusCastHeaderFromEpisodes()
+            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                scrollProxy.scrollTo(TvDetailsScrollID.castSection, anchor: .top)
+            }
+        default:
+            detailsFocusMoveGeneration &+= 1
+            pendingPlayFocusGeneration = nil
+            focusedDetailsSection = targetSection
+            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                scrollProxy.scrollTo(scrollID(for: targetSection), anchor: .top)
+            }
+        }
+    }
+
+    private func handleMoveDownFromEpisodes(using scrollProxy: ScrollViewProxy) {
+        guard let currentIndex = detailsFocusOrder.firstIndex(of: .episodes),
+              currentIndex + 1 < detailsFocusOrder.count else {
+            return
+        }
+        let targetSection = detailsFocusOrder[currentIndex + 1]
+        switch targetSection {
+        case .cast:
+            focusCastHeaderFromEpisodes()
+            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                scrollProxy.scrollTo(TvDetailsScrollID.castSection, anchor: .top)
+            }
+        case .actions:
+            focusPlayFromEpisodes(using: scrollProxy)
+        default:
+            detailsFocusMoveGeneration &+= 1
+            pendingPlayFocusGeneration = nil
+            focusedDetailsSection = targetSection
+            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                scrollProxy.scrollTo(scrollID(for: targetSection), anchor: .top)
+            }
+        }
+    }
+
     private var hasCastOrTrailer: Bool {
         guard let meta = uiState.meta else { return false }
         let hasPeople = !uiState.people.isEmpty
@@ -4717,7 +4796,7 @@ struct TvDetailsContent: View {
         if RemoteTrackingState.isProgressSourceAuthenticated {
             return TraktProgressService.currentContinueWatchingItem(for: meta)
         }
-        return ContinueWatchingStore.item(for: meta.id)
+        return ContinueWatchingStore.item(for: meta) ?? ContinueWatchingStore.item(for: meta.id)
     }
 
     private func refreshProgressAfterReturn() {
@@ -7479,7 +7558,7 @@ private struct TvDetailsEpisodes: View {
                         onMenuClosed: { onEpisodeMenuPresented(false) },
                         action: { onSelect(video) },
                         onPlayManually: onPlayManually != nil ? { onPlayManually?(video) } : nil,
-                        smartStreamSelection: smartStreamSelection || (reuseLastLink && LastPlaybackStreamStore.load(metaId: meta.id, season: video.season, episode: video.episode, profileId: ProfileSettings.activeProfileID) != nil),
+                        smartStreamSelection: smartStreamSelection || (reuseLastLink && LastPlaybackStreamStore.load(metaId: meta.id, season: video.season, episode: video.episode, meta: meta, profileId: ProfileSettings.activeProfileID) != nil),
                         onBack: onBack,
                         focus: episodeFocus,
                         restrictFocusToKey: effectiveFocusRestriction,

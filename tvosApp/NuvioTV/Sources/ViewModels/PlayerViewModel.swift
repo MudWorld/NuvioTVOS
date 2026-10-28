@@ -659,10 +659,12 @@ class PlayerViewModel: ObservableObject {
     /// the old pipeline down and opens the new one, which the poll would
     /// otherwise read as `.paused` — a black screen with no spinner, and the
     /// pause metadata sheet arming behind it.
-    private var isAwaitingStreamStart = false
+    @Published private(set) var isAwaitingStreamStart = false
     private(set) var loadWatchdogTask: Task<Void, Never>?
     private var isFailingOver = false
     private var toastClearTask: Task<Void, Never>?
+    private var loadWatchdogGeneration: UInt64?
+    private var loadWatchdogDiscGraceGranted = false
     /// A source that hasn't started within this long is treated as dead.
     private let loadTimeoutSeconds: UInt64 = 30
 
@@ -1161,7 +1163,7 @@ class PlayerViewModel: ObservableObject {
             httpHeaders: httpHeaders,
             streamName: title.isEmpty ? nil : title,
             streamDescription: subtitle.isEmpty ? nil : subtitle,
-            filename: url.lastPathComponent
+            filename: activeFilename ?? url.lastPathComponent
         )
         videoNaturalSize = .zero
         startPolling()
@@ -2551,9 +2553,13 @@ class PlayerViewModel: ObservableObject {
         currentLoadStarted = false
         let targetURL = activeStreamURL
         let targetGeneration = sessionCoordinator.loadGeneration
-        let timeout = loadTimeoutSeconds
+        if loadWatchdogGeneration != targetGeneration {
+            loadWatchdogGeneration = targetGeneration
+            loadWatchdogDiscGraceGranted = false
+        }
+        let timeoutSeconds = loadTimeoutSeconds
         loadWatchdogTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: timeout * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
             guard !Task.isCancelled, let self,
                   self.sessionCoordinator.loadGeneration == targetGeneration,
                   self.sessionCoordinator.lastLoadError == nil,
@@ -2565,10 +2571,34 @@ class PlayerViewModel: ObservableObject {
                   !self.isFailingOver,
                   self.activeStreamURL == targetURL
             else { return }
+            var elapsedTimeout = timeoutSeconds
+            if self.sessionCoordinator.shouldGrantDiscStartupWatchdogGrace(
+                generation: targetGeneration,
+                graceAlreadyGranted: self.loadWatchdogDiscGraceGranted
+            ) {
+                self.loadWatchdogDiscGraceGranted = true
+                elapsedTimeout += timeoutSeconds
+                print("[TVTrace] ⏳ [LOAD_WATCHDOG_GRACE] Remote disc-image hint reached Aether sourceOpened; allowing one additional \(timeoutSeconds)s startup window (\(elapsedTimeout)s total).")
+                try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                guard !Task.isCancelled,
+                      self.sessionCoordinator.loadGeneration == targetGeneration,
+                      self.sessionCoordinator.lastLoadError == nil,
+                      !self.currentLoadStarted,
+                      !self.hasRenderedFirstFrame,
+                      !self.livePlaybackHasStarted,
+                      !self.hasProducedMidFilePosition,
+                      !self.didShutdown,
+                      !self.isFailingOver,
+                      self.activeStreamURL == targetURL
+                else { return }
+            }
             let memReport = TVMemoryDiagnostic.detailedReport(label: "LOAD_WATCHDOG_TIMEOUT")
-            print("[TVTrace] ⚠️ [LOAD_WATCHDOG_TIMEOUT] Source failed to start within \(timeout)s for url=\(targetURL ?? "nil")\n\(memReport)")
+            let diagnosticURL = targetURL.flatMap { URL(string: $0) }.map {
+                AddonTransportUrls.diagnosticDescription(for: $0)
+            } ?? "<redacted URL>"
+            print("[TVTrace] ⚠️ [LOAD_WATCHDOG_TIMEOUT] Source failed to start within \(elapsedTimeout)s for url=\(diagnosticURL)\n\(memReport)")
             if self.isStandalonePlaybackSession {
-                self.status = .error("The stream did not start within \(self.loadTimeoutSeconds) seconds.")
+                self.status = .error("The stream did not start within \(elapsedTimeout) seconds.")
                 return
             }
             if (self.isLiveStream || self.activeMeta?.isSports == true),
@@ -2579,7 +2609,7 @@ class PlayerViewModel: ObservableObject {
                 return
             }
             guard self.reloadCurrentStream != nil else {
-                self.status = .error("The stream did not start within \(self.loadTimeoutSeconds) seconds.")
+                self.status = .error("The stream did not start within \(elapsedTimeout) seconds.")
                 return
             }
             if let url = self.activeStreamURL {
@@ -2590,7 +2620,7 @@ class PlayerViewModel: ObservableObject {
                 LastPlaybackStreamStore.remove(metaId: meta.id, season: numbers?.season, episode: numbers?.episode)
             }
             self.attemptFailover(
-                reason: "The source didn't start within \(self.loadTimeoutSeconds) seconds. Every available source was tried.",
+                reason: "The source didn't start within \(elapsedTimeout) seconds. Every available source was tried.",
                 toast: nil
             )
         }
@@ -2630,7 +2660,9 @@ class PlayerViewModel: ObservableObject {
             )
         }
         guard !WatchedStore.contains(meta: meta) else { return nil }
-        return ContinueWatchingStore.item(for: meta.id)?.resumePosition
+        return ContinueWatchingStore.item(for: meta)?.resumePosition
+            ?? ContinueWatchingStore.item(for: meta.id)?.resumePosition
+            ?? ContinueWatchingStore.resumePosition(for: meta, season: nil, episode: nil)
     }
 
     /// The playing Usenet release turned out too damaged (long runs of
@@ -3063,6 +3095,10 @@ class PlayerViewModel: ObservableObject {
 
     func pollForTesting(using controller: PlaybackEngineControlling) {
         tick(engineOverride: controller)
+    }
+
+    func setAwaitingStreamStartForTesting(_ awaiting: Bool) {
+        isAwaitingStreamStart = awaiting
     }
 
     static func scenePlaybackPollTransition(
@@ -6295,7 +6331,7 @@ class PlayerViewModel: ObservableObject {
 
     func revealControls() {
         hidePeek()
-        if isScrubbing || controlsAutoHideSuspended || showScenePanel || isSceneDetailVisible { return }
+        if isScrubbing || controlsAutoHideSuspended || showScenePanel || isSceneDetailVisible || isSwitchingSource || isReloadingStream || isAdvancingEpisode || isAwaitingStreamStart { return }
         // Full transport chrome supersedes the pause metadata sheet.
         cancelPauseOverlaySchedule()
         showPauseOverlay = false
@@ -6354,7 +6390,9 @@ class PlayerViewModel: ObservableObject {
     func closeSidePanel() {
         sidePanel = nil
         controlsAutoHideSuspended = false
-        if status == .paused {
+        if isSwitchingSource || isReloadingStream || isAdvancingEpisode || isAwaitingStreamStart {
+            showControls = false
+        } else if status == .paused {
             showControls = false
             schedulePauseOverlay()
         } else {
@@ -6511,6 +6549,7 @@ class PlayerViewModel: ObservableObject {
         status = .buffering
         cancelPauseOverlaySchedule()
         showPauseOverlay = false
+        showControls = false
         engine.pausePlayback()
         return token
     }
@@ -6631,7 +6670,17 @@ class PlayerViewModel: ObservableObject {
     @Published var showScenePanel: Bool = false
     
     var isSceneEnabled: Bool {
-        UserDefaults.standard.object(forKey: SettingsKey.sceneFeatureEnabled) as? Bool ?? true
+        (ProfileSettings.current.object(forKey: SettingsKey.sceneFeatureEnabled) as? Bool)
+            ?? (UserDefaults.standard.object(forKey: SettingsKey.sceneFeatureEnabled) as? Bool)
+            ?? true
+    }
+
+    func setSceneEnabled(_ enabled: Bool) {
+        ProfileSettings.current.set(enabled, forKey: SettingsKey.sceneFeatureEnabled)
+        if !enabled && showScenePanel {
+            closeScene()
+        }
+        objectWillChange.send()
     }
     
     var isSceneDetailVisible: Bool {
@@ -7227,6 +7276,7 @@ class PlayerViewModel: ObservableObject {
                 metaId: activeMeta.id,
                 season: resolvedEpisodeNumbers?.season,
                 episode: resolvedEpisodeNumbers?.episode,
+                meta: activeMeta,
                 profileId: WatchedStore.activeProfileId
             )
             if shouldSaveNuvioSyncProgress {
@@ -7266,6 +7316,7 @@ class PlayerViewModel: ObservableObject {
                 httpHeaders: activeHTTPHeaders,
                 season: season,
                 episode: episode,
+                meta: activeMeta,
                 profileId: WatchedStore.activeProfileId
             )
         } else if completesPlayback {
@@ -7273,6 +7324,7 @@ class PlayerViewModel: ObservableObject {
                 metaId: activeMeta.id,
                 season: season,
                 episode: episode,
+                meta: activeMeta,
                 profileId: WatchedStore.activeProfileId
             )
         }
@@ -7810,7 +7862,7 @@ class PlayerViewModel: ObservableObject {
         explicitSeekProgressCheckpoint = nil
         if let meta = activeMeta {
             let numbers = resolvedEpisodeNumbers
-            LastPlaybackStreamStore.remove(metaId: meta.id, season: numbers?.season, episode: numbers?.episode)
+            LastPlaybackStreamStore.remove(metaId: meta.id, season: numbers?.season, episode: numbers?.episode, meta: meta)
         }
         // Try to silently reload a fresh link before surfacing the error.
         recoverExpiredStream()
@@ -7818,7 +7870,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     private static func expectedDuration(for meta: NuvioMeta) -> Double? {
-        if let stored = ContinueWatchingStore.item(for: meta.id)?.duration, stored >= 60 {
+        if let stored = (ContinueWatchingStore.item(for: meta) ?? ContinueWatchingStore.item(for: meta.id))?.duration, stored >= 60 {
             return stored
         }
         return runtimeSeconds(from: meta.runtime)

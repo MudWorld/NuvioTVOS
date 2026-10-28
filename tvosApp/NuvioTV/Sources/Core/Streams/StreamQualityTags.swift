@@ -501,7 +501,7 @@ enum LastStreamQualityStore {
     }
 
     private static func storageKey(for profileId: String?) -> String {
-        let id = profileId ?? ProfileSettings.activeProfileID ?? "default"
+        let id = profileId ?? WatchedStore.activeProfileId ?? ProfileSettings.activeProfileID ?? "default"
         return "lastStreamQuality.\(id)"
     }
 
@@ -542,8 +542,9 @@ enum LastStreamQualityStore {
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
-        if let profileId {
-            return ProfileSettings.store(for: profileId)
+        let id = profileId ?? WatchedStore.activeProfileId ?? ProfileSettings.activeProfileID
+        if let id {
+            return ProfileSettings.store(for: id)
         }
         return ProfileSettings.current
     }
@@ -555,7 +556,7 @@ enum LastStreamQualityStore {
 enum LastPlaybackStreamStore {
     private static let prefix = "nuvio.tv.lastPlaybackStream."
     private static let storageDirectoryName = "lastPlaybackStream"
-    private static let maxEntries = 100
+    private static let maxEntries = 300
     private static let lock = NSLock()
     /// Maximum time-to-live (2 hours) for cached remote/debrid stream URLs.
     /// Local files (SMB, localhost, private LAN) do not expire based on this TTL.
@@ -582,6 +583,53 @@ enum LastPlaybackStreamStore {
         let savedAt: Date?
     }
 
+    public static func candidateKeys(for metaId: String, meta: NuvioMeta? = nil) -> [String] {
+        var keys = [String]()
+        let trimmed = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            keys.append(trimmed)
+            if let imdb = NuvioMeta.canonicalImdbID(from: trimmed), !keys.contains(imdb) {
+                keys.append(imdb)
+            }
+            if trimmed.hasPrefix("movie:") {
+                let stripped = String(trimmed.dropFirst(6))
+                if !keys.contains(stripped) { keys.append(stripped) }
+            } else if trimmed.hasPrefix("series:") {
+                let stripped = String(trimmed.dropFirst(7))
+                if !keys.contains(stripped) { keys.append(stripped) }
+            } else if trimmed.hasPrefix("tmdb:") {
+                let stripped = String(trimmed.dropFirst(5))
+                if !keys.contains(stripped) { keys.append(stripped) }
+            }
+        }
+        if let meta {
+            let metaTrimmed = meta.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !metaTrimmed.isEmpty && !keys.contains(metaTrimmed) {
+                keys.append(metaTrimmed)
+            }
+            if let imdb = meta.imdbId.flatMap(NuvioMeta.canonicalImdbID(from:)), !keys.contains(imdb) {
+                keys.append(imdb)
+            }
+            if let imdbFromId = NuvioMeta.canonicalImdbID(from: meta.id), !keys.contains(imdbFromId) {
+                keys.append(imdbFromId)
+            }
+            if let tmdb = meta.tmdbId, tmdb > 0 {
+                let tmdbKey = "tmdb:\(tmdb)"
+                if !keys.contains(tmdbKey) { keys.append(tmdbKey) }
+                let rawTmdb = String(tmdb)
+                if !keys.contains(rawTmdb) { keys.append(rawTmdb) }
+            }
+        }
+        return keys
+    }
+
+    private static func matchesEpisode(recordSeason: Int?, recordEpisode: Int?, requestedSeason: Int?, requestedEpisode: Int?) -> Bool {
+        if (requestedSeason == nil || requestedSeason == 0) && (requestedEpisode == nil || requestedEpisode == 0) {
+            return (recordSeason == nil || recordSeason == 0) && (recordEpisode == nil || recordEpisode == 0)
+        }
+        return recordSeason == requestedSeason && recordEpisode == requestedEpisode
+    }
+
     private static func isRemoteExpiringURL(_ urlString: String) -> Bool {
         guard let url = URL(string: urlString) else { return false }
         if url.scheme?.lowercased() == "smb" { return false }
@@ -599,6 +647,7 @@ enum LastPlaybackStreamStore {
         httpHeaders: [String: String] = [:],
         season: Int?,
         episode: Int?,
+        meta: NuvioMeta? = nil,
         profileId: String? = nil,
         savedAt: Date = Date()
     ) {
@@ -618,13 +667,18 @@ enum LastPlaybackStreamStore {
         defer { lock.unlock() }
 
         var records = loadRecords(profileId: profileId)
-        records[trimmedMetaId] = record
+        let keys = candidateKeys(for: trimmedMetaId, meta: meta)
+        for key in keys {
+            records[key] = record
+        }
         persistRecords(records, profileId: profileId)
 
         let store = defaults(for: profileId)
-        let legacyKey = prefix + trimmedMetaId
-        if store.object(forKey: legacyKey) != nil {
-            store.removeObject(forKey: legacyKey)
+        for key in keys {
+            let legacyKey = prefix + key
+            if store.object(forKey: legacyKey) != nil {
+                store.removeObject(forKey: legacyKey)
+            }
         }
     }
 
@@ -632,6 +686,7 @@ enum LastPlaybackStreamStore {
         metaId: String,
         season: Int?,
         episode: Int?,
+        meta: NuvioMeta? = nil,
         profileId: String? = nil,
         now: Date = Date(),
         customTTL: TimeInterval? = nil
@@ -645,45 +700,50 @@ enum LastPlaybackStreamStore {
         defer { lock.unlock() }
 
         var records = loadRecords(profileId: profileId)
-        if let record = records[trimmedMetaId],
-           record.season == season,
-           record.episode == episode {
-            if isRemoteExpiringURL(record.url) {
-                if let savedAt = record.savedAt {
-                    if now.timeIntervalSince(savedAt) > ttl {
-                        records.removeValue(forKey: trimmedMetaId)
+        let keys = candidateKeys(for: trimmedMetaId, meta: meta)
+
+        for key in keys {
+            if let record = records[key],
+               matchesEpisode(recordSeason: record.season, recordEpisode: record.episode, requestedSeason: season, requestedEpisode: episode) {
+                if isRemoteExpiringURL(record.url) {
+                    if let savedAt = record.savedAt {
+                        if now.timeIntervalSince(savedAt) > ttl {
+                            records.removeValue(forKey: key)
+                            persistRecords(records, profileId: profileId)
+                            return nil
+                        }
+                    } else {
+                        records.removeValue(forKey: key)
                         persistRecords(records, profileId: profileId)
                         return nil
                     }
-                } else {
-                    records.removeValue(forKey: trimmedMetaId)
-                    persistRecords(records, profileId: profileId)
-                    return nil
                 }
+                return (record.url, record.httpHeaders ?? [:])
             }
-            return (record.url, record.httpHeaders ?? [:])
         }
 
         // Legacy fallback from UserDefaults
         let store = defaults(for: profileId)
-        let key = prefix + trimmedMetaId
-        if let data = store.data(forKey: key),
-           let record = try? JSONDecoder().decode(Record.self, from: data) {
-            store.removeObject(forKey: key)
-            if record.season == season, record.episode == episode {
-                if isRemoteExpiringURL(record.url) {
-                    if let savedAt = record.savedAt, now.timeIntervalSince(savedAt) <= ttl {
-                        var updated = records
-                        updated[trimmedMetaId] = record
-                        persistRecords(updated, profileId: profileId)
-                        return (record.url, record.httpHeaders ?? [:])
+        for key in keys {
+            let legacyKey = prefix + key
+            if let data = store.data(forKey: legacyKey),
+               let record = try? JSONDecoder().decode(Record.self, from: data) {
+                store.removeObject(forKey: legacyKey)
+                if matchesEpisode(recordSeason: record.season, recordEpisode: record.episode, requestedSeason: season, requestedEpisode: episode) {
+                    if isRemoteExpiringURL(record.url) {
+                        if let savedAt = record.savedAt, now.timeIntervalSince(savedAt) <= ttl {
+                            var updated = records
+                            updated[key] = record
+                            persistRecords(updated, profileId: profileId)
+                            return (record.url, record.httpHeaders ?? [:])
+                        }
+                        return nil
                     }
-                    return nil
+                    var updated = records
+                    updated[key] = record
+                    persistRecords(updated, profileId: profileId)
+                    return (record.url, record.httpHeaders ?? [:])
                 }
-                var updated = records
-                updated[trimmedMetaId] = record
-                persistRecords(updated, profileId: profileId)
-                return (record.url, record.httpHeaders ?? [:])
             }
         }
         return nil
@@ -693,6 +753,7 @@ enum LastPlaybackStreamStore {
         metaId: String,
         season: Int? = nil,
         episode: Int? = nil,
+        meta: NuvioMeta? = nil,
         profileId: String? = nil
     ) {
         let trimmedMetaId = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -702,28 +763,38 @@ enum LastPlaybackStreamStore {
         defer { lock.unlock() }
 
         var records = loadRecords(profileId: profileId)
-        if let existing = records[trimmedMetaId] {
-            if (season == nil || existing.season == season) && (episode == nil || existing.episode == episode) {
-                records.removeValue(forKey: trimmedMetaId)
-                persistRecords(records, profileId: profileId)
+        let keys = candidateKeys(for: trimmedMetaId, meta: meta)
+        var changed = false
+        for key in keys {
+            if let existing = records[key] {
+                if (season == nil && episode == nil) || matchesEpisode(recordSeason: existing.season, recordEpisode: existing.episode, requestedSeason: season, requestedEpisode: episode) {
+                    records.removeValue(forKey: key)
+                    changed = true
+                }
             }
         }
-        let store = defaults(for: profileId)
-        let key = prefix + trimmedMetaId
-        if season == nil && episode == nil {
-            store.removeObject(forKey: key)
-            return
+        if changed {
+            persistRecords(records, profileId: profileId)
         }
-        if let data = store.data(forKey: key),
-           let record = try? JSONDecoder().decode(Record.self, from: data) {
-            if (season == nil || record.season == season) && (episode == nil || record.episode == episode) {
-                store.removeObject(forKey: key)
+
+        let store = defaults(for: profileId)
+        for key in keys {
+            let legacyKey = prefix + key
+            if season == nil && episode == nil {
+                store.removeObject(forKey: legacyKey)
+                continue
+            }
+            if let data = store.data(forKey: legacyKey),
+               let record = try? JSONDecoder().decode(Record.self, from: data) {
+                if matchesEpisode(recordSeason: record.season, recordEpisode: record.episode, requestedSeason: season, requestedEpisode: episode) {
+                    store.removeObject(forKey: legacyKey)
+                }
             }
         }
     }
 
     private static func storageKey(for profileId: String?) -> String {
-        let id = profileId ?? ProfileSettings.activeProfileID ?? "default"
+        let id = profileId ?? WatchedStore.activeProfileId ?? ProfileSettings.activeProfileID ?? "default"
         return "lastPlaybackStream.\(id)"
     }
 
@@ -762,8 +833,9 @@ enum LastPlaybackStreamStore {
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
-        if let profileId {
-            return ProfileSettings.store(for: profileId)
+        let id = profileId ?? WatchedStore.activeProfileId ?? ProfileSettings.activeProfileID
+        if let id {
+            return ProfileSettings.store(for: id)
         }
         return ProfileSettings.current
     }
