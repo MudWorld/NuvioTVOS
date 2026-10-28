@@ -2747,8 +2747,31 @@ enum ContinueWatchingStore {
         return kept
     }
 
+    static func item(for meta: NuvioMeta) -> ContinueWatchingItem? {
+        let all = items()
+        if let exact = all.first(where: { $0.meta.id == meta.id }) {
+            return exact
+        }
+        if let match = all.first(where: { WatchedStore.sameContent($0.meta, meta) }) {
+            return match
+        }
+        let candidateIDs = Set(LastPlaybackStreamStore.candidateKeys(for: meta.id, meta: meta))
+        return all.first { item in
+            let itemCandidates = LastPlaybackStreamStore.candidateKeys(for: item.meta.id, meta: item.meta)
+            return !candidateIDs.isDisjoint(with: itemCandidates)
+        }
+    }
+
     static func item(for metaId: String) -> ContinueWatchingItem? {
-        items().first { $0.meta.id == metaId }
+        let all = items()
+        if let exact = all.first(where: { $0.meta.id == metaId }) {
+            return exact
+        }
+        let candidateIDs = Set(LastPlaybackStreamStore.candidateKeys(for: metaId))
+        return all.first { item in
+            let itemCandidates = LastPlaybackStreamStore.candidateKeys(for: item.meta.id, meta: item.meta)
+            return !candidateIDs.isDisjoint(with: itemCandidates)
+        }
     }
 
     /// Accounts for every entry between the stored file and the rendered row.
@@ -2783,7 +2806,16 @@ enum ContinueWatchingStore {
         episode: Int?,
         episodeId: String? = nil
     ) -> Double? {
-        guard meta.isSeries else { return item(for: meta.id)?.resumePosition }
+        guard meta.isSeries else {
+            if let pos = item(for: meta)?.resumePosition ?? item(for: meta.id)?.resumePosition {
+                return pos
+            }
+            if let record = WatchProgressLedger.candidateRecord(for: meta, season: season, episode: episode),
+               record.position > 0, !WatchProgressLedger.isComplete(record) {
+                return clampedResume(position: record.position, duration: record.duration)
+            }
+            return nil
+        }
         guard let season, let episode else { return nil }
         let watchedAt = WatchedStore.items().first {
             WatchedStore.sameContent($0.meta, meta)
@@ -2798,28 +2830,36 @@ enum ContinueWatchingStore {
         }
 
         // Migration path for progress written before the per-episode ledger.
-        guard let legacy = items().first(where: {
-            guard $0.meta.id == meta.id, !$0.isUpNextEntry else { return false }
+        if let legacy = items().first(where: {
+            guard (WatchedStore.sameContent($0.meta, meta) || $0.meta.id == meta.id), !$0.isUpNextEntry else { return false }
             if let storedSeason = $0.season, let storedEpisode = $0.episode {
                 return storedSeason == season && storedEpisode == episode
             }
             return EpisodeTagResolver.episodeNumbers(in: $0.streamUrl).map {
                 $0.season == season && $0.episode == episode
             } ?? false
-        }) else {
-            return nil
+        }) {
+            if let watchedAt, watchedAt >= legacy.lastWatchedAt { return nil }
+            saveEpisodeResumePoint(
+                meta: meta,
+                season: season,
+                episode: episode,
+                episodeId: episodeId,
+                position: legacy.position,
+                duration: legacy.duration,
+                updatedAt: legacy.lastWatchedAt
+            )
+            return legacy.resumePosition
         }
-        if let watchedAt, watchedAt >= legacy.lastWatchedAt { return nil }
-        saveEpisodeResumePoint(
-            meta: meta,
-            season: season,
-            episode: episode,
-            episodeId: episodeId,
-            position: legacy.position,
-            duration: legacy.duration,
-            updatedAt: legacy.lastWatchedAt
-        )
-        return legacy.resumePosition
+
+        // Check durable WatchProgressLedger if no local item or resume point found
+        if let record = WatchProgressLedger.candidateRecord(for: meta, season: season, episode: episode),
+           record.position > 0, !WatchProgressLedger.isComplete(record) {
+            if let watchedAt, watchedAt >= record.lastWatchedAt { return nil }
+            return clampedResume(position: record.position, duration: record.duration)
+        }
+
+        return nil
     }
 
     /// Read-only storage diagnostics for the on-screen Home failure panel.

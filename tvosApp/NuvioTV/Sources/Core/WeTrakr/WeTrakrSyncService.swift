@@ -1188,6 +1188,7 @@ struct WeTrakrProgressService {
             name: TraktSettingsStore.continueWatchingChangedNotification,
             object: nil
         )
+        TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .wetrakr, in: store)
         guard contextIsCurrent(context, in: store, profileId: profileId, requiresWeTrakrSource: true) else {
             return false
         }
@@ -2183,6 +2184,7 @@ struct WeTrakrProgressService {
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
             )
+            TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .wetrakr, in: store)
             return true
         } catch {
             print("[WeTrakrProgressService] markWatched failed: \(error.localizedDescription)")
@@ -2263,6 +2265,7 @@ struct WeTrakrProgressService {
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
             )
+            TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .wetrakr, in: store)
             return true
         } catch {
             print("[WeTrakrProgressService] markUnwatched failed: \(error.localizedDescription)")

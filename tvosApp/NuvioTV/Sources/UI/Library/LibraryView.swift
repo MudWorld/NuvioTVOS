@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Same poster geometry as the See All catalog, Grid Home, and Search. Seven
 /// columns fit only because of `pageInset` — the old 80pt inset left room for six.
-private enum LibraryGridMetrics {
+enum LibraryGridMetrics {
     static let posterWidth: CGFloat = 210
     static let posterHeight: CGFloat = 315
     static let posterGap: CGFloat = 28

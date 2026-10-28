@@ -249,6 +249,7 @@ enum MdbListProgressService {
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
             )
+            TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .mdblist, in: store)
             return true
         } catch {
             return false
@@ -449,6 +450,7 @@ enum MdbListProgressService {
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
             )
+            TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .mdblist, in: store)
             return true
         } catch {
             return false

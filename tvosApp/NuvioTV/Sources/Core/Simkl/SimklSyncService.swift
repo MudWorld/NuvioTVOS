@@ -1207,6 +1207,7 @@ struct SimklHistoryService {
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
             )
+            TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .simkl, in: store)
             return true
         } catch {
             return false
@@ -2714,6 +2715,7 @@ struct SimklProgressService {
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
             )
+            TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .simkl, in: store)
             return true
         } catch {
             scrobbleDiagnostic = "\(action.rawValue) \(meta.id) failed: \(error.localizedDescription)"
@@ -2795,6 +2797,7 @@ struct SimklProgressService {
             name: TraktSettingsStore.continueWatchingChangedNotification,
             object: nil
         )
+        TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .simkl, in: store)
         return true
     }
 

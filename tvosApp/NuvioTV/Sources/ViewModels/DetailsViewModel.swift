@@ -627,7 +627,7 @@ class DetailsViewModel: ObservableObject {
                 if RemoteTrackingState.isProgressSourceAuthenticated {
                     return TraktProgressService.currentContinueWatchingItem(for: meta)
                 }
-                return ContinueWatchingStore.item(for: meta.id)
+                return ContinueWatchingStore.item(for: meta) ?? ContinueWatchingStore.item(for: meta.id)
             }()
             let watchedKeys = WatchedStore.currentSnapshot().watchedEpisodeKeys(meta: meta)
             let playTarget = TvDetailsPlayTargetBuilder.makePlayTarget(

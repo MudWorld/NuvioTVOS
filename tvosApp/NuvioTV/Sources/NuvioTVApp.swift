@@ -9040,7 +9040,14 @@ struct TVHomeView: View {
         print("[ContinueWatching][Home] refreshContinueWatchingFromSelectedSource: fetching from remote provider \(source.rawValue)")
         let items = await TraktProgressService.fetchContinueWatching(
             repository: repository,
-            source: source
+            source: source,
+            displayPredicate: shouldDisplayContinueWatchingItem,
+            displaySort: { items in
+                TraktProgressService.sortContinueWatchingForDisplaySelection(
+                    items,
+                    preference: continueWatchingSort
+                )
+            }
         )
         guard !Task.isCancelled else {
             return

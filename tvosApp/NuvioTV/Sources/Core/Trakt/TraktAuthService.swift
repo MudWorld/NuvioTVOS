@@ -358,6 +358,9 @@ enum TraktSettingsStore {
     static let continueWatchingChangedNotification = Notification.Name(
         "nuvio.tv.trakt.continueWatchingSettings.changed"
     )
+    static let continueWatchingSourceInvalidatedNotification = Notification.Name(
+        "nuvio.tv.trakt.continueWatchingSource.invalidated"
+    )
     static let libraryChangedNotification = Notification.Name(
         "nuvio.tv.trakt.librarySettings.changed"
     )
@@ -377,6 +380,14 @@ enum TraktSettingsStore {
             ProfileSettings.current.set(normalized, forKey: SettingsKey.traktContinueWatchingDaysCap)
             NotificationCenter.default.post(name: continueWatchingChangedNotification, object: nil)
         }
+    }
+
+    static func notifyContinueWatchingSourceInvalidated(
+        for source: TraktWatchProgressSource,
+        in store: UserDefaults = ProfileSettings.current
+    ) {
+        guard ProfileSettings.isActiveStore(store), watchProgressSource(in: store) == source else { return }
+        NotificationCenter.default.post(name: continueWatchingSourceInvalidatedNotification, object: nil)
     }
 
     static var showMetaComments: Bool {
@@ -1274,8 +1285,13 @@ enum TraktScrobbleAction: String {
 
 @MainActor
 struct TraktProgressService {
+    static let continueWatchingSnapshotChangedNotification = Notification.Name(
+        "nuvio.tv.trakt.continueWatchingSnapshot.changed"
+    )
+
     private static let completionPercent = 90.0
     private static let maxItems = 20
+    static let maxHomeContinueWatchingSeeds = 36
     /// Long enough to outlive an app relaunch plus Simkl's 20-second per-user
     /// scrobble lock. Kept to an hour so a checkpoint the server never confirms
     /// (for example the title was marked watched on another device) cannot linger
@@ -1466,6 +1482,26 @@ struct TraktProgressService {
         }
     }
 
+    /// The last fetched list for this profile and provider, if one is cached.
+    /// Callers use this for stable membership checks without reading playback
+    /// positions or starting another provider request.
+    static func currentContinueWatchingItems(
+        source sourceOverride: TraktWatchProgressSource? = nil
+    ) -> [ContinueWatchingItem]? {
+        pruneExpiredLocalCheckpoints()
+        let profileId = ContinueWatchingStore.activeProfileId
+        let source = sourceOverride ?? TraktSettingsStore.watchProgressSource
+        let remoteItems = continueWatchingSnapshots.first {
+            $0.profileId == profileId && $0.source == source
+        }?.items ?? []
+        return mergingLocalPlaybackCheckpoints(
+            into: remoteItems,
+            source: source,
+            profileId: profileId,
+            limit: maxItems
+        )
+    }
+
     /// Retain the measured stream timeline for every provider receiving scrobbles.
     /// Provider playback lists can otherwise reconstruct seconds from a different runtime.
     static func recordLocalPlaybackForScrobbleSources(
@@ -1591,15 +1627,21 @@ struct TraktProgressService {
         let profileScope: String
         let source: TraktWatchProgressSource
         let updateDisplayedSnapshot: Bool
+        let replaceSnapshot: Bool
 
         @MainActor
-        init(source: TraktWatchProgressSource, updateDisplayedSnapshot: Bool) {
+        init(
+            source: TraktWatchProgressSource,
+            updateDisplayedSnapshot: Bool,
+            replaceSnapshot: Bool = true
+        ) {
             profileId = ContinueWatchingStore.activeProfileId
             settingsProfileId = ProfileSettings.activeProfileID
             store = ProfileSettings.current
             profileScope = ProfileSettings.activeProfileScope
             self.source = source
             self.updateDisplayedSnapshot = updateDisplayedSnapshot
+            self.replaceSnapshot = replaceSnapshot
         }
     }
 
@@ -1609,37 +1651,133 @@ struct TraktProgressService {
     @MainActor
     static func finalizeContinueWatchingFetch(
         _ items: [ContinueWatchingItem],
-        context: ContinueWatchingFetchContext
+        context: ContinueWatchingFetchContext,
+        displayPredicate: ((ContinueWatchingItem) -> Bool)? = nil,
+        displaySort: (([ContinueWatchingItem]) -> [ContinueWatchingItem])? = nil
     ) -> [ContinueWatchingItem]? {
         guard !Task.isCancelled,
               context.profileId == ContinueWatchingStore.activeProfileId,
               context.settingsProfileId == ProfileSettings.activeProfileID,
               ProfileSettings.isActiveStore(context.store) else { return nil }
-        guard context.updateDisplayedSnapshot else { return items }
+        guard context.updateDisplayedSnapshot else {
+            guard let displayPredicate else { return items }
+            return selectContinueWatchingItemsForDisplay(
+                items,
+                predicate: displayPredicate,
+                sort: displaySort
+            )
+        }
         guard context.source == TraktSettingsStore.watchProgressSource else { return nil }
 
         let resolvedItems = mergingLocalPlaybackCheckpoints(
             into: items,
             source: context.source,
-            profileId: context.profileId
+            profileId: context.profileId,
+            limit: displayPredicate == nil ? maxItems : nil
         )
+        let displayedItems: [ContinueWatchingItem]
+        if let displayPredicate {
+            displayedItems = selectContinueWatchingItemsForDisplay(
+                resolvedItems,
+                predicate: displayPredicate,
+                sort: displaySort
+            )
+        } else {
+            displayedItems = resolvedItems
+        }
+        let snapshotItems: [ContinueWatchingItem]
+        if displayPredicate == nil {
+            snapshotItems = resolvedItems
+        } else {
+            var snapshotMetaIDs = Set<String>()
+            snapshotItems = (displayedItems + Array(resolvedItems.prefix(maxItems))).filter {
+                snapshotMetaIDs.insert($0.meta.id).inserted
+            }
+        }
+        let previousItems = continueWatchingSnapshots.first {
+            $0.profileId == context.profileId && $0.source == context.source
+        }?.items ?? []
+        let retainedItems = context.replaceSnapshot ? [] : previousItems.filter { previous in
+            !snapshotItems.contains { WatchedStore.sameContent($0.meta, previous.meta) }
+        }
         replaceContinueWatchingSnapshot(
-            resolvedItems,
+            snapshotItems + retainedItems,
             source: context.source,
             profileId: context.profileId
         )
-        return resolvedItems
+        return displayedItems
+    }
+
+    /// Resolve a bounded seed pool concurrently. Each result is restored to
+    /// candidate order before returning, regardless of completion order.
+    static func resolveContinueWatchingMetadata<Seed>(
+        from seeds: [Seed],
+        candidateLimit: Int,
+        resolve: @escaping (Seed) async -> ContinueWatchingItem?
+    ) async -> [ContinueWatchingItem]? {
+        guard candidateLimit > 0 else { return [] }
+        let candidates = Array(seeds.prefix(candidateLimit))
+        guard !Task.isCancelled else { return nil }
+        let tasks = candidates.enumerated().map { index, seed in
+            Task { @MainActor in
+                (index, await resolve(seed))
+            }
+        }
+        return await withTaskCancellationHandler {
+            var indexedItems: [(Int, ContinueWatchingItem)] = []
+            for task in tasks {
+                guard !Task.isCancelled else { return nil }
+                let (index, item) = await task.value
+                if let item {
+                    indexedItems.append((index, item))
+                }
+            }
+            guard !Task.isCancelled else { return nil }
+            return indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
+        } onCancel: {
+            tasks.forEach { $0.cancel() }
+        }
+    }
+
+    /// Apply Home eligibility and title-level deduplication only after all
+    /// checkpoints are merged, then order and cap the visible row.
+    static func selectContinueWatchingItemsForDisplay(
+        _ items: [ContinueWatchingItem],
+        predicate: (ContinueWatchingItem) -> Bool,
+        sort: (([ContinueWatchingItem]) -> [ContinueWatchingItem])? = nil
+    ) -> [ContinueWatchingItem] {
+        var seenMetaIDs = Set<String>()
+        let eligibleUniqueItems = items.filter {
+            predicate($0) && seenMetaIDs.insert($0.meta.id).inserted
+        }
+        let orderedItems = sort?(eligibleUniqueItems) ?? eligibleUniqueItems
+        return Array(orderedItems.prefix(maxItems))
+    }
+
+    /// Separate Upcoming is a presentation split performed after selection.
+    /// Rank its combined pool by the default recency order so upcoming entries
+    /// still compete for the Home 20-item limit before `setContinueWatching` splits it.
+    static func sortContinueWatchingForDisplaySelection(
+        _ items: [ContinueWatchingItem],
+        preference: String
+    ) -> [ContinueWatchingItem] {
+        let selectionPreference = preference == "Separate Upcoming Row" ? "Default" : preference
+        return ContinueWatchingSortPolicy.sorted(items, preference: selectionPreference)
     }
 
     static func fetchContinueWatching(
         repository: CatalogRepository,
         source sourceOverride: TraktWatchProgressSource? = nil,
-        updateDisplayedSnapshot: Bool = true
+        updateDisplayedSnapshot: Bool = true,
+        displayPredicate: ((ContinueWatchingItem) -> Bool)? = nil,
+        displaySort: (([ContinueWatchingItem]) -> [ContinueWatchingItem])? = nil,
+        replaceSnapshot: Bool = true
     ) async -> [ContinueWatchingItem]? {
         let context = await MainActor.run {
             ContinueWatchingFetchContext(
                 source: sourceOverride ?? TraktSettingsStore.watchProgressSource,
-                updateDisplayedSnapshot: updateDisplayedSnapshot
+                updateDisplayedSnapshot: updateDisplayedSnapshot,
+                replaceSnapshot: replaceSnapshot
             )
         }
         let source = context.source
@@ -1788,30 +1926,58 @@ struct TraktProgressService {
         let uniqueSeeds = recentSeeds.filter {
             usedContentIDs.insert($0.contentID).inserted
         }
-        let metadataTasks = uniqueSeeds.prefix(maxItems).enumerated().map { index, seed in
-            Task { @MainActor in
-                (index, seed.title, await makeItem(from: seed, repository: repository))
-            }
-        }
-        var indexedItems: [(Int, ContinueWatchingItem)] = []
-        for task in metadataTasks {
-            guard !Task.isCancelled else {
+        let items: [ContinueWatchingItem]
+        if displayPredicate != nil {
+            guard let resolvedItems = await resolveContinueWatchingMetadata(
+                from: uniqueSeeds,
+                candidateLimit: maxHomeContinueWatchingSeeds,
+                resolve: { seed in
+                    let item = await makeItem(from: seed, repository: repository)
+                    #if DEBUG
+                    if item == nil {
+                        print("[ContinueWatching] Trakt metadata omitted \(seed.title)")
+                    }
+                    #endif
+                    return item
+                }
+            ) else {
                 #if DEBUG
                 print("[ContinueWatching] Trakt metadata assembly cancelled")
                 #endif
                 return nil
             }
-            let (index, title, item) = await task.value
-            if let item {
-                indexedItems.append((index, item))
-            } else {
-                #if DEBUG
-                print("[ContinueWatching] Trakt metadata omitted \(title)")
-                #endif
+            items = resolvedItems
+        } else {
+            let metadataTasks = uniqueSeeds.prefix(maxItems).enumerated().map { index, seed in
+                Task { @MainActor in
+                    (index, seed.title, await makeItem(from: seed, repository: repository))
+                }
             }
+            var indexedItems: [(Int, ContinueWatchingItem)] = []
+            for task in metadataTasks {
+                guard !Task.isCancelled else {
+                    #if DEBUG
+                    print("[ContinueWatching] Trakt metadata assembly cancelled")
+                    #endif
+                    return nil
+                }
+                let (index, title, item) = await task.value
+                if let item {
+                    indexedItems.append((index, item))
+                } else {
+                    #if DEBUG
+                    print("[ContinueWatching] Trakt metadata omitted \(title)")
+                    #endif
+                }
+            }
+            items = indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
         }
-        let items = indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
-        guard let resolvedItems = finalizeContinueWatchingFetch(items, context: context) else {
+        guard let resolvedItems = finalizeContinueWatchingFetch(
+            items,
+            context: context,
+            displayPredicate: displayPredicate,
+            displaySort: displaySort
+        ) else {
             return nil
         }
         #if DEBUG
@@ -1850,7 +2016,8 @@ struct TraktProgressService {
     static func mergingLocalPlaybackCheckpoints(
         into remoteItems: [ContinueWatchingItem],
         source: TraktWatchProgressSource,
-        profileId: String? = ContinueWatchingStore.activeProfileId
+        profileId: String? = ContinueWatchingStore.activeProfileId,
+        limit: Int? = maxItems
     ) -> [ContinueWatchingItem] {
         pruneExpiredLocalCheckpoints()
         let checkpoints = localPlaybackCheckpoints.filter {
@@ -1931,11 +2098,9 @@ struct TraktProgressService {
             }
         }
 
-        return Array(
-            merged
-                .sorted { $0.lastWatchedAt > $1.lastWatchedAt }
-                .prefix(maxItems)
-        )
+        let orderedItems = merged.sorted { $0.lastWatchedAt > $1.lastWatchedAt }
+        guard let limit else { return orderedItems }
+        return Array(orderedItems.prefix(max(0, limit)))
     }
 
     private static func pruneExpiredLocalCheckpoints() {
@@ -1950,12 +2115,29 @@ struct TraktProgressService {
         source: TraktWatchProgressSource,
         profileId: String?
     ) {
+        let previousIdentity = continueWatchingSnapshots.first {
+            $0.profileId == profileId && $0.source == source
+        }.map { continueWatchingIdentity($0.items) }
+        let nextIdentity = continueWatchingIdentity(items)
         continueWatchingSnapshots.removeAll {
             $0.profileId == profileId && $0.source == source
         }
         continueWatchingSnapshots.append(
             ContinueWatchingSnapshot(profileId: profileId, source: source, items: items)
         )
+        if previousIdentity != nextIdentity {
+            NotificationCenter.default.post(name: continueWatchingSnapshotChangedNotification, object: nil)
+        }
+    }
+
+    private static func continueWatchingIdentity(_ items: [ContinueWatchingItem]) -> String {
+        Set(items.map {
+            let imdb = NuvioMeta.canonicalImdbID(from: $0.meta.imdbId ?? "") ?? ""
+            let tmdb = $0.meta.tmdbId.map(String.init) ?? ""
+            return "\($0.meta.canonicalType):\($0.meta.id):\(imdb):\(tmdb)"
+        })
+            .sorted()
+            .joined(separator: ",")
     }
 
     /// Returns whether the snapshot actually lost a row.
@@ -3432,6 +3614,7 @@ struct TraktHistoryService {
                     name: TraktSettingsStore.continueWatchingChangedNotification,
                     object: nil
                 )
+                TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .trakt, in: store)
             }
             return true
         } catch {
@@ -4486,6 +4669,7 @@ final class TraktSettingsViewModel: ObservableObject {
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
             )
+            TraktSettingsStore.notifyContinueWatchingSourceInvalidated(for: .trakt, in: store)
             _ = await service.fetchUserSettings()
             if let stats = await service.fetchUserStats() {
                 TraktAuthStore.saveCachedStats(stats, store: store)

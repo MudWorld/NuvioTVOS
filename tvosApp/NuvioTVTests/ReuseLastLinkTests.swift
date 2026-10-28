@@ -247,4 +247,132 @@ final class ReuseLastLinkTests: XCTestCase {
         LastPlaybackStreamStore.remove(metaId: metaId, season: 1, episode: 2, profileId: testProfileID)
         XCTAssertNil(LastPlaybackStreamStore.load(metaId: metaId, season: 1, episode: 2, profileId: testProfileID))
     }
+
+    // MARK: - Candidate Keys & Cross-ID Stream Reuse (Issue #348)
+
+    func testCandidateKeysGeneration() {
+        let meta = NuvioMeta(
+            id: "tmdb:12345",
+            name: "Test Movie",
+            imdbId: "tt9876543",
+            tmdbId: 12345,
+            type: "movie"
+        )
+        let keys = LastPlaybackStreamStore.candidateKeys(for: meta.id, meta: meta)
+        XCTAssertTrue(keys.contains("tmdb:12345"))
+        XCTAssertTrue(keys.contains("12345"))
+        XCTAssertTrue(keys.contains("tt9876543"))
+    }
+
+    func testCandidateKeyStreamLookup() {
+        testStore.set(true, forKey: SettingsKey.reuseLastLink)
+        let meta = NuvioMeta(
+            id: "tmdb:445566",
+            name: "Cross ID Movie",
+            imdbId: "tt7788990",
+            tmdbId: 445566,
+            type: "movie"
+        )
+        let streamURL = "https://example.com/movie.mp4"
+
+        // Save under IMDB ID with meta attached
+        LastPlaybackStreamStore.save(
+            metaId: "tt7788990",
+            url: streamURL,
+            season: nil,
+            episode: nil,
+            meta: meta,
+            profileId: testProfileID
+        )
+
+        // Query by TMDB ID
+        let loaded = LastPlaybackStreamStore.load(
+            metaId: "tmdb:445566",
+            season: nil,
+            episode: nil,
+            meta: meta,
+            profileId: testProfileID
+        )
+        XCTAssertNotNil(loaded, "Stream saved under IMDB ID must be retrievable by TMDB ID via candidate keys")
+        XCTAssertEqual(loaded?.url, streamURL)
+
+        LastPlaybackStreamStore.remove(metaId: "tmdb:445566", meta: meta, profileId: testProfileID)
+    }
+
+    func testMovieEpisodeMatchingNilVersusZero() {
+        testStore.set(true, forKey: SettingsKey.reuseLastLink)
+        let metaId = "tt-movie-nil-vs-zero"
+        let streamURL = "https://example.com/movie-zeros.mp4"
+
+        // Save with season: nil, episode: nil
+        LastPlaybackStreamStore.save(
+            metaId: metaId,
+            url: streamURL,
+            season: nil,
+            episode: nil,
+            profileId: testProfileID
+        )
+
+        // Load with season: 0, episode: 0
+        let loadedWithZero = LastPlaybackStreamStore.load(
+            metaId: metaId,
+            season: 0,
+            episode: 0,
+            profileId: testProfileID
+        )
+        XCTAssertNotNil(loadedWithZero, "Movie with season: nil must match query with season: 0")
+        XCTAssertEqual(loadedWithZero?.url, streamURL)
+
+        // Save with season: 0, episode: 0
+        let streamURL2 = "https://example.com/movie-zeros-2.mp4"
+        LastPlaybackStreamStore.save(
+            metaId: metaId,
+            url: streamURL2,
+            season: 0,
+            episode: 0,
+            profileId: testProfileID
+        )
+
+        // Load with season: nil, episode: nil
+        let loadedWithNil = LastPlaybackStreamStore.load(
+            metaId: metaId,
+            season: nil,
+            episode: nil,
+            profileId: testProfileID
+        )
+        XCTAssertNotNil(loadedWithNil, "Movie with season: 0 must match query with season: nil")
+        XCTAssertEqual(loadedWithNil?.url, streamURL2)
+
+        LastPlaybackStreamStore.remove(metaId: metaId, season: nil, episode: nil, profileId: testProfileID)
+    }
+
+    func testContinueWatchingStoreCandidateMatchingAndLedgerFallback() {
+        let meta = NuvioMeta(
+            id: "tmdb:998877",
+            name: "Ledger Fallback Movie",
+            imdbId: "tt1122334",
+            tmdbId: 998877,
+            type: "movie"
+        )
+
+        // Seed durable record in WatchProgressLedger under imdb ID
+        let record = WatchProgressRecord(
+            progressKey: "tt1122334",
+            contentId: "tt1122334",
+            contentType: "movie",
+            videoId: "tt1122334",
+            season: nil,
+            episode: nil,
+            position: 600.0,
+            duration: 1200.0,
+            lastWatchedAt: Date()
+        )
+        WatchProgressLedger.upsert(record)
+
+        // Resume position for tmdb meta should find the ledger record via candidate keys
+        let resumePos = ContinueWatchingStore.resumePosition(for: meta, season: nil, episode: nil)
+        XCTAssertEqual(resumePos, 600.0, "Resume position must fall back to WatchProgressLedger via candidate IDs")
+
+        _ = WatchProgressLedger.remove(keys: ["tt1122334"])
+    }
 }

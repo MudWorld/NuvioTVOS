@@ -323,6 +323,49 @@ enum WatchProgressLedger {
         record(forKey: progressKey(contentId: contentId, season: season, episode: episode), profileId: profileId)
     }
 
+    static func candidateRecord(
+        for meta: NuvioMeta,
+        season: Int? = nil,
+        episode: Int? = nil,
+        profileId: String? = nil
+    ) -> WatchProgressRecord? {
+        let allRecords = records(profileId: profileId)
+        let candidates = Set(LastPlaybackStreamStore.candidateKeys(for: meta.id, meta: meta))
+        let matchingRecords = allRecords.filter { record in
+            let recordCandidates = LastPlaybackStreamStore.candidateKeys(for: record.contentId)
+            guard !candidates.isDisjoint(with: recordCandidates) else { return false }
+            if meta.isSeries {
+                if let season, let episode {
+                    return record.season == season && record.episode == episode
+                }
+                return true
+            } else {
+                return (record.season == nil || record.season == 0) && (record.episode == nil || record.episode == 0)
+            }
+        }
+        return matchingRecords.max(by: { $0.lastWatchedAt < $1.lastWatchedAt })
+    }
+
+    static func candidateRecord(
+        contentId: String,
+        season: Int? = nil,
+        episode: Int? = nil,
+        profileId: String? = nil
+    ) -> WatchProgressRecord? {
+        let allRecords = records(profileId: profileId)
+        let candidates = Set(LastPlaybackStreamStore.candidateKeys(for: contentId))
+        let matchingRecords = allRecords.filter { record in
+            let recordCandidates = LastPlaybackStreamStore.candidateKeys(for: record.contentId)
+            guard !candidates.isDisjoint(with: recordCandidates) else { return false }
+            if let season, let episode {
+                return record.season == season && record.episode == episode
+            } else {
+                return (record.season == nil || record.season == 0) && (record.episode == nil || record.episode == 0)
+            }
+        }
+        return matchingRecords.max(by: { $0.lastWatchedAt < $1.lastWatchedAt })
+    }
+
     /// Newest row for a title, regardless of which episode it belongs to.
     static func latestRecord(contentId: String, profileId: String? = nil) -> WatchProgressRecord? {
         records(profileId: profileId)

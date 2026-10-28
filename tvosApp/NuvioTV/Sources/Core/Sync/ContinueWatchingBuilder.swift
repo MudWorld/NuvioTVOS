@@ -23,6 +23,8 @@ private func cwLog(_ message: @autoclosure () -> String) {
 /// resume lookup and Top Shelf write. Later pages live in memory for the
 /// session, exactly as a catalog row's later pages do.
 enum ContinueWatchingBuilder {
+    static let itemsChangedNotification = Notification.Name("nuvio.tv.continueWatchingBuilder.items.changed")
+
     /// Long-lived so its in-memory metadata cache survives across rebuilds.
     private static let repository = CinemetaCatalogRepository()
 
@@ -385,7 +387,11 @@ enum ContinueWatchingBuilder {
         }
 
         consumedEntries += page.consumed
+        let previousIDs = Set(materialized.map(\.meta.id))
         materialized = retainingUnwatched(deduplicatingResolvedIdentities(materialized + page.items))
+        if previousIDs != Set(materialized.map(\.meta.id)) {
+            NotificationCenter.default.post(name: itemsChangedNotification, object: nil)
+        }
         return materialized
     }
 
