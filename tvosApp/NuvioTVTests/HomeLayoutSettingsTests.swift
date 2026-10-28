@@ -2352,5 +2352,129 @@ final class HomeLayoutSettingsTests: XCTestCase {
         defaults.set(5, forKey: SettingsKey.gridRows)
         XCTAssertEqual(defaults.integer(forKey: SettingsKey.gridRows), 5)
     }
+
+    // MARK: - Details Sections Order and Toggles (Issue #104)
+
+    func testDetailsSectionOrderDefaultValues() {
+        let suiteName = "DetailsSectionDefaultsTest_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        XCTAssertEqual(TVDetailsSectionOrder.defaultOrder, [.episodes, .cast, .related, .network, .production, .comments])
+        XCTAssertEqual(TVDetailsSectionOrder.currentOrder(in: defaults), TVDetailsSectionOrder.defaultOrder)
+        XCTAssertTrue(TVDetailsSectionOrder.disabledSections(in: defaults).isEmpty)
+        XCTAssertEqual(TVDetailsSectionOrder.activeSections(in: defaults), TVDetailsSectionOrder.defaultOrder)
+        XCTAssertEqual(TVDetailsSectionOrder.activeSectionCount(in: defaults), 6)
+
+        for section in TVDetailsSection.allCases {
+            XCTAssertTrue(TVDetailsSectionOrder.isSectionEnabled(section, in: defaults))
+        }
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDetailsSectionOrderSaveAndReorder() {
+        let suiteName = "DetailsSectionReorderTest_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let newOrder: [TVDetailsSection] = [.cast, .episodes, .comments, .related, .network, .production]
+
+        let expectation = expectation(forNotification: TVDetailsSectionOrder.changedNotification, object: nil)
+        TVDetailsSectionOrder.saveOrder(newOrder, in: defaults)
+        wait(for: [expectation], timeout: 1.0)
+
+        XCTAssertEqual(TVDetailsSectionOrder.currentOrder(in: defaults), newOrder)
+        XCTAssertEqual(TVDetailsSectionOrder.activeSections(in: defaults), newOrder)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDetailsSectionOrderDisableAndEnable() {
+        let suiteName = "DetailsSectionDisableTest_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        TVDetailsSectionOrder.setSectionEnabled(.cast, isEnabled: false, in: defaults)
+        TVDetailsSectionOrder.setSectionEnabled(.comments, isEnabled: false, in: defaults)
+
+        let disabled = TVDetailsSectionOrder.disabledSections(in: defaults)
+        XCTAssertEqual(disabled, [.cast, .comments])
+        XCTAssertFalse(TVDetailsSectionOrder.isSectionEnabled(.cast, in: defaults))
+        XCTAssertFalse(TVDetailsSectionOrder.isSectionEnabled(.comments, in: defaults))
+        XCTAssertTrue(TVDetailsSectionOrder.isSectionEnabled(.episodes, in: defaults))
+        XCTAssertTrue(TVDetailsSectionOrder.isSectionEnabled(.related, in: defaults))
+
+        let active = TVDetailsSectionOrder.activeSections(in: defaults)
+        XCTAssertEqual(active, [.episodes, .related, .network, .production])
+        XCTAssertEqual(TVDetailsSectionOrder.activeSectionCount(in: defaults), 4)
+
+        // Re-enable cast
+        TVDetailsSectionOrder.setSectionEnabled(.cast, isEnabled: true, in: defaults)
+        XCTAssertTrue(TVDetailsSectionOrder.isSectionEnabled(.cast, in: defaults))
+        XCTAssertEqual(TVDetailsSectionOrder.activeSectionCount(in: defaults), 5)
+        XCTAssertEqual(TVDetailsSectionOrder.activeSections(in: defaults), [.episodes, .cast, .related, .network, .production])
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDetailsSectionCaseInsensitiveAndAliasDecoding() {
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "episodes"), .episodes)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "EPISODES"), .episodes)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "cast"), .cast)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "CAST"), .cast)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "more_like_this"), .related)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "MORE_LIKE_THIS"), .related)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "morelikethis"), .related)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "related"), .related)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "networks"), .network)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "NETWORKS"), .network)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "network"), .network)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "production"), .production)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "companies"), .production)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "COMPANIES"), .production)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "comments"), .comments)
+        XCTAssertEqual(TVDetailsSection(caseInsensitive: "COMMENTS"), .comments)
+        XCTAssertNil(TVDetailsSection(caseInsensitive: "unknown_section"))
+
+        let suiteName = "DetailsSectionAliasTest_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        // Simulate Android app JSON payload format
+        let androidPayload = ["MORE_LIKE_THIS", "CAST", "EPISODES"]
+        let data = try! JSONEncoder().encode(androidPayload)
+        defaults.set(data, forKey: SettingsKey.detailsSectionOrder)
+
+        let loaded = TVDetailsSectionOrder.currentOrder(in: defaults)
+        // Should decode the android keys in order, then append remaining defaults (network, production, comments)
+        XCTAssertEqual(loaded, [.related, .cast, .episodes, .network, .production, .comments])
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testDetailsSectionResetToDefaults() {
+        let suiteName = "DetailsSectionResetTest_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        TVDetailsSectionOrder.saveOrder([.comments, .cast], in: defaults)
+        TVDetailsSectionOrder.setSectionEnabled(.cast, isEnabled: false, in: defaults)
+        XCTAssertNotEqual(TVDetailsSectionOrder.currentOrder(in: defaults), TVDetailsSectionOrder.defaultOrder)
+        XCTAssertFalse(TVDetailsSectionOrder.disabledSections(in: defaults).isEmpty)
+
+        TVDetailsSectionOrder.resetToDefaults(in: defaults)
+        XCTAssertEqual(TVDetailsSectionOrder.currentOrder(in: defaults), TVDetailsSectionOrder.defaultOrder)
+        XCTAssertTrue(TVDetailsSectionOrder.disabledSections(in: defaults).isEmpty)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testSettingsKeysIncludeDetailsSectionKeys() {
+        XCTAssertEqual(SettingsKey.detailsSectionOrder, "nuvio.tv.settings.layout.detailsSectionOrder")
+        XCTAssertEqual(SettingsKey.detailsSectionDisabled, "nuvio.tv.settings.layout.detailsSectionDisabled")
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.detailsSectionOrder))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.detailsSectionDisabled))
+    }
 }
 

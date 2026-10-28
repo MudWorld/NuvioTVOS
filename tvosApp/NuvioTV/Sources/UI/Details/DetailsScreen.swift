@@ -3693,6 +3693,12 @@ struct TvDetailsContent: View {
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
     @AppStorage(SettingsKey.trailerDelay) private var trailerDelay = 7
     @AppStorage(SettingsKey.detailsActionsBelowInfo) private var detailsActionsBelowInfo = false
+    @State private var configuredDetailsSections: [TVDetailsSection] = TVDetailsSectionOrder.currentOrder()
+    @State private var disabledDetailsSections: Set<TVDetailsSection> = TVDetailsSectionOrder.disabledSections()
+
+    private var activeDetailsSections: [TVDetailsSection] {
+        configuredDetailsSections.filter { !disabledDetailsSections.contains($0) }
+    }
     @State private var trailerPlayer = AVPlayer()
     @State private var isTrailerPlaying = false
     @State private var isTrailerRenderReady = false
@@ -3986,6 +3992,245 @@ struct TvDetailsContent: View {
         )
     }
 
+    @ViewBuilder
+    private func renderDetailsSection(
+        _ section: TVDetailsSection,
+        meta: NuvioMeta,
+        episodes: [NuvioVideo],
+        episodeGuide: TvEpisodeGuide,
+        episodePresentation: TvDetailsEpisodePresentation,
+        continueItem: ContinueWatchingItem?,
+        networks: [MetaCompany],
+        productionCompanies: [MetaCompany],
+        scrollProxy: ScrollViewProxy
+    ) -> some View {
+        switch section {
+        case .episodes:
+            if !episodes.isEmpty {
+                TvDetailsEpisodes(
+                    meta: meta,
+                    episodeGuide: episodeGuide,
+                    initialState: episodePresentation.initialState,
+                    presentationRevision: episodePresentation.revision,
+                    seriesRating: meta.rating,
+                    continueItem: continueItem,
+                    isChoosingWatchPartyEpisode: isChoosingWatchPartyEpisode,
+                    onCancelWatchPartySelection: { isChoosingWatchPartyEpisode = false },
+                    onFocus: {
+                        cancelPendingFocusHandoff()
+                        if focusedDetailsSection != .episodes {
+                            focusedDetailsSection = .episodes
+                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.episodesSection, anchor: .top)
+                            }
+                        } else {
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.episodesSection, anchor: .top)
+                            }
+                        }
+                    },
+                    onSelect: { video in
+                        stopBackgroundTrailer(manual: false)
+                        if isChoosingWatchPartyEpisode {
+                            isChoosingWatchPartyEpisode = false
+                            onHostWatchParty?(video)
+                        } else {
+                            onEpisodeSelected(video)
+                        }
+                    },
+                    onPlayManually: onEpisodePlayManually != nil ? { video in
+                        stopBackgroundTrailer(manual: false)
+                        onEpisodePlayManually?(video)
+                    } : nil,
+                    onEpisodeMenuPresented: { onEpisodeMenuPresented?($0) },
+                    onBack: handleDetailsBack,
+                    episodeFocus: $episodeFocus,
+                    restrictFocusToKey: restoreEpisodeKey,
+                    entryLocked: focusedDetailsSection != .episodes,
+                    onMoveUpFromSeason: {
+                        handleMoveUpFromEpisodes(using: scrollProxy)
+                    },
+                    onMoveDownFromEpisode: {
+                        handleMoveDownFromEpisodes(using: scrollProxy)
+                    }
+                )
+                .padding(.top, 40)
+                .id(TvDetailsScrollID.episodesSection)
+                .disabled(!isDetailsFocusReachable(.episodes))
+            }
+        case .cast:
+            if hasCastOrTrailer, let meta = uiState.meta {
+                TvDetailsCastAndTrailer(
+                    meta: meta,
+                    people: uiState.people,
+                    onPersonClick: { person in
+                        let clean = person.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        guard !clean.isEmpty && clean != "cast" else { return }
+                        stopBackgroundTrailer(manual: false)
+                        onOpenPerson?(person)
+                    },
+                    onTrailerClick: {
+                        presentFullscreenTrailer()
+                    },
+                    onBack: handleDetailsBack,
+                    headerFocus: $castHeaderFocus,
+                    entryLocked: focusedDetailsSection != .cast,
+                    onFocus: {
+                        if focusedDetailsSection != .cast {
+                            focusedDetailsSection = .cast
+                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.castSection, anchor: .top)
+                            }
+                        } else {
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.castSection, anchor: .top)
+                            }
+                        }
+                    }
+                )
+                .padding(.top, 34)
+                .padding(.bottom, 52)
+                .id(TvDetailsScrollID.castSection)
+                .disabled(
+                    restoreEpisodeKey != nil
+                        || !isDetailsFocusReachable(.cast)
+                )
+            }
+        case .related:
+            if !uiState.moreLikeThis.isEmpty {
+                TvDetailsRelatedRow(
+                    title: L10n.string("settings_tmdb_module_more_like_this", fallback: "More Like This"),
+                    items: uiState.moreLikeThis,
+                    entryLocked: focusedDetailsSection != .related,
+                    onSelect: { item in
+                        stopBackgroundTrailer(manual: false)
+                        onOpenTitle?(item.id, item.type)
+                    },
+                    onBack: handleDetailsBack,
+                    onFocus: {
+                        if focusedDetailsSection != .related {
+                            focusedDetailsSection = .related
+                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.moreLikeThisSection, anchor: .top)
+                            }
+                        } else {
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.moreLikeThisSection, anchor: .top)
+                            }
+                        }
+                    }
+                )
+                .padding(.top, 34)
+                .id(TvDetailsScrollID.moreLikeThisSection)
+                .disabled(
+                    restoreEpisodeKey != nil
+                        || !isDetailsFocusReachable(.related)
+                )
+            }
+        case .network:
+            if !networks.isEmpty {
+                TvDetailsProductionRow(
+                    title: L10n.string("details_network", fallback: "Network"),
+                    companies: networks,
+                    entryLocked: focusedDetailsSection != .network,
+                    onSelect: { company in
+                        onOpenProduction?(company)
+                    },
+                    onBack: handleDetailsBack,
+                    onFocus: {
+                        if focusedDetailsSection != .network {
+                            focusedDetailsSection = .network
+                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.networkSection, anchor: .top)
+                            }
+                        } else {
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.networkSection, anchor: .top)
+                            }
+                        }
+                    }
+                )
+                .padding(.top, 40)
+                .id(TvDetailsScrollID.networkSection)
+                .disabled(
+                    restoreEpisodeKey != nil
+                        || !isDetailsFocusReachable(.network)
+                )
+            }
+        case .production:
+            if !productionCompanies.isEmpty {
+                TvDetailsProductionRow(
+                    title: L10n.string("details_production", fallback: "Production"),
+                    companies: productionCompanies,
+                    entryLocked: focusedDetailsSection != .production,
+                    onSelect: { company in
+                        onOpenProduction?(company)
+                    },
+                    onBack: handleDetailsBack,
+                    onFocus: {
+                        if focusedDetailsSection != .production {
+                            focusedDetailsSection = .production
+                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.productionSection, anchor: .top)
+                            }
+                        } else {
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.productionSection, anchor: .top)
+                            }
+                        }
+                    }
+                )
+                .padding(.top, 40)
+                .id(TvDetailsScrollID.productionSection)
+                .disabled(
+                    restoreEpisodeKey != nil
+                        || !isDetailsFocusReachable(.production)
+                )
+            }
+        case .comments:
+            if !uiState.comments.isEmpty {
+                TvDetailsCommentsRow(
+                    comments: uiState.comments,
+                    entryLocked: focusedDetailsSection != .comments,
+                    onSelect: { comment in
+                        onCommentSelect?(comment)
+                    },
+                    onBack: handleDetailsBack,
+                    onFocus: {
+                        if focusedDetailsSection != .comments {
+                            focusedDetailsSection = .comments
+                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.commentsSection, anchor: .top)
+                            }
+                        } else {
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                scrollProxy.scrollTo(TvDetailsScrollID.commentsSection, anchor: .top)
+                            }
+                        }
+                    }
+                )
+                .padding(.top, 40)
+                .id(TvDetailsScrollID.commentsSection)
+                .disabled(
+                    restoreEpisodeKey != nil
+                        || !isDetailsFocusReachable(.comments)
+                )
+            }
+        }
+    }
+
     private func handlePlayClick(playTarget: TvDetailsPlayTarget) {
         stopBackgroundTrailer(manual: false)
         guard playTarget.isPlayable else { return }
@@ -4104,229 +4349,22 @@ struct TvDetailsContent: View {
                             .padding(.bottom, 52)
                             .frame(height: max(proxy.size.height, 800), alignment: .bottomLeading)
 
-                            if !episodes.isEmpty {
-                                TvDetailsEpisodes(
+                            let productionCompanies = uiState.companies.filter { $0.kind == .production && $0.tmdbId != nil }
+                            let networks = uiState.companies.filter { $0.kind == .network && $0.tmdbId != nil }
+
+                            ForEach(activeDetailsSections, id: \.self) { section in
+                                renderDetailsSection(
+                                    section,
                                     meta: meta,
+                                    episodes: episodes,
                                     episodeGuide: episodeGuide,
-                                    initialState: episodePresentation.initialState,
-                                    presentationRevision: episodePresentation.revision,
-                                    seriesRating: meta.rating,
+                                    episodePresentation: episodePresentation,
                                     continueItem: continueItem,
-                                    isChoosingWatchPartyEpisode: isChoosingWatchPartyEpisode,
-                                    onCancelWatchPartySelection: { isChoosingWatchPartyEpisode = false },
-                                    onFocus: {
-                                        cancelPendingFocusHandoff()
-                                        if focusedDetailsSection != .episodes {
-                                            focusedDetailsSection = .episodes
-                                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
-                                                scrollProxy.scrollTo(TvDetailsScrollID.episodesSection, anchor: .top)
-                                            }
-                                        } else {
-                                            var transaction = Transaction(animation: nil)
-                                            transaction.disablesAnimations = true
-                                            withTransaction(transaction) {
-                                                scrollProxy.scrollTo(TvDetailsScrollID.episodesSection, anchor: .top)
-                                            }
-                                        }
-                                    },
-                                    onSelect: { video in
-                                        stopBackgroundTrailer(manual: false)
-                                        if isChoosingWatchPartyEpisode {
-                                            isChoosingWatchPartyEpisode = false
-                                            onHostWatchParty?(video)
-                                        } else {
-                                            onEpisodeSelected(video)
-                                        }
-                                    },
-                                    onPlayManually: onEpisodePlayManually != nil ? { video in
-                                        stopBackgroundTrailer(manual: false)
-                                        onEpisodePlayManually?(video)
-                                    } : nil,
-                                    onEpisodeMenuPresented: { onEpisodeMenuPresented?($0) },
-                                    onBack: handleDetailsBack,
-                                    episodeFocus: $episodeFocus,
-                                    restrictFocusToKey: restoreEpisodeKey,
-                                    entryLocked: focusedDetailsSection != .episodes,
-                                    onMoveUpFromSeason: {
-                                        focusPlayFromEpisodes(using: scrollProxy)
-                                    },
-                                    onMoveDownFromEpisode: focusCastHeaderFromEpisodes
-                                )
-                                .padding(.top, 40)
-                                .id(TvDetailsScrollID.episodesSection)
-                                .disabled(!isDetailsFocusReachable(.episodes))
-                            }
-
-                            if hasCastOrTrailer, let meta = uiState.meta {
-                                TvDetailsCastAndTrailer(
-                                    meta: meta,
-                                    people: uiState.people,
-                                    onPersonClick: { person in
-                                        let clean = person.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                                        guard !clean.isEmpty && clean != "cast" else { return }
-                                        stopBackgroundTrailer(manual: false)
-                                        onOpenPerson?(person)
-                                    },
-                                    onTrailerClick: {
-                                        presentFullscreenTrailer()
-                                    },
-                                    onBack: handleDetailsBack,
-                                    headerFocus: $castHeaderFocus,
-                                    entryLocked: focusedDetailsSection != .cast,
-                                    onFocus: {
-                                        if focusedDetailsSection != .cast {
-                                            focusedDetailsSection = .cast
-                                            withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
-                                                scrollProxy.scrollTo(TvDetailsScrollID.castSection, anchor: .top)
-                                            }
-                                        } else {
-                                            var transaction = Transaction(animation: nil)
-                                            transaction.disablesAnimations = true
-                                            withTransaction(transaction) {
-                                                scrollProxy.scrollTo(TvDetailsScrollID.castSection, anchor: .top)
-                                            }
-                                        }
-                                    }
-                                )
-                                .padding(.top, 34)
-                                .padding(.bottom, 52)
-                                .id(TvDetailsScrollID.castSection)
-                                .disabled(
-                                    restoreEpisodeKey != nil
-                                        || !isDetailsFocusReachable(.cast)
+                                    networks: networks,
+                                    productionCompanies: productionCompanies,
+                                    scrollProxy: scrollProxy
                                 )
                             }
-
-                                if !uiState.moreLikeThis.isEmpty {
-                                    TvDetailsRelatedRow(
-                                        title: L10n.string("settings_tmdb_module_more_like_this", fallback: "More Like This"),
-                                        items: uiState.moreLikeThis,
-                                        entryLocked: focusedDetailsSection != .related,
-                                        onSelect: { item in
-                                            stopBackgroundTrailer(manual: false)
-                                            onOpenTitle?(item.id, item.type)
-                                        },
-                                        onBack: handleDetailsBack,
-                                        onFocus: {
-                                            if focusedDetailsSection != .related {
-                                                focusedDetailsSection = .related
-                                                withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.moreLikeThisSection, anchor: .top)
-                                                }
-                                            } else {
-                                                var transaction = Transaction(animation: nil)
-                                                transaction.disablesAnimations = true
-                                                withTransaction(transaction) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.moreLikeThisSection, anchor: .top)
-                                                }
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 34)
-                                    .id(TvDetailsScrollID.moreLikeThisSection)
-                                    .disabled(
-                                        restoreEpisodeKey != nil
-                                            || !isDetailsFocusReachable(.related)
-                                    )
-                                }
-
-                                let productionCompanies = uiState.companies.filter { $0.kind == .production && $0.tmdbId != nil }
-                                let networks = uiState.companies.filter { $0.kind == .network && $0.tmdbId != nil }
-
-                                if !networks.isEmpty {
-                                    TvDetailsProductionRow(
-                                        title: L10n.string("details_network", fallback: "Network"),
-                                        companies: networks,
-                                        entryLocked: focusedDetailsSection != .network,
-                                        onSelect: { company in
-                                            onOpenProduction?(company)
-                                        },
-                                        onBack: handleDetailsBack,
-                                        onFocus: {
-                                            if focusedDetailsSection != .network {
-                                                focusedDetailsSection = .network
-                                                withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.networkSection, anchor: .top)
-                                                }
-                                            } else {
-                                                var transaction = Transaction(animation: nil)
-                                                transaction.disablesAnimations = true
-                                                withTransaction(transaction) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.networkSection, anchor: .top)
-                                                }
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 40)
-                                    .id(TvDetailsScrollID.networkSection)
-                                    .disabled(
-                                        restoreEpisodeKey != nil
-                                            || !isDetailsFocusReachable(.network)
-                                    )
-                                }
-
-                                if !productionCompanies.isEmpty {
-                                    TvDetailsProductionRow(
-                                        title: L10n.string("details_production", fallback: "Production"),
-                                        companies: productionCompanies,
-                                        entryLocked: focusedDetailsSection != .production,
-                                        onSelect: { company in
-                                            onOpenProduction?(company)
-                                        },
-                                        onBack: handleDetailsBack,
-                                        onFocus: {
-                                            if focusedDetailsSection != .production {
-                                                focusedDetailsSection = .production
-                                                withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.productionSection, anchor: .top)
-                                                }
-                                            } else {
-                                                var transaction = Transaction(animation: nil)
-                                                transaction.disablesAnimations = true
-                                                withTransaction(transaction) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.productionSection, anchor: .top)
-                                                }
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 40)
-                                    .id(TvDetailsScrollID.productionSection)
-                                    .disabled(
-                                        restoreEpisodeKey != nil
-                                            || !isDetailsFocusReachable(.production)
-                                    )
-                                }
-
-                                if !uiState.comments.isEmpty {
-                                    TvDetailsCommentsRow(
-                                        comments: uiState.comments,
-                                        entryLocked: focusedDetailsSection != .comments,
-                                        onSelect: { comment in
-                                            onCommentSelect?(comment)
-                                        },
-                                        onBack: handleDetailsBack,
-                                        onFocus: {
-                                            if focusedDetailsSection != .comments {
-                                                focusedDetailsSection = .comments
-                                                withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.commentsSection, anchor: .top)
-                                                }
-                                            } else {
-                                                var transaction = Transaction(animation: nil)
-                                                transaction.disablesAnimations = true
-                                                withTransaction(transaction) {
-                                                    scrollProxy.scrollTo(TvDetailsScrollID.commentsSection, anchor: .top)
-                                                }
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 40)
-                                    .id(TvDetailsScrollID.commentsSection)
-                                    .disabled(
-                                        restoreEpisodeKey != nil
-                                            || !isDetailsFocusReachable(.comments)
-                                    )
-                                }
                             }
                             // Inset and layout metrics matching Android TV.
                             .padding(.leading, 56)
@@ -4406,7 +4444,13 @@ struct TvDetailsContent: View {
                     focusedDetailsSection = .actions
                     DispatchQueue.main.async { actionFocus = .play }
                 }
+                configuredDetailsSections = TVDetailsSectionOrder.currentOrder()
+                disabledDetailsSections = TVDetailsSectionOrder.disabledSections()
                 scheduleBackgroundTrailer(for: meta)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: TVDetailsSectionOrder.changedNotification).receive(on: RunLoop.main)) { _ in
+                configuredDetailsSections = TVDetailsSectionOrder.currentOrder()
+                disabledDetailsSections = TVDetailsSectionOrder.disabledSections()
             }
             .onChange(of: episodePresentation.guide.revision) { _, _ in
                 guard calendarFocusPending,
@@ -4623,20 +4667,34 @@ struct TvDetailsContent: View {
     /// the focus graph so tvOS cannot skip Cast and land two rows away.
     private var detailsFocusOrder: [TvDetailsFocusSection] {
         var order: [TvDetailsFocusSection] = [.actions]
-        if let meta = uiState.meta, !(meta.videos ?? []).isEmpty {
-            order.append(.episodes)
+        for section in activeDetailsSections {
+            switch section {
+            case .episodes:
+                if let meta = uiState.meta, !(meta.videos ?? []).isEmpty {
+                    order.append(.episodes)
+                }
+            case .cast:
+                if hasCastOrTrailer {
+                    order.append(.cast)
+                }
+            case .related:
+                if !uiState.moreLikeThis.isEmpty {
+                    order.append(.related)
+                }
+            case .network:
+                if uiState.companies.contains(where: { $0.kind == .network && $0.tmdbId != nil }) {
+                    order.append(.network)
+                }
+            case .production:
+                if uiState.companies.contains(where: { $0.kind == .production && $0.tmdbId != nil }) {
+                    order.append(.production)
+                }
+            case .comments:
+                if !uiState.comments.isEmpty {
+                    order.append(.comments)
+                }
+            }
         }
-        if hasCastOrTrailer {
-            order.append(.cast)
-        }
-        if !uiState.moreLikeThis.isEmpty { order.append(.related) }
-        if uiState.companies.contains(where: { $0.kind == .network && $0.tmdbId != nil }) {
-            order.append(.network)
-        }
-        if uiState.companies.contains(where: { $0.kind == .production && $0.tmdbId != nil }) {
-            order.append(.production)
-        }
-        if !uiState.comments.isEmpty { order.append(.comments) }
         return order
     }
 

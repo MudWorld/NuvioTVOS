@@ -194,6 +194,10 @@ enum SettingsKey {
     static let hideUnreleased = "nuvio.tv.settings.layout.hideUnreleased"
     static let showFullDates = "nuvio.tv.settings.layout.showFullDates"
     static let detailsActionsBelowInfo = "nuvio.tv.settings.layout.detailsActionsBelowInfo"
+    /// JSON `[String]` of Details page section IDs in the user's preferred order.
+    static let detailsSectionOrder = "nuvio.tv.settings.layout.detailsSectionOrder"
+    /// JSON `[String]` of Details page section IDs hidden from Details view.
+    static let detailsSectionDisabled = "nuvio.tv.settings.layout.detailsSectionDisabled"
 
     static let traktConnected = "nuvio.tv.settings.integrations.traktConnected"
     static let traktClientID = "nuvio.tv.settings.integrations.traktClientID"
@@ -372,6 +376,7 @@ enum SettingsKey {
         showCalendarTab, homeCalendarToday, calendarFilter, calendarHideSpoilers, calendarCheckAvailability, calendarTvmazeTimes,
         cardCornerRadius, cardSize, liquidGlassCards,
         hideUnreleased, showFullDates, detailsActionsBelowInfo,
+        detailsSectionOrder, detailsSectionDisabled,
         traktConnected, traktClientID, traktClientSecret,
         traktContinueWatchingDaysCap, traktShowMetaComments,
         traktWatchProgressSource, watchProgressSourceChosenByUser,
@@ -3294,8 +3299,10 @@ private struct LayoutDiscoverySettingsView: View {
     @AppStorage(SettingsKey.detailsActionsBelowInfo) private var detailsActionsBelowInfo = false
     @State private var showingHomeCatalogOrderSettings = false
     @State private var showingCollectionsSettings = false
+    @State private var showingDetailsSectionsSettings = false
     @State private var homeCatalogSummaryCount = 0
     @State private var collectionsSummaryCount = 0
+    @State private var detailsSectionsActiveCount = TVDetailsSectionOrder.activeSectionCount()
 
     /// Classic was never a distinct layout (behaved like Modern).
     private let layouts = ["Modern", "Grid View", "Compact"]
@@ -3717,6 +3724,15 @@ private struct LayoutDiscoverySettingsView: View {
                     isOn: $detailsActionsBelowInfo,
                     accentColor: accentColor
                 )
+
+                SettingsFeatureSummaryCard(
+                    featureName: L10n.string("tvos_settings_details_sections", fallback: "Details Sections"),
+                    status: "\(detailsSectionsActiveCount) of \(TVDetailsSection.allCases.count) active",
+                    actionSubtitle: L10n.string("tvos_settings_details_sections_subtitle", fallback: "Reorder and toggle Cast, More Like This, Episodes, etc."),
+                    accentColor: accentColor
+                ) {
+                    showingDetailsSectionsSettings = true
+                }
             }
         }
         .task {
@@ -3739,6 +3755,9 @@ private struct LayoutDiscoverySettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: CollectionsStore.changedNotification).receive(on: RunLoop.main)) { _ in
             refreshCollectionsSummaryCount()
         }
+        .onReceive(NotificationCenter.default.publisher(for: TVDetailsSectionOrder.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshDetailsSectionsSummary()
+        }
         .fullScreenCover(isPresented: $showingHomeCatalogOrderSettings, onDismiss: refreshHomeCatalogSummaryCount) {
             SettingsFeatureSettingsSheet(
                 title: L10n.string("tvos_settings_home_catalogs", fallback: "Home Catalogs"),
@@ -3757,11 +3776,25 @@ private struct LayoutDiscoverySettingsView: View {
             }
             .modifier(ClearPresentationBackgroundIfAvailable())
         }
+        .fullScreenCover(isPresented: $showingDetailsSectionsSettings, onDismiss: refreshDetailsSectionsSummary) {
+            SettingsFeatureSettingsSheet(
+                title: L10n.string("tvos_settings_details_sections", fallback: "Details Sections"),
+                subtitle: L10n.string("tvos_settings_details_sections_sheet_subtitle", fallback: "Reorder and toggle sections on Details screens")
+            ) {
+                DetailsSectionsOrderSection(accentColor: accentColor)
+            }
+            .modifier(ClearPresentationBackgroundIfAvailable())
+        }
     }
 
     private func refreshSummaryCounts() {
         refreshHomeCatalogSummaryCount()
         refreshCollectionsSummaryCount()
+        refreshDetailsSectionsSummary()
+    }
+
+    private func refreshDetailsSectionsSummary() {
+        detailsSectionsActiveCount = TVDetailsSectionOrder.activeSectionCount()
     }
 
     private func refreshHomeCatalogSummaryCount() {
@@ -8355,7 +8388,7 @@ private struct PlaybackSettingsView: View {
                     title: L10n.string("tvos_settings_truehd_spatial_audio", fallback: "Atmos & DTS:X Spatial Audio (Beta)"),
                     subtitle: L10n.string(
                         "tvos_settings_truehd_spatial_audio_subtitle",
-                        fallback: "On the native route, renders supported TrueHD Atmos and DTS:X to APAC. FEL software playback experimentally decodes TrueHD Atmos to PCM for APAC output and falls back to PCM if APAC fails. Requires tvOS 26+ and AetherEngine; applies to the next playback."
+                        fallback: "Use supported Atmos and DTS:X audio on native and FEL playback. TrueHD/DTS:X use APAC. Requires tvOS 26+ and AetherEngine; applies next playback."
                     ),
                     isOn: $trueHDSpatialAudio,
                     accentColor: accentColor
@@ -8370,7 +8403,7 @@ private struct PlaybackSettingsView: View {
                     ),
                     subtitle: L10n.string(
                         "tvos_settings_prefer_dual_layer_dolby_vision_subtitle",
-                        fallback: "AetherEngine only. TrueHD Atmos via APAC requires Spatial Audio and tvOS 26+; other FEL audio uses PCM. Applies next playback."
+                        fallback: "AetherEngine only. Enable Spatial Audio for supported Atmos/DTS:X on FEL playback; otherwise PCM. Applies next playback."
                     ),
                     isOn: $preferDualLayerDolbyVision,
                     accentColor: accentColor
@@ -12381,6 +12414,139 @@ private struct HomeCatalogOrderRow: View {
     private var statusColor: Color {
         guard canToggle else { return .white.opacity(0.42) }
         return isEnabled ? .white.opacity(0.7) : .white.opacity(0.42)
+    }
+}
+
+// MARK: - Details Sections manager
+
+@MainActor
+private struct DetailsSectionsOrderSection: View {
+    let accentColor: Color
+    @State private var sections: [TVDetailsSection] = []
+    @State private var disabledSections: Set<TVDetailsSection> = []
+    @FocusState private var focusedControl: DetailsSectionOrderFocus?
+
+    enum DetailsSectionOrderFocus: Hashable {
+        case reset
+        case section(String)
+    }
+
+    var body: some View {
+        SettingsGroup(
+            title: L10n.string("tvos_settings_details_sections", fallback: "Details Sections"),
+            subtitle: L10n.string("tvos_settings_details_sections_sheet_subtitle", fallback: "Reorder and toggle sections on Details screens")
+        ) {
+            SettingsActionRow(
+                title: L10n.string("action_reset", fallback: "Reset"),
+                subtitle: L10n.string("tvos_settings_reset_details_sections_subtitle", fallback: "Restore the default Details page section order and visibility"),
+                value: L10n.string("action_reset", fallback: "Reset"),
+                accentColor: accentColor
+            ) {
+                reset()
+            }
+            .focused($focusedControl, equals: .reset)
+
+            ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+                DetailsSectionOrderRow(
+                    section: section,
+                    focus: $focusedControl,
+                    isEnabled: !disabledSections.contains(section),
+                    accentColor: accentColor,
+                    canMoveUp: index > 0,
+                    canMoveDown: index < sections.count - 1,
+                    onToggle: {
+                        toggleSection(section)
+                    },
+                    onMove: { up in
+                        move(index, up: up)
+                    }
+                )
+            }
+        }
+        .onAppear(perform: reload)
+        .onReceive(NotificationCenter.default.publisher(for: TVDetailsSectionOrder.changedNotification).receive(on: RunLoop.main)) { _ in
+            reload()
+        }
+    }
+
+    private func reload() {
+        sections = TVDetailsSectionOrder.currentOrder()
+        disabledSections = TVDetailsSectionOrder.disabledSections()
+    }
+
+    private func toggleSection(_ section: TVDetailsSection) {
+        let isCurrentlyEnabled = !disabledSections.contains(section)
+        TVDetailsSectionOrder.setSectionEnabled(section, isEnabled: !isCurrentlyEnabled)
+        disabledSections = TVDetailsSectionOrder.disabledSections()
+    }
+
+    private func move(_ index: Int, up: Bool) {
+        let target = up ? index - 1 : index + 1
+        guard sections.indices.contains(index), sections.indices.contains(target) else { return }
+        sections.swapAt(index, target)
+        TVDetailsSectionOrder.saveOrder(sections)
+    }
+
+    private func reset() {
+        TVDetailsSectionOrder.resetToDefaults()
+        reload()
+    }
+}
+
+private struct DetailsSectionOrderRow: View {
+    let section: TVDetailsSection
+    let focus: FocusState<DetailsSectionsOrderSection.DetailsSectionOrderFocus?>.Binding
+    let isEnabled: Bool
+    let accentColor: Color
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onToggle: () -> Void
+    let onMove: (Bool) -> Void
+
+    private var isFocused: Bool { focus.wrappedValue == .section(section.id) }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Button(action: onToggle) {
+                SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(section.title)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(isEnabled ? .white : .white.opacity(0.46))
+                            .lineLimit(1)
+
+                        Text(section.subtitle)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(.white.opacity(isEnabled ? 0.56 : 0.36))
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 20)
+
+                    Text(statusText)
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(statusColor)
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focused(focus, equals: .section(section.id))
+            .focusEffectDisabledIfAvailable()
+            .entryLockable()
+
+            AddonReorderButton(systemImage: "chevron.up", disabled: !canMoveUp) { onMove(true) }
+            AddonReorderButton(systemImage: "chevron.down", disabled: !canMoveDown) { onMove(false) }
+        }
+    }
+
+    private var statusText: String {
+        isEnabled
+            ? L10n.string("settings_fusion_badge_url_active", fallback: "Active")
+            : L10n.string("tvos_settings_disabled", fallback: "Disabled")
+    }
+
+    private var statusColor: Color {
+        isEnabled ? .white.opacity(0.7) : .white.opacity(0.42)
     }
 }
 

@@ -10367,6 +10367,172 @@ private actor TVHomeCatalogSnapshotWriter {
     }
 }
 
+/// Section identifier for custom ordering on the Details screen.
+enum TVDetailsSection: String, CaseIterable, Identifiable, Codable {
+    case episodes
+    case cast
+    case related
+    case network
+    case production
+    case comments
+
+    var id: String { rawValue }
+
+    init?(caseInsensitive: String) {
+        let normalized = caseInsensitive.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "episodes":
+            self = .episodes
+        case "cast":
+            self = .cast
+        case "more_like_this", "morelikethis", "related":
+            self = .related
+        case "network", "networks":
+            self = .network
+        case "production", "companies":
+            self = .production
+        case "comments":
+            self = .comments
+        default:
+            return nil
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .episodes:
+            return L10n.string("settings_meta_episodes", fallback: "Episodes")
+        case .cast:
+            return L10n.string("details_creator_and_cast", fallback: "Cast & Crew")
+        case .related:
+            return L10n.string("settings_tmdb_module_more_like_this", fallback: "More Like This")
+        case .network:
+            return L10n.string("details_network", fallback: "Networks")
+        case .production:
+            return L10n.string("details_production", fallback: "Production")
+        case .comments:
+            return L10n.string("details_comments", fallback: "Comments")
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .episodes:
+            return L10n.string("tvos_settings_details_section_episodes_subtitle", fallback: "Season selector and episode cards")
+        case .cast:
+            return L10n.string("tvos_settings_details_section_cast_subtitle", fallback: "Creators, actors, and trailer button")
+        case .related:
+            return L10n.string("tvos_settings_details_section_related_subtitle", fallback: "Similar and recommended titles")
+        case .network:
+            return L10n.string("tvos_settings_details_section_network_subtitle", fallback: "Broadcast and streaming networks")
+        case .production:
+            return L10n.string("tvos_settings_details_section_production_subtitle", fallback: "Production companies and studios")
+        case .comments:
+            return L10n.string("tvos_settings_details_section_comments_subtitle", fallback: "Trakt reviews and viewer comments")
+        }
+    }
+}
+
+/// User-controlled ordering and visibility of sections on the Details screen (Settings → Layout → Details Sections).
+enum TVDetailsSectionOrder {
+    static let changedNotification = Notification.Name("nuvio.tv.detailsSectionOrder.changed")
+    static let defaultOrder: [TVDetailsSection] = [.episodes, .cast, .related, .network, .production, .comments]
+
+    static func currentOrder(in settings: UserDefaults = ProfileSettings.current) -> [TVDetailsSection] {
+        var result: [TVDetailsSection] = []
+        var seen = Set<TVDetailsSection>()
+
+        if let data = settings.data(forKey: SettingsKey.detailsSectionOrder),
+           let rawKeys = try? JSONDecoder().decode([String].self, from: data) {
+            for raw in rawKeys {
+                if let section = TVDetailsSection(caseInsensitive: raw), seen.insert(section).inserted {
+                    result.append(section)
+                }
+            }
+        }
+
+        // Append any default sections not present in saved order to preserve forward compatibility
+        for section in defaultOrder {
+            if seen.insert(section).inserted {
+                result.append(section)
+            }
+        }
+        return result
+    }
+
+    static func disabledSections(in settings: UserDefaults = ProfileSettings.current) -> Set<TVDetailsSection> {
+        guard let data = settings.data(forKey: SettingsKey.detailsSectionDisabled),
+              let rawKeys = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        var disabled = Set<TVDetailsSection>()
+        for raw in rawKeys {
+            if let section = TVDetailsSection(caseInsensitive: raw) {
+                disabled.insert(section)
+            }
+        }
+        return disabled
+    }
+
+    static func isSectionEnabled(_ section: TVDetailsSection, in settings: UserDefaults = ProfileSettings.current) -> Bool {
+        !disabledSections(in: settings).contains(section)
+    }
+
+    static func activeSections(in settings: UserDefaults = ProfileSettings.current) -> [TVDetailsSection] {
+        let disabled = disabledSections(in: settings)
+        return currentOrder(in: settings).filter { !disabled.contains($0) }
+    }
+
+    static func activeSectionCount(in settings: UserDefaults = ProfileSettings.current) -> Int {
+        activeSections(in: settings).count
+    }
+
+    static func setSectionEnabled(_ section: TVDetailsSection, isEnabled: Bool, in settings: UserDefaults = ProfileSettings.current) {
+        var disabled = disabledSections(in: settings)
+        if isEnabled {
+            disabled.remove(section)
+        } else {
+            disabled.insert(section)
+        }
+        let rawKeys = disabled.map(\.rawValue).sorted()
+        if let data = try? JSONEncoder().encode(rawKeys) {
+            settings.set(data, forKey: SettingsKey.detailsSectionDisabled)
+        }
+        notifyChange()
+    }
+
+    static func saveOrder(_ order: [TVDetailsSection], in settings: UserDefaults = ProfileSettings.current) {
+        var seen = Set<TVDetailsSection>()
+        var normalized: [TVDetailsSection] = []
+        for section in order {
+            if seen.insert(section).inserted {
+                normalized.append(section)
+            }
+        }
+        for section in defaultOrder {
+            if seen.insert(section).inserted {
+                normalized.append(section)
+            }
+        }
+        let rawKeys = normalized.map(\.rawValue)
+        if let data = try? JSONEncoder().encode(rawKeys) {
+            settings.set(data, forKey: SettingsKey.detailsSectionOrder)
+        }
+        notifyChange()
+    }
+
+    static func resetToDefaults(in settings: UserDefaults = ProfileSettings.current) {
+        settings.removeObject(forKey: SettingsKey.detailsSectionOrder)
+        settings.removeObject(forKey: SettingsKey.detailsSectionDisabled)
+        notifyChange()
+    }
+
+    private static func notifyChange() {
+        ProfileSettings.notifySettingsChanged()
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+}
+
 /// Keeps catalogs used only inside synced collection folders out of top-level
 /// Home rows. Inputs are explicit so the matching rule remains deterministic.
 enum CatalogHomeVisibilityResolver {
