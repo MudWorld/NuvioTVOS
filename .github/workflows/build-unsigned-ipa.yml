@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15-intel
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +30,8 @@ jobs:
           echo "Using $XCODE"
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
+          # The app uses tvOS 27 SDK APIs; older Xcodes cannot build it.
+          xcodebuild -version | grep -q "Xcode 2[7-9]" || { echo "::error::Xcode 27 or newer required"; exit 1; }
           xcodebuild -showsdks | grep -i appletv || true
 
       - name: Install Tuist

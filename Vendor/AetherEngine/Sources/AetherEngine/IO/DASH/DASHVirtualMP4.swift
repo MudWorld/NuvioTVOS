@@ -118,14 +118,11 @@ struct DASHVirtualLayout: Sendable {
             sidxEnd += sidxSizes[s]
             let index = indexes[s]
             let own = pieceOf[s]
-            // Built in steps: as one expression Xcode 26 gives up type-checking it.
-            let referenceID: UInt32 = maps[s][index.referenceID] ?? maps[s].values.min() ?? 1
-            var payload: [UInt8] = MP4Box.be32(referenceID)
-            payload += MP4Box.be32(index.timescale)
-            payload += MP4Box.be64(index.earliestPresentationTime)
-            payload += MP4Box.be64(UInt64(pieces[own[0]].virtualOffset - sidxEnd))
-            payload += [0, 0]
-            payload += MP4Box.be16(UInt16(own.count))
+            var payload = MP4Box.be32(maps[s][index.referenceID] ?? maps[s].values.min() ?? 1)
+                + MP4Box.be32(index.timescale)
+                + MP4Box.be64(index.earliestPresentationTime)
+                + MP4Box.be64(UInt64(pieces[own[0]].virtualOffset - sidxEnd))
+                + [0, 0] + MP4Box.be16(UInt16(own.count))
             for (k, p) in own.enumerated() {
                 let end = k + 1 < own.count ? pieces[own[k + 1]].virtualOffset : total
                 let span = end - pieces[p].virtualOffset
