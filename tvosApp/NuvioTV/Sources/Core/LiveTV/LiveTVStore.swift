@@ -36,8 +36,18 @@ final class LiveTVStore: ObservableObject {
     @Published private(set) var playlists: [LiveTVPlaylist] = []
     @Published private(set) var channels: [LiveTVChannel] = []
     @Published private(set) var refreshingURLs: Set<String> = []
+    /// Channel ids, in the order they were starred (shown first in Live TV).
+    @Published private(set) var favoriteIDs: [String] = []
+    /// Channel ids the user hid; listed only under the "Hidden" filter.
+    @Published private(set) var hiddenIDs: Set<String> = []
+    /// Most recently played channel ids, newest first.
+    @Published private(set) var recentIDs: [String] = []
+    private static let recentKey = "nuvio.livetv.recent.v1"
+    private static let recentLimit = 15
 
     nonisolated private static let playlistsKey = "nuvio.livetv.playlists.v1"
+    private static let favoritesKey = "nuvio.livetv.favorites.v1"
+    private static let hiddenKey = "nuvio.livetv.hidden.v1"
 
     enum AddError: LocalizedError {
         case invalidURL, alreadyAdded, noChannels, failed(String)
@@ -57,6 +67,9 @@ final class LiveTVStore: ObservableObject {
            let stored = try? JSONDecoder().decode([LiveTVPlaylist].self, from: data) {
             playlists = stored
         }
+        favoriteIDs = UserDefaults.standard.stringArray(forKey: Self.favoritesKey) ?? []
+        hiddenIDs = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? [])
+        recentIDs = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
         channels = playlists.flatMap { LiveTVChannelCache.read(playlistURL: $0.url) ?? [] }
         // tvOS may purge caches; fetch again whatever is missing.
         let missing = playlists.filter { LiveTVChannelCache.read(playlistURL: $0.url) == nil }
@@ -72,11 +85,65 @@ final class LiveTVStore: ObservableObject {
         return !stored.isEmpty
     }
 
-    /// Channel groups in playlist order, each with its channels.
+    // MARK: Favorites and hidden channels
+
+    func isFavorite(_ channel: LiveTVChannel) -> Bool { favoriteIDs.contains(channel.id) }
+    func isHidden(_ channel: LiveTVChannel) -> Bool { hiddenIDs.contains(channel.id) }
+
+    func toggleFavorite(_ channel: LiveTVChannel) {
+        if let index = favoriteIDs.firstIndex(of: channel.id) {
+            favoriteIDs.remove(at: index)
+        } else {
+            favoriteIDs.append(channel.id)
+            hiddenIDs.remove(channel.id)
+        }
+        persistMarks()
+    }
+
+    func toggleHidden(_ channel: LiveTVChannel) {
+        if hiddenIDs.contains(channel.id) {
+            hiddenIDs.remove(channel.id)
+        } else {
+            hiddenIDs.insert(channel.id)
+            favoriteIDs.removeAll { $0 == channel.id }
+        }
+        persistMarks()
+    }
+
+    /// Starred channels in starring order (hidden ones excluded).
+    var favoriteChannels: [LiveTVChannel] {
+        let byID = Dictionary(channels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return favoriteIDs.compactMap { byID[$0] }
+    }
+
+    /// Remembers a played channel for the "Recently watched" row.
+    func markWatched(_ channel: LiveTVChannel) {
+        recentIDs.removeAll { $0 == channel.id }
+        recentIDs.insert(channel.id, at: 0)
+        if recentIDs.count > Self.recentLimit { recentIDs.removeLast(recentIDs.count - Self.recentLimit) }
+        UserDefaults.standard.set(recentIDs, forKey: Self.recentKey)
+    }
+
+    /// Recently played channels, newest first (hidden ones excluded).
+    var recentChannels: [LiveTVChannel] {
+        let byID = Dictionary(channels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return recentIDs.compactMap { byID[$0] }.filter { !hiddenIDs.contains($0.id) }
+    }
+
+    var hiddenChannels: [LiveTVChannel] {
+        channels.filter { hiddenIDs.contains($0.id) }
+    }
+
+    private func persistMarks() {
+        UserDefaults.standard.set(favoriteIDs, forKey: Self.favoritesKey)
+        UserDefaults.standard.set(Array(hiddenIDs), forKey: Self.hiddenKey)
+    }
+
+    /// Visible (not hidden) channel groups in playlist order.
     var groups: [(name: String, channels: [LiveTVChannel])] {
         var order: [String] = []
         var byGroup: [String: [LiveTVChannel]] = [:]
-        for channel in channels {
+        for channel in channels where !hiddenIDs.contains(channel.id) {
             if byGroup[channel.group] == nil { order.append(channel.group) }
             byGroup[channel.group, default: []].append(channel)
         }
