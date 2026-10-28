@@ -1,0 +1,31 @@
+# Codemagic build of the unsigned tvOS IPA (same steps as scripts/build-ipa.sh),
+# for sideloading with AltStore, SideStore, atvloadly and similar tools.
+# Codemagic is used because the app needs Xcode 27 on Apple silicon.
+
+workflows:
+  tvos-unsigned-ipa:
+    name: tvOS unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 90
+    environment:
+      xcode: 27.1
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: tvos-plugins
+          include: true
+      cancel_previous_builds: true
+    scripts:
+      - name: Install Tuist (pinned in mise.toml)
+        script: |
+          brew install mise
+          mise trust --yes mise.toml
+          mise install
+          mise exec -- tuist version
+      - name: Build unsigned IPA
+        script: |
+          xcodebuild -version
+          bash scripts/build-ipa.sh
+    artifacts:
+      - build-ipa/*.ipa

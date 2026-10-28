@@ -4,10 +4,10 @@ name: Build unsigned tvOS IPA
 # macOS runner, for sideloading (AltStore, SideStore, atvloadly, ...), and
 # publishes it as a pre-release so it can be downloaded without signing in.
 
+# Manual only: GitHub rarely allocates arm64 macOS runners here, so the
+# regular build runs on Codemagic (codemagic.yaml).
 on:
   workflow_dispatch:
-  push:
-    branches: [tvos-plugins]
 
 permissions:
   contents: write
