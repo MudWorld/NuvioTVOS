@@ -17,7 +17,7 @@ DAV1D_VERSION="1.5.4"
 DAV1D_REPO="https://code.videolan.org/videolan/dav1d.git"
 ZIMG_VERSION="release-3.0.6"
 ZIMG_REPO="https://github.com/sekrit-twc/zimg.git"
-ZVBI_VERSION="v0.2.45"
+ZVBI_VERSION="v0.2.46"
 ZVBI_REPO="https://github.com/zapping-vbi/zvbi.git"
 # Debug info for crash symbolication. `-gline-tables-only` carries function
 # names, file/line and inlined frames, which is everything a symbolicated crash
@@ -837,6 +837,12 @@ COMMON_FLAGS=(
     # tvOS doesn't expose LPCM-side audio passthrough that the
     # lossless was actually delivering on most setups anyway.
     --enable-encoder=eac3
+    # AAC (LC) and ALAC, plus the AC-3 encoder E-AC-3 already pulls in:
+    # AetherEngine pads a stream-copied track whose audio ends before its
+    # video with silence in the track's own codec (AetherEngine#847),
+    # because AVPlayer ends an item the moment its audio runs out. Both
+    # are FFmpeg's native encoders, no external library.
+    --enable-encoder=aac --enable-encoder=alac
 )
 
 build_one() {
@@ -1200,6 +1206,109 @@ make_xcframeworks() {
 }
 
 # ─────────────────────────────────────────────────────────
+# Build record (BUILD-INFO.txt)
+# ─────────────────────────────────────────────────────────
+# The committed binaries are built on a local Mac, so the only provenance a
+# consumer gets is what this writes next to them: the inputs (upstream commits,
+# a hash of the changes the patch functions made, toolchain and SDK versions),
+# FFmpeg's configure line per slice and the hash of every shipped binary. The
+# inputs are captured right after patching, before anything is compiled, so a
+# later `package` run cannot attribute today's toolchain to yesterday's objects.
+
+first_line() {
+    local OUT
+    OUT="$("$@" 2>&1)" || true
+    print -r -- "${OUT%%$'\n'*}"
+}
+
+source_state() {
+    local NAME="$1" DIR="$2" TAG="$3"
+    local COMMIT CHANGED DIGEST
+    COMMIT="$(git -C "${DIR}" rev-parse HEAD)"
+    CHANGED="$(git -C "${DIR}" status --porcelain | awk '{print $2}' | tr '\n' ' ')"
+    # Tracked edits as a binary diff plus every untracked file (the zvbi stub)
+    # by name and content; generated build files are gitignored upstream.
+    DIGEST="$({
+        git -C "${DIR}" diff HEAD --binary
+        git -C "${DIR}" ls-files --others --exclude-standard | sort | while read -r F; do
+            print -r -- "+++ ${F}"
+            cat "${DIR}/${F}"
+        done
+    } | shasum -a 256 | cut -d' ' -f1)"
+    echo "${NAME} ${TAG} ${COMMIT}"
+    if [[ -n "${CHANGED}" ]]; then
+        echo "  changes sha256 ${DIGEST}: ${CHANGED% }"
+    else
+        echo "  unmodified"
+    fi
+}
+
+record_build_inputs() {
+    local OUT="${BUILD_DIR}/build-inputs.txt"
+    local DIRTY="" P SDK T
+    git -C "${SCRIPT_DIR}" diff --quiet HEAD -- build.sh patches || DIRTY=" (build.sh or patches/ differ from it)"
+    mkdir -p "${BUILD_DIR}"
+    {
+        echo "Built      $(date -u +%Y-%m-%dT%H:%M:%SZ), linkage ${LINKAGE}"
+        echo "Repo HEAD  $(git -C "${SCRIPT_DIR}" rev-parse HEAD)${DIRTY}"
+        echo "build.sh   sha256 $(shasum -a 256 "${SCRIPT_DIR}/build.sh" | cut -d' ' -f1)"
+        for P in "${SCRIPT_DIR}"/patches/*(N); do
+            echo "patches/${P:t}  sha256 $(shasum -a 256 "${P}" | cut -d' ' -f1)"
+        done
+        echo ""
+        echo "## Host and toolchain"
+        echo "macOS      $(sw_vers -productVersion) ($(sw_vers -buildVersion)), $(uname -m)"
+        echo "Xcode      $(xcodebuild -version | tr '\n' ' ' | sed 's/ $//')"
+        echo "clang      $(first_line xcrun clang --version)"
+        for SDK in iphoneos iphonesimulator appletvos appletvsimulator xros xrsimulator macosx; do
+            echo "SDK        ${SDK} $(xcrun --sdk "${SDK}" --show-sdk-version) ($(xcrun --sdk "${SDK}" --show-sdk-build-version))"
+        done
+        for T in meson ninja autoconf automake glibtool pkg-config; do
+            echo "${(r:11:)T}$(first_line "${T}" --version)"
+        done
+        echo "perl       $(perl -e 'print $^V')"
+        echo ""
+        echo "## Sources (tag, commit, hash of the changes the patch functions made)"
+        source_state FFmpeg  "${FFMPEG_SRC}" "${FFMPEG_VERSION}"
+        source_state dav1d   "${DAV1D_SRC}"  "${DAV1D_VERSION}"
+        source_state zimg    "${ZIMG_SRC}"   "${ZIMG_VERSION}"
+        source_state libzvbi "${ZVBI_SRC}"   "${ZVBI_VERSION}"
+    } > "${OUT}"
+    echo "→ Build inputs recorded in ${OUT#${SCRIPT_DIR}/}"
+}
+
+write_build_info() {
+    local OUT="${SCRIPT_DIR}/BUILD-INFO.txt"
+    local INPUTS="${BUILD_DIR}/build-inputs.txt"
+    local C F KIND
+    {
+        echo "# FFmpegBuild build record"
+        echo ""
+        echo "Written by build.sh. Inputs are captured after patching, outputs after packaging."
+        [[ "${MODE}" == "package" ]] && echo "Repackaged $(date -u +%Y-%m-%dT%H:%M:%SZ) from existing build products."
+        echo ""
+        if [[ -f "${INPUTS}" ]]; then
+            cat "${INPUTS}"
+        else
+            echo "Inputs: not recorded (no build has run in this tree since build records were added)"
+        fi
+        echo ""
+        echo "## FFmpeg configure line per slice (repo root shown as <repo>)"
+        for C in "${BUILD_DIR}"/work/*/config.h(N); do
+            echo "${C:h:t}: $(sed -n 's/^#define FFMPEG_CONFIGURATION "\(.*\)"$/\1/p' "${C}" | sed "s#${SCRIPT_DIR}#<repo>#g")"
+        done
+        echo ""
+        echo "## Shipped binaries (sha256)"
+        find "${OUTPUT_DIR}" -name '*.dSYM' -prune -o -type f -print | sort | while read -r F; do
+            KIND="$(file -b "${F}")"
+            [[ "${KIND}" == Mach-O* || "${KIND}" == "current ar archive"* ]] || continue
+            echo "$(shasum -a 256 "${F}" | cut -d' ' -f1)  ${F#${SCRIPT_DIR}/}"
+        done
+    } > "${OUT}"
+    echo "✓ Build record written to BUILD-INFO.txt"
+}
+
+# ─────────────────────────────────────────────────────────
 
 if [[ "${MODE}" == "clean" ]]; then
     echo "Cleaning..."
@@ -1217,6 +1326,7 @@ fi
 if [[ "${MODE}" == "package" ]]; then
     rm -rf "${BUILD_DIR}/frameworks" "${OUTPUT_DIR}/"*.xcframework 2>/dev/null || true
     make_xcframeworks
+    write_build_info
     echo ""
     echo "✓ Repackage complete (${LINKAGE})"
     exit 0
@@ -1376,6 +1486,7 @@ fetch_dav1d
 fetch_zimg
 fetch_zvbi
 patch_zvbi
+record_build_inputs
 
 # Build dav1d for all platforms first
 build_dav1d_one ios-arm64          iphoneos         arm64  arm64-apple-ios16.0                    16.0
@@ -1426,6 +1537,7 @@ build_one macos-arm64        macosx           arm64  arm64-apple-macos14.0      
 build_one macos-x86_64       macosx           x86_64 x86_64-apple-macos14.0                 14.0
 
 make_xcframeworks
+write_build_info
 
 echo ""
 echo "╔══════════════════════════════════════╗"

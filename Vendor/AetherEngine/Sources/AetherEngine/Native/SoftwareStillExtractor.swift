@@ -136,7 +136,7 @@ final class SoftwareStillExtractor: @unchecked Sendable {
         decoder.onFrame = { pixelBuffer, pts, _ in
             collector.append(pixelBuffer: pixelBuffer, seconds: pts.seconds)
         }
-        decoder.flush()
+        decoder.flush(resetFilterGraph: false)
         defer { decoder.onFrame = nil }
 
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))

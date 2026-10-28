@@ -15,7 +15,7 @@ extension AetherEngine {
     ///
     /// - Parameters:
     ///   - url: Media source (`file://`, `http://`, or `https://`).
-    ///   - options: Forwarded for `httpHeaders` only; other flags ignored (no playback session).
+    ///   - options: Uses `httpHeaders` and `discImageHint` for URL sources; other flags are ignored (no playback session).
     ///   - limits: Optional shared input, packet and monotonic time limits.
     ///   - cancellation: Optional one-shot token, callable from another thread or a task cancellation handler.
     /// - Throws: Open errors, `ProbeError` for a controlled stop, or `CancellationError`.
@@ -66,7 +66,7 @@ extension AetherEngine {
     ///
     /// - Parameters:
     ///   - url: Media source, forwarded verbatim to `probe(url:)`.
-    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` only; other flags ignored, same as `probe(url:)`).
+    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` and `discImageHint`; other flags ignored).
     ///   - atmosDetection: Bounds + optional explicit track override for the decode pass. Defaults resolve the
     ///     demuxer's own default audio track (`Demuxer.audioStreamIndex`) and cap the decode attempt at 64
     ///     packets / 8 MiB / 2 s wall clock (soft -- see `AtmosDetectionOptions` doc for the same
@@ -124,7 +124,7 @@ extension AetherEngine {
     ///
     /// - Parameters:
     ///   - url: Media source, forwarded verbatim to `probe(url:)`.
-    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` only).
+    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` and `discImageHint` for URL sources).
     ///   - detecting: Which extra passes to run. Empty is the header probe with the same controls.
     ///   - atmosDetection: Bounds + optional track override for the Atmos decode pass. Ignored without `.atmos`.
     ///   - hdr10PlusDetection: Bounds for the HDR10+ / HDR Vivid scan. Ignored without either.
@@ -192,11 +192,29 @@ extension AetherEngine {
                     ownedReader = reader
                     let counted = ProbeIOReader(reader: reader, control: control)
                     try control.check()
-                    if let http = reader as? ProbeHTTPReader { try http.open() }
+                    var isDASHManifest = false
+                    if let http = reader as? ProbeHTTPReader {
+                        do {
+                            try http.open()
+                        } catch AVIOReaderError.dashManifest {
+                            isDASHManifest = true
+                        }
+                    }
                     try control.check()
-                    try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits))
+                    if isDASHManifest {
+                        // AE#859: an MPD is opened by the demuxer's own DASH path, which reads several
+                        // files. Deadline and cancellation are honoured inside libavformat's reads
+                        // through the demuxer's interrupt, but the manifest and head requests run to
+                        // their own timeouts, and the byte budget, which counts one source, does not apply.
+                        reader.close()
+                        ownedReader = nil
+                        try demuxer.open(url: u, extraHeaders: options.httpHeaders)
+                    } else {
+                        try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits))
+                    }
                 } else {
-                    try demuxer.open(url: u, extraHeaders: options.httpHeaders)
+                    try demuxer.open(url: u, extraHeaders: options.httpHeaders,
+                                     profile: DemuxerOpenProfile.playback.withDiscImageHint(options.discImageHint))
                 }
             case .custom(let reader, let formatHint):
                 displayURL = URL(string: "aether-custom://source")!
@@ -853,19 +871,27 @@ extension AetherEngine {
         return "VideoToolbox \(name) (HW)"
     }
 
-    /// User-facing label for the active audio decoder on the SW path (libavcodec -> CoreAudio). nil when
-    /// no audio track. AE#462: `activeIndex` is the HOST's resolved index, never the engine's pick. The
-    /// pick says which track was asked for; a session whose decoder refused to open serves none, and
-    /// this label used to name one for it.
+    /// User-facing label for the active audio pipeline on the SW path. nil when no audio track. AE#462:
+    /// `activeIndex` is the HOST's resolved index, never the engine's pick. The pick says which track was
+    /// asked for; a session whose decoder refused to open serves none, and this label used to name one
+    /// for it. `route` is the host's `audioRoute`: the PCM decode is libavcodec into CoreAudio, the Atmos
+    /// routes are named the way the loopback route names its own APAC ("TRUEHD Atmos → APAC 7.1.4").
     nonisolated static func softwareAudioDecoderLabel(
         audioTracks: [TrackInfo],
-        activeIndex: Int32
+        activeIndex: Int32,
+        route: SoftwareAtmosRoute = .pcm
     ) -> String? {
         guard activeIndex >= 0,
               let track = audioTracks.first(where: { $0.id == Int(activeIndex) }) else {
             return nil
         }
-        return "libavcodec \(track.codec.uppercased()) → CoreAudio"
+        let codec = track.codec.uppercased()
+        switch route {
+        case .pcm: return "libavcodec \(codec) → CoreAudio"
+        case .compressedEAC3JOC: return "\(codec) Atmos → renderer (compressed)"
+        case .apac(let layout):
+            return codec.hasPrefix("DTS") ? "DTS:X → APAC \(layout.rawValue)" : "\(codec) Atmos → APAC \(layout.rawValue)"
+        }
     }
 
     // MARK: - Format / frame-rate probing
@@ -1063,14 +1089,13 @@ extension AetherEngine {
         hostAsserts: Bool,
         criteriaReadoutAtLoad: Bool?,
         attemptWhenUnproven: Bool,
-        isLive: Bool,
         displayEligibleForHDR: Bool,
         panelRefusedHDRMaster: Bool
     ) -> Bool {
         sessionRoutesAsHDRPanel(
             panelPresentsHDR: sessionPanelPresentsHDR(
                 hostAsserts: hostAsserts, criteriaReadout: criteriaReadoutAtLoad),
-            attemptWhenUnproven: attemptWhenUnproven && !isLive,
+            attemptWhenUnproven: attemptWhenUnproven,
             displayEligibleForHDR: displayEligibleForHDR,
             panelRefusedHDRMaster: panelRefusedHDRMaster)
     }

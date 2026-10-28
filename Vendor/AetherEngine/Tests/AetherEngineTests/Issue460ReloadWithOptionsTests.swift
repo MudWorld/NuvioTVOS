@@ -45,10 +45,45 @@ struct Issue460SessionOptionCorrectionTests {
         #expect(SessionOptionCorrection.refusedFields(from: base, to: live) == ["isLive"])
         var audioOnly = base; audioOnly.audioOnly = true
         #expect(SessionOptionCorrection.refusedFields(from: base, to: audioOnly) == ["audioOnly"])
+        var discHint = base; discHint.discImageHint = true
+        #expect(SessionOptionCorrection.refusedFields(from: base, to: discHint) == ["discImageHint"])
         var hls = base; hls.nativeRemoteHLS = true
         #expect(SessionOptionCorrection.refusedFields(from: base, to: hls) == ["nativeRemoteHLS"])
         var sequential = base; sequential.sequentialOrigin = true
         #expect(SessionOptionCorrection.refusedFields(from: base, to: sequential) == ["sequentialOrigin"])
+    }
+
+    @Test("diagnostic identity cannot be added, removed or changed by an internal reload")
+    func diagnosticIdentityChangesAreRefused() {
+        let context = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        var current = LoadOptions()
+        var proposed = current
+        proposed.sourceDiagnosticsContext = context
+        #expect(SessionOptionCorrection.refusedFields(from: current, to: proposed) == ["sourceDiagnosticsContext"])
+        current = proposed
+        let replacements: [SourceNetworkDiagnostics.Context?] = [
+            nil,
+            .init(playbackID: UUID(), attemptID: context.attemptID),
+            .init(playbackID: context.playbackID, attemptID: UUID())
+        ]
+        for replacement in replacements {
+            proposed.sourceDiagnosticsContext = replacement
+            #expect(SessionOptionCorrection.refusedFields(from: current, to: proposed) == ["sourceDiagnosticsContext"])
+        }
+    }
+
+    @Test("an equal diagnostic identity permits a tuning correction")
+    func equalDiagnosticIdentityAllowsTuning() {
+        let context = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        var current = LoadOptions()
+        current.sourceDiagnosticsContext = context
+        var proposed = current
+        proposed.sourceDiagnosticsContext = .init(playbackID: context.playbackID, attemptID: context.attemptID)
+        #expect(SessionOptionCorrection.refusedFields(from: current, to: proposed).isEmpty)
+        #expect(SessionOptionCorrection.changedFields(from: current, to: proposed).isEmpty)
+        proposed.audioDelaySeconds = 0.5
+        #expect(SessionOptionCorrection.refusedFields(from: current, to: proposed).isEmpty)
+        #expect(SessionOptionCorrection.changedFields(from: current, to: proposed) == ["audioDelaySeconds"])
     }
 
     @Test("several identity changes are all named, not just the first")
@@ -150,6 +185,35 @@ struct Issue460ReloadWithOptionsTests {
         #expect(engine.loadedOptions.isLive)
     }
 
+    @Test("a diagnostic identity correction refuses before teardown or tuning installation")
+    func diagnosticIdentityRefusesBeforeTeardown() async throws {
+        let engine = try AetherEngine()
+        var seeded = LoadOptions()
+        seeded.sourceDiagnosticsContext = .init(playbackID: UUID(), attemptID: UUID())
+        engine.setLoadedOptionsForTesting(seeded)
+        let url = URL(string: "https://example.test/movie.mkv")!
+        engine.loadedURL = url
+        engine.state = .playing
+        let generation = engine.loadGeneration
+        do {
+            try await engine.reloadAtCurrentPosition {
+                $0.sourceDiagnosticsContext = .init(playbackID: UUID(), attemptID: UUID())
+                $0.audioDelaySeconds = 0.5
+            }
+            Issue.record("expected a diagnostic identity refusal")
+        } catch let error as AetherEngineError {
+            guard case .loadIdentityNotCorrectable(let fields) = error else {
+                Issue.record("expected loadIdentityNotCorrectable, got \(error)")
+                return
+            }
+            #expect(fields == ["sourceDiagnosticsContext"])
+        }
+        #expect(engine.loadedOptions == seeded)
+        #expect(engine.loadedURL == url)
+        #expect(engine.state == .playing)
+        #expect(engine.loadGeneration == generation)
+    }
+
     @Test("a refused correction does not install the options it refused")
     func refusedCorrectionDoesNotInstall() async throws {
         let engine = try AetherEngine()
@@ -191,12 +255,14 @@ struct Issue460ReloadWithOptionsTests {
         let engine = try AetherEngine()
         var seeded = LoadOptions()
         seeded.httpHeaders = ["Authorization": "Bearer stale"]
+        seeded.sourceDiagnosticsContext = .init(playbackID: UUID(), attemptID: UUID())
         engine.setLoadedOptionsForTesting(seeded)
 
         var corrected = seeded
         corrected.httpHeaders["Authorization"] = "Bearer fresh"
         engine.applySessionOptionCorrection(corrected)
         #expect(engine.loadedOptions.httpHeaders["Authorization"] == "Bearer fresh")
+        #expect(engine.loadedOptions.sourceDiagnosticsContext == seeded.sourceDiagnosticsContext)
     }
 }
 

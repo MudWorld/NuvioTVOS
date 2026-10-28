@@ -3,6 +3,47 @@ import Testing
 @testable import AetherEngine
 
 struct FrameExtractorLifecycleTests {
+    @Test("bounded local stills do not reopen a context after auxiliary close starts")
+    func boundedLocalStillIsRejectedDuringAuxiliaryClose() async throws {
+        let barrier = ContextCloseBarrier()
+        let extractor = FrameExtractor(
+            testingReader: DataIOReader(data: try ProbeTestFixtures.hdr10Plus()),
+            formatHint: "mp4",
+            beforeContextClose: { barrier.holdFirstClose() }
+        )
+
+        let close = Task { await extractor.closeAuxiliaryContext() }
+        let closeEntered = await Task.detached {
+            barrier.waitForFirstClose(timeout: 2)
+        }.value
+        guard closeEntered else {
+            barrier.releaseFirstClose()
+            await close.value
+            #expect(Bool(false), "the serial decode queue did not enter teardown")
+            return
+        }
+
+        let stillTask = Task {
+            await extractor.boundedLocalStill(at: 0, refined: false, maxWidth: 64, isCancelled: { false })
+        }
+        var requestEntered = false
+        for _ in 0..<10_000 {
+            if await extractor.boundedLocalStillCallCountForTesting == 1 {
+                requestEntered = true
+                break
+            }
+            await Task.yield()
+        }
+        #expect(requestEntered, "the still request should reach the extractor while close is held")
+
+        barrier.releaseFirstClose()
+        let still = await stillTask.value
+        await close.value
+        #expect(still.map { _ in true } == nil)
+        #expect(!(await extractor.isContextOpenForTesting), "the stale still must not reopen the closed context")
+        await extractor.shutdown()
+    }
+
     @Test("overlapping auxiliary closes share teardown and keep admission closed")
     func overlappingAuxiliaryClosesCoalesce() async {
         let barrier = ContextCloseBarrier()

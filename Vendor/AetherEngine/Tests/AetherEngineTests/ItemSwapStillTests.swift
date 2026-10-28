@@ -476,7 +476,7 @@ struct ItemSwapStillTests {
         #expect(view.isHoldingStill)
     }
 
-    private static func centreGrey(_ image: CGImage) -> Int? {
+    static func centreGrey(_ image: CGImage) -> Int? {
         var pixel = [UInt8](repeating: 0, count: 4)
         guard let context = CGContext(
             data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,

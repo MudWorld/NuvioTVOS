@@ -107,18 +107,19 @@ public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// rung can change it. A source whose audio stream the pick passed over (its parameters left
     /// empty by the probe) is `.droppedNoPipeline`, not this (AE#641).
     case noAudioInSource
-    /// The source's audio bitstream is muxed into fMP4 unchanged: Atmos, DTS-HD and every other
-    /// bitstream reach the renderer exactly as authored.
+    /// The source's audio bitstream reaches the renderer unchanged: muxed into fMP4 on the loopback route
+    /// (Atmos, DTS-HD and every other bitstream exactly as authored), or, on the software host under
+    /// `LoadOptions.objectAudioRendering`, an E-AC-3 JOC track handed to the sample-buffer renderer compressed.
     case streamCopy
-    /// The audio is decoded and re-encoded for the fMP4 pipeline, because its codec is not fMP4-legal
-    /// or AVPlayer rejects it there. The channel bridge (FLAC or E-AC-3) is lossless for the bed
-    /// channels, and object metadata in a TrueHD-MAT or JOC bitstream does not survive its PCM
-    /// intermediate; under `LoadOptions.objectAudioRendering`, in a build with the `TrueHDObjectAudio` /
-    /// `DTSXObjectAudio` traits (off by default), TrueHD Atmos and DTS:X are rendered with
-    /// their objects and heights into a speaker bed and encoded as APAC instead.
+    /// The audio is decoded and re-encoded, because its codec is not fMP4-legal or AVPlayer rejects it
+    /// there. The channel bridge (FLAC or E-AC-3) is lossless for the bed channels, and object metadata in
+    /// a TrueHD-MAT or JOC bitstream does not survive its PCM intermediate; under
+    /// `LoadOptions.objectAudioRendering`, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio`
+    /// traits (off by default), TrueHD Atmos and DTS:X are rendered with their objects and heights into a
+    /// speaker bed and encoded as APAC instead, on the loopback route and on the software host alike.
     case bridged
-    /// The engine decodes or converts audio and renders its own CoreMedia sample buffers (the
-    /// software path and the software audio-only host). This includes experimental APAC output.
+    /// libavcodec decodes audio to PCM and the engine renders it itself (the software path using
+    /// decoded PCM, and the software audio-only host).
     case decoded
     /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, the
     /// bridge could not be built or could not write its header, no stream could be picked because the
@@ -413,6 +414,8 @@ public enum DolbyVisionHandling: String, Sendable, Equatable, CaseIterable {
 }
 
 public struct LoadOptions: Sendable, Equatable {
+    /// Diagnostic identity only; retained with the source across internal reloads.
+    public var sourceDiagnosticsContext: SourceNetworkDiagnostics.Context? = nil
     /// Diagnostic lever: omit BT.2020 / transfer / YCbCr matrix from AVDisplayCriteria so AVPlayer re-reads color from the bitstream. Default off.
     public var omitCriteriaColorExtensions: Bool
     /// The engine writes no display criteria because AVKit does: `true` is `DisplayCriteriaOwner.avKit`, and the
@@ -425,6 +428,9 @@ public struct LoadOptions: Sendable, Equatable {
     public var displayCriteriaOwner: DisplayCriteriaOwner = .engine
     /// Extra HTTP headers for HEAD probe, Range chunks, side-demuxer fetches. On the loopback paths they are NOT forwarded to AVPlayer (it hits the local server); on `nativeRemoteHLS` they ride into the AVURLAsset so header-enforcing origins (IPTV Referer / User-Agent / Authorization) work (#119). Forwarded to `selectSidecarSubtitle` by default; pass explicit headers to override (#32). Default empty.
     public var httpHeaders: [String: String]
+    /// Treat an opaque HTTP(S) URL as a disc image when its display filename identifies an ISO/IMG/UDF.
+    /// This preserves host metadata that cannot be inferred from a signed or extensionless URL. Default false.
+    public var discImageHint: Bool
 
     /// Opt-in decoded-frame diagnostics for SDR native loopback playback. Default off.
     /// Samples an additional AVPlayerItemVideoOutput; reports output gaps, not physical display
@@ -527,7 +533,7 @@ public struct LoadOptions: Sendable, Equatable {
     public var panelIsInHDRMode: Bool
 
     /// Serve the HDR master to an HDR-eligible display whose panel state is unproven, and let AVFoundation's
-    /// acceptance or refusal be the readout. Default `true`, VOD only.
+    /// acceptance or refusal be the readout. Default `true`, VOD and live.
     ///
     /// AE#459: `UIScreen.currentEDRHeadroom` is the only tvOS property that ever reported the panel's mode,
     /// and it is measurably unreliable. On one Apple TV 4K 3rd gen on tvOS 26.6 it read a flat 1.00
@@ -543,8 +549,9 @@ public struct LoadOptions: Sendable, Equatable {
     /// through the headroom never attempts anything.
     ///
     /// Turn it off for a host that knows its display is SDR and would rather not spend that once. Live
-    /// never attempts regardless of this flag: a live fallback is a rejoin at the edge rather than a
-    /// restored position, and that cost is unmeasured.
+    /// attempts too: the refusal arrives before the first frame, so the live fallback's rejoin at the edge
+    /// (#130) lands where the session was joining anyway. Excluding it left a live session on a panel
+    /// parked in HDR with no proof at all, labelled SDR for its whole length.
     public var attemptsHDRMasterOnUnprovenPanel: Bool
 
     /// Host assertion that this display presents Dolby Vision. Default `false`. Not a capability the engine
@@ -1029,6 +1036,7 @@ public struct LoadOptions: Sendable, Equatable {
         suppressDisplayCriteria: Bool = false,
         displayCriteriaOwner: DisplayCriteriaOwner = .engine,
         httpHeaders: [String: String] = [:],
+        discImageHint: Bool = false,
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
@@ -1088,6 +1096,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.suppressDisplayCriteria = suppressDisplayCriteria
         self.displayCriteriaOwner = displayCriteriaOwner
         self.httpHeaders = httpHeaders
+        self.discImageHint = discImageHint
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.dolbyVisionHandling = dolbyVisionHandling

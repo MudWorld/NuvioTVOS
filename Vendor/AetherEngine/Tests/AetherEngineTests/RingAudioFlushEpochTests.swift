@@ -19,6 +19,13 @@ struct RingAudioFlushEpochTests {
         var value: Int { lock.withLock { count } }
     }
 
+    private final class SeekGenBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: UInt64 = 0
+        func advance() { lock.withLock { value += 1 } }
+        var current: UInt64 { lock.withLock { value } }
+    }
+
     private func makeWAV(seconds: Double) -> Data {
         let sampleRate = 48_000, channels = 2
         let pcm = Data(count: Int(Double(sampleRate) * seconds) * channels * 2)
@@ -58,7 +65,13 @@ struct RingAudioFlushEpochTests {
 
         let output = AudioOutput()
         let tapped = Counter()
-        func feed(_ packet: PacketRingBuffer.Packet, epoch: UInt64) -> Bool {
+        let currentSeekGen = SeekGenBox()
+        func feed(
+            _ packet: PacketRingBuffer.Packet,
+            outputEpoch: UInt64,
+            producerEpoch: UInt64,
+            capturedSeekGen: UInt64? = nil
+        ) -> SoftwareRingPacketFeedOutcome {
             SoftwarePlaybackHost.feedRingPacket(
                 packet,
                 videoDecoder: SoftwareVideoDecoder(),
@@ -69,19 +82,38 @@ struct RingAudioFlushEpochTests {
                 videoTimeBaseSeconds: 1.0 / 90_000.0,
                 audioTimeBaseSeconds: 1.0 / 48_000.0,
                 audioTapSink: { _ in tapped.increment() },
-                audioEpoch: epoch,
+                audioEpoch: outputEpoch,
+                audioFeedEpoch: producerEpoch,
+                capturedSeekGeneration: capturedSeekGen ?? currentSeekGen.current,
+                currentSeekGeneration: { currentSeekGen.current },
                 noteDecodeGeneration: {})
         }
 
-        let stale = output.epoch
+        let staleOutputEpoch = output.epoch
+        let staleProducerEpoch = decoder.feedEpoch
         output.flush()
+        decoder.flush()
         let half = packets.count / 2
-        let staleProduced = packets[..<half].map { feed($0, epoch: stale) }
-        #expect(!staleProduced.contains(true), "the rewind's flush retired these")
+        let staleProduced = packets[..<half].map {
+            feed($0, outputEpoch: staleOutputEpoch, producerEpoch: staleProducerEpoch)
+        }
+        #expect(staleProduced.allSatisfy { $0 == .stale }, "the seek retired both captured epochs")
         #expect(tapped.value == 0, "a refused buffer is not mirrored to the tap either")
 
-        let freshProduced = packets[half...].map { feed($0, epoch: output.epoch) }
-        #expect(freshProduced.contains(true), "an epoch read after the flush is honoured")
+        let staleProducerOnly = decoder.feedEpoch
+        decoder.flush()
+        #expect(feed(packets[0], outputEpoch: output.epoch, producerEpoch: staleProducerOnly) == .stale,
+                "a new output epoch cannot make a stale producer epoch current")
+
+        let beforeSeekGen = currentSeekGen.current
+        currentSeekGen.advance()
+        #expect(feed(packets[0], outputEpoch: output.epoch, producerEpoch: decoder.feedEpoch, capturedSeekGen: beforeSeekGen) == .stale,
+                "a stale seek generation retires the packet feed")
+
+        let freshProduced = packets[half...].map {
+            feed($0, outputEpoch: output.epoch, producerEpoch: decoder.feedEpoch)
+        }
+        #expect(freshProduced.contains(.completed(producedAudio: true)), "epochs read after the flush are honored")
         #expect(tapped.value > 0)
     }
 }

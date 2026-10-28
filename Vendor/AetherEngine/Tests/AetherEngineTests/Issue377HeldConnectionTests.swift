@@ -555,9 +555,10 @@ struct Issue377HeldReaderTests {
 /// session.
 @Suite("#377 the held transport survives the session's own reopens")
 struct Issue377SessionProfileTests {
-    private func engine(held: Bool) -> HLSVideoEngine {
+    private func engine(held: Bool, discImageHint: Bool = false) -> HLSVideoEngine {
         HLSVideoEngine(url: URL(string: "file:///dev/null")!, dvModeAvailable: false,
-                       sequentialOrigin: false, heldSourceConnection: held)
+                       sequentialOrigin: false, discImageHint: discImageHint,
+                       heldSourceConnection: held)
     }
 
     @Test("a session asked to hold a connection opens every reopen of its own that way")
@@ -574,5 +575,12 @@ struct Issue377SessionProfileTests {
         let session = engine(held: false)
         #expect(!session.openProfile.avioHeldConnection)
         #expect(!session.restartReopenProfile.avioHeldConnection)
+    }
+
+    @Test("a disc-image hint survives playback and restart profiles")
+    func reopensCarryDiscImageHint() {
+        let session = engine(held: false, discImageHint: true)
+        #expect(session.openProfile.discImageHint)
+        #expect(session.restartReopenProfile.discImageHint)
     }
 }

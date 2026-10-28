@@ -7,11 +7,13 @@ import Foundation
 /// selected title's m2ts/VOB extents). Without this a remote `.iso` is handed straight to
 /// libavformat, which fails to probe it (a disc image is a filesystem, not a media container) (#64).
 ///
-/// Reads are served from a single sliding read-ahead buffer. The read-ahead window is ADAPTIVE: it
-/// starts at `baseChunkSize` (so the scattered, kilobyte-sized disc-structure reads at open do not
-/// each pull a megabyte) and doubles up to `maxChunkSize` while reads stay sequential (so steady
-/// playback of the title's extents costs few requests); any non-contiguous read resets it. Each
-/// range request retries with backoff so a transient network blip does not end playback. The server
+/// Reads are served from an adaptive read-ahead buffer plus a small per-reader LRU of prior base-size
+/// windows. The read-ahead window starts at `baseChunkSize` (so scattered, kilobyte-sized
+/// disc-structure reads at open do not each pull a megabyte) and doubles up to `maxChunkSize` while
+/// reads stay sequential (so steady playback of the title's extents costs few requests); any
+/// non-contiguous read resets it. The bounded LRU avoids refetching small windows when UDF metadata
+/// alternates between nearby regions. Each range request retries with backoff so a transient
+/// network blip does not end playback. The server
 /// MUST honor range requests (any static file host does); if it does not, `init` returns nil after a
 /// clear log and `open` throws `AVIOReaderError.originIgnoresRange`, and the response is hung up on at
 /// its head, so a 40 GB image answered with a 200 is never downloaded to be rejected (audit NET-102).
@@ -36,6 +38,17 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
     private var position: Int64 = 0
     private var bufferStart: Int64 = -1
     private var buffer: [UInt8] = []
+    private struct CachedWindow {
+        let start: Int64
+        let data: [UInt8]
+
+        var end: Int64 { start + Int64(data.count) }
+        func covers(_ position: Int64) -> Bool { position >= start && position < end }
+    }
+    /// Most recently used first. These are prior active windows only; large adaptive windows are
+    /// never retained, and the three-entry limit bounds extra storage to at most 768 KiB.
+    private var cachedWindows: [CachedWindow] = []
+    private let maxCachedWindows = 3
     /// End offset of the last buffer refill; a read starting here continues sequentially.
     private var lastFetchEnd: Int64 = -1
     /// Current adaptive read-ahead window; grows on sequential refills, resets on a seek.
@@ -206,6 +219,20 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
         return min(current * 2, maxChunk)
     }
 
+    private var smallWindowLimit: Int { min(baseChunkSize, 256 * 1024) }
+
+    /// Park the active window after a replacement is ready. Excluding the replacement's start
+    /// avoids retaining a stale, overlapping version of the same range.
+    private func parkActiveBuffer(excludingStart: Int64) {
+        guard bufferStart >= 0, !buffer.isEmpty,
+              buffer.count <= smallWindowLimit, bufferStart != excludingStart else { return }
+        cachedWindows.removeAll { $0.start == bufferStart }
+        cachedWindows.insert(CachedWindow(start: bufferStart, data: buffer), at: 0)
+        if cachedWindows.count > maxCachedWindows {
+            cachedWindows.removeLast(cachedWindows.count - maxCachedWindows)
+        }
+    }
+
     // MARK: - IOReader
 
     func read(_ outBuffer: UnsafeMutablePointer<UInt8>?, size n: Int32) -> Int32 {
@@ -227,18 +254,33 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
         }
 
         if position < bufferStart || position >= bufferStart + Int64(buffer.count) {
-            currentChunkSize = Self.nextChunkSize(
-                position: position, lastFetchEnd: lastFetchEnd,
-                current: currentChunkSize, base: baseChunkSize, maxChunk: maxChunkSize)
-            // Stop at the next warmed span: its bytes are already here.
-            let limit = residentSpans.lazy.map(\.start).filter { $0 > self.position }.min() ?? totalSize
-            let want = Int(min(Int64(currentChunkSize), limit - position))
-            guard want > 0, let data = fetchWithRetry(offset: position, length: want), !data.isEmpty else {
-                return -1
+            if let cacheIndex = cachedWindows.firstIndex(where: { $0.covers(position) }) {
+                let hit = cachedWindows.remove(at: cacheIndex)
+                let continuesAtFrontier = position == lastFetchEnd
+                parkActiveBuffer(excludingStart: hit.start)
+                bufferStart = hit.start
+                buffer = hit.data
+                if !continuesAtFrontier { currentChunkSize = baseChunkSize }
+                // The cache window is now the active window. Its frontier remains eligible for
+                // ordinary sequential growth after the cached bytes have been consumed.
+                lastFetchEnd = hit.end
+            } else {
+                currentChunkSize = Self.nextChunkSize(
+                    position: position, lastFetchEnd: lastFetchEnd,
+                    current: currentChunkSize, base: baseChunkSize, maxChunk: maxChunkSize)
+                // Stop at the next warmed span: its bytes are already here.
+                let limit = residentSpans.lazy.map(\.start).filter { $0 > self.position }.min() ?? totalSize
+                let want = Int(min(Int64(currentChunkSize), limit - position))
+                guard want > 0, let data = fetchWithRetry(offset: position, length: want), !data.isEmpty else {
+                    return -1
+                }
+                // A failed/misranged/cancelled request leaves the active bytes untouched. Retain them
+                // only once fetchWithRetry's existing response validation has succeeded.
+                parkActiveBuffer(excludingStart: position)
+                bufferStart = position
+                buffer = [UInt8](data)
+                lastFetchEnd = position + Int64(buffer.count)
             }
-            bufferStart = position
-            buffer = [UInt8](data)
-            lastFetchEnd = position + Int64(buffer.count)
         }
 
         let bufOffset = Int(position - bufferStart)

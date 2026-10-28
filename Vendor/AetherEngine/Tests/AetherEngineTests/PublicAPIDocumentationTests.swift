@@ -52,6 +52,7 @@ final class PublicAPIDocumentationTests: XCTestCase {
         "Diagnostics/EngineDiagnostics.swift",
         "Diagnostics/LiveTelemetry.swift",
         "Diagnostics/EngineLog.swift",
+        "Diagnostics/SourceNetworkDiagnostics.swift",
         "Network/EngineTLS.swift",
         "FrameExtractor/FrameExtractor.swift",
         "Recording/RecordingState.swift",
@@ -80,6 +81,8 @@ final class PublicAPIDocumentationTests: XCTestCase {
         "errorDescription": "LocalizedError conformance, not a surface of its own",
         "displayDebugLines": "diagnostics / debug overlay line export",
         "isTransportPlaying": "transport state query helper",
+        "setAudioProcessing": "Nuvio local audio processing (dialogue enhancement, loudness reduction)",
+        "supportsAudioProcessing": "Nuvio local audio processing capability query",
     ]
 
     private static let declarationPattern = try! NSRegularExpression(

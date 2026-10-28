@@ -16,7 +16,7 @@ extension PrewarmStoreSuites {
 
         /// 0.5 s of 64x64 MPEG-2 video in an MPEG-PS pack stream (ffmpeg `-f vob`), 4096 bytes: the
         /// smallest title the DVD adapter can hand to `mpegps` and have it open.
-        private static let vob = Data(base64Encoded: """
+        static let vob = Data(base64Encoded: """
             AAABukQABAAEAYZmz/gAAAG7AAnDM2cAIf/g4OYAAAHgB92AwQ4xAAO3dREAA1+REGDm/wAAAbMEAEAS///gEAAAAbUUigAB
             AAIAAAG4AAgAQAAAAQAAD//4AAABtY//80GAAAABARv4ffSQDMAzAoAPgKJAqBVIxGVtiSWkxCMangd7bXiwAvAC8AeABAAP
             CaAPwB6TQMEwMCEIQ3JoFSb9xhCIRX+JYaW3bPttulPQhH+vvoBmAZgVAH4FUgVAqkanq2xIKQYhGMRgO9/4SANQQQEyYWMK
@@ -76,7 +76,7 @@ extension PrewarmStoreSuites {
             /////////////////////////////////////////////////////////////////////////////////////w==
             """, options: .ignoreUnknownCharacters)!
 
-        private static func isoImage(vob: Data) -> Data {
+        static func isoImage(vob: Data) -> Data {
             let sector = ISO9660Fixture.sectorSize
             var image = ISO9660Fixture.make(files: [
                 .init(name: "VTS_01_1.VOB", length: vob.count, content: [UInt8](vob.prefix(sector))),
@@ -87,6 +87,10 @@ extension PrewarmStoreSuites {
 
         private func url(_ origin: KeepAliveRangeOrigin, _ name: String = "disc.iso") -> URL {
             URL(string: "http://127.0.0.1:\(origin.port)/\(name)")!
+        }
+
+        private func opaqueURL(_ origin: KeepAliveRangeOrigin) -> URL {
+            URL(string: "http://127.0.0.1:\(origin.port)/stream?token=opaque")!
         }
 
         private func drained(_ origin: KeepAliveRangeOrigin) async throws {
@@ -106,6 +110,19 @@ extension PrewarmStoreSuites {
             #expect(origin.acceptedConnectionCount > 0, "the open never reached the origin")
             demuxer.close()
 
+            try await drained(origin)
+        }
+
+        @Test("a hinted disc image opens when its HTTP URL is opaque")
+        func hintedOpaqueURLOpensAsDisc() async throws {
+            let origin = try #require(KeepAliveRangeOrigin(data: Self.isoImage(vob: Self.vob)))
+            defer { origin.stop() }
+
+            let demuxer = Demuxer()
+            try demuxer.open(url: opaqueURL(origin), profile: .playback.withDiscImageHint(true))
+            #expect(demuxer.isDiscSource, "the filename hint did not select the disc reader")
+            #expect(demuxer.videoStreamIndex >= 0, "the ISO title did not open as media")
+            demuxer.close()
             try await drained(origin)
         }
 

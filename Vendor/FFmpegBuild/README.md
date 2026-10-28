@@ -42,7 +42,7 @@ Full FFmpeg builds for iOS land at 40-70 MB because they bundle a TLS stack, enc
 Anything the app layer should already handle or doesn't need:
 
 - Network / TLS: FFmpeg reads from an `avio_alloc_context` callback, you wire `URLSession` to it
-- Encoders, except FLAC and EAC3 (kept for the audio bridge that re-encodes non-streamable sources like TrueHD / DTS / DTS-HD MA. FLAC for the lossless 7.1 path, EAC3 5.1 for the default soundbar-compat path that surfaces surround via HDMI bitstream tunnel)
+- Encoders, except FLAC and EAC3 (kept for the audio bridge that re-encodes non-streamable sources like TrueHD / DTS / DTS-HD MA. FLAC for the lossless 7.1 path, EAC3 5.1 for the default soundbar-compat path that surfaces surround via HDMI bitstream tunnel; AAC-LC, ALAC and the AC-3 encoder E-AC-3 pulls in, for the silence AetherEngine appends to a stream-copied track whose audio ends before its video, AetherEngine#847)
 - Muxers, except MP4 / MOV / HLS (kept for the HLS-fMP4 producer that wraps streams for AVPlayer)
 - libavdevice (libavfilter is included but trimmed to a handful of filters, see In)
 - Most filters: libavfilter ships only buffer / buffersink / format / scale / zscale / tonemap / colorspace / bwdif / yadif / yadif_videotoolbox / hwupload
@@ -68,7 +68,7 @@ Output lands in `Sources/` as xcframeworks, ready to consume via Swift Package M
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "3.9.0")
+    .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "3.10.1")
 ]
 
 // Target:
@@ -143,6 +143,18 @@ Symbols and binaries are a pair per build. A dSYM from one release symbolicates 
 - **`patch_ffmpeg_movenc_fragment_end`**: `movenc.c` no longer aborts the process when a fragment is flushed with a packet still waiting in the interleaver that lies behind the samples already written for its track. `mov_flush_fragment` takes that packet's dts as the track end, but `check_pkt` may have moved the written samples past it (the first sample of a fragment is placed at the previous fragment's declared end, and later ones still below it are clamped), so the end fell before the last sample and `get_cluster_duration` hit `av_assert0(next_dts >= 0)`. Such a packet says nothing about where the track ends and is now skipped. Reached through AetherEngine's HLS segment muxer, which uses `frag_custom` and flushes with `av_write_frame(NULL)` (StreamX crash report, 2026-10-10). Proposed upstream as FFmpeg PR 25021.
 - **`patch_ffmpeg_dca_x_heights`** (`patches/dca-xll-x-heights.patch`): the `dca` decoder decodes the height channels of DTS:X's standard presentation. They travel in a regular XLL channel set at the end of every lossless frame, behind the syncword upstream already recognises (it sets the "DTS-HD MA + DTS:X" profile) and then skips; the encoder also folds each of them at -3 dB into the 7.1 bed speaker under it. With the new decoder option `x_heights` (off by default) the decoder reads that channel set with FFmpeg's own XLL code, outputs 7.1.4 and removes the fold from the bed at output resolution. Without the option, and for every stream without the extension, the output is byte-identical to upstream (checked against FATE's DTS suite with and without downmix). A frame whose extension does not decode keeps 7.1.4 with silent heights. The alternate presentations, which carry objects, are left at their 7.1. This replaces LibDTSX in AetherEngine (#798), whose port of this decoder combined with Apache-2.0 code came out LGPL-3.0-or-later.
 - **`patch_ffmpeg_matroska_tts`**: `matroskadec.c` logs a warning when a Matroska track carries a `TrackTimestampScale` other than 1.0. Timestamp behavior stays exactly as upstream implements it, which is what RFC 9559 specifies (block timestamps and BlockDuration are Track Ticks). The element is deprecated (maxver 3) and many readers ignore it, so a file carrying it may have been authored against such readers and mistime silently; the warning surfaces that condition (AetherEngine issue 145). Until 2.1.x this patch clamped TTS to 1.0; the clamp rested on a wrong reading of the RFC and was dropped after upstream review (FFmpeg PR 23852).
+
+## Build record
+
+The binaries are built on a local Mac, not in CI, so there is no attestation. Instead every build writes `BUILD-INFO.txt`, committed with the binaries it describes:
+
+- the upstream tag and resolved commit of FFmpeg, dav1d, zimg and libzvbi, and a SHA-256 over the changes the patch functions made to each tree (tracked edits plus added files such as the libzvbi stub),
+- the SHA-256 of `build.sh` and of every file in `patches/`,
+- macOS, Xcode, clang and SDK versions, and the versions of meson, ninja, autotools and pkg-config,
+- FFmpeg's configure line for every slice, as recorded in its `config.h`,
+- the SHA-256 of every shipped binary.
+
+The inputs are captured right after patching, before anything compiles, so `./build.sh package` does not credit the current toolchain with older objects. Releases up to 3.9.0 have no build record; for those, the toolchain can still be read from the binaries (`LC_BUILD_VERSION`) and their dSYMs (`DW_AT_producer`). A rebuild from the same inputs is not expected to be byte-identical.
 
 ## Keeping the pins current
 

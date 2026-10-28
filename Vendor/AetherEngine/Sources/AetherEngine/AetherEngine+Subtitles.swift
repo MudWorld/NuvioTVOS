@@ -779,6 +779,7 @@ extension AetherEngine {
         let probesize = loadedOptions.probesize
         let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
         let titleID = activeDiscTitleID
+        let discImageHint = loadedOptions.discImageHint
         subtitleForwardPrefetchActiveLead = lead
         let link = SideReaderLinkArbiter(gate: sideReaderLinkGate)
         subtitleForwardPrefetchTask = BlockingWork.detached(priority: .utility) { [weak self] in
@@ -828,7 +829,8 @@ extension AetherEngine {
                     url: url, reader: attemptReader, formatHint: formatHint, headers: headers,
                     headerStore: headerStore, startAt: resumeAt, callerProbesize: probesize,
                     callerMaxAnalyzeDuration: maxAnalyzeDuration,
-                    selectTitleID: titleID, store: store, leadSeconds: lead, link: link)
+                    selectTitleID: titleID, discImageHint: discImageHint,
+                    store: store, leadSeconds: lead, link: link)
                 guard outcome.exit.isRestartable, !Task.isCancelled else { return }
 
                 guard let backoff = budget.chargeFailure(harvested: outcome.harvested) else {
@@ -883,13 +885,14 @@ extension AetherEngine {
         url: URL, reader: IOReader?, formatHint: String?, headers: [String: String],
         headerStore: RequestHeaderStore?,
         startAt: Double, callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?,
-        selectTitleID: Int?, store: SubtitlePacketStore, leadSeconds: Double,
+        selectTitleID: Int?, discImageHint: Bool, store: SubtitlePacketStore, leadSeconds: Double,
         link: SideReaderLinkArbiter?
     ) async -> SubtitleForwardPrefetcher.Outcome {
         let demuxer = Demuxer()
         let openProfile = DemuxerOpenProfile.subtitleSideDemuxer(
             callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration).withReaderLabel("prefetch")
             .withRequestHeaders(headerStore)
+            .withDiscImageHint(discImageHint)
         let registered = await MainActor.run { [weak self] () -> Bool in
             guard !Task.isCancelled, let self else { return false }
             self.subtitleForwardPrefetchDemuxer = demuxer
@@ -1861,13 +1864,14 @@ extension AetherEngine {
         let probesize = loadedOptions.probesize
         let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
         let titleID = activeDiscTitleID
+        let discImageHint = loadedOptions.discImageHint
         let link = SideReaderLinkArbiter(gate: sideReaderLinkGate)
         nativeSubtitleReadersTask = BlockingWork.detached(priority: .utility) { [weak self] in
             await self?.runNativeSubtitleReaders(
                 url: url, reader: reader, formatHint: formatHint, headers: headers,
                 headerStore: headerStore, pairs: pairs, startAt: startAt, videoWidth: w, videoHeight: h,
                 callerProbesize: probesize, callerMaxAnalyzeDuration: maxAnalyzeDuration,
-                selectTitleID: titleID, readToEOF: readToEOF, link: link
+                selectTitleID: titleID, discImageHint: discImageHint, readToEOF: readToEOF, link: link
             )
         }
     }
@@ -1927,13 +1931,14 @@ extension AetherEngine {
         pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)],
         startAt: Double, videoWidth: Int32, videoHeight: Int32,
         callerProbesize: Int64? = nil, callerMaxAnalyzeDuration: Int64? = nil,
-        selectTitleID: Int? = nil, readToEOF: Bool = false,
+        selectTitleID: Int? = nil, discImageHint: Bool = false, readToEOF: Bool = false,
         link: SideReaderLinkArbiter? = nil
     ) async {
         let demuxer = Demuxer()
         let openProfile = DemuxerOpenProfile.subtitleSideDemuxer(
             callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration).withReaderLabel("nativesubs")
             .withRequestHeaders(headerStore)
+            .withDiscImageHint(discImageHint)
         let registered = await MainActor.run { [weak self] () -> Bool in
             guard !Task.isCancelled, let self else { return false }
             self.nativeSubtitleReadersDemuxer = demuxer

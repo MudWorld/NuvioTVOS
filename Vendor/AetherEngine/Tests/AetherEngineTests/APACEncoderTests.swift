@@ -41,11 +41,11 @@ struct APACEncoderTests {
     }
 
     @Test("the CoreMedia APAC format description carries the encoder's complete dapa cookie")
-    func sampleBufferFormatDescriptionCarriesCookie() throws {
+    func formatDescriptionCarriesCookie() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         let layout = SpatialSpeakerLayout.l714
         let encoder = try APACEncoder(layout: layout, bitRate: layout.channelCount * 320_000)
-        let formatDescription = try #require(encoder.sampleBufferFormatDescription)
+        let formatDescription = encoder.formatDescription
         #expect(CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee.mFormatID == kAudioFormatAPAC)
 
         var cookieSize = 0

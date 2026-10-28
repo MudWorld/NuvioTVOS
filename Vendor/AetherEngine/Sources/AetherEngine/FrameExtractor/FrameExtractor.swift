@@ -13,15 +13,15 @@ public struct BoundedStillFrame: @unchecked Sendable {
 }
 
 /// Produces still images from a media URL via an isolated FFmpeg decode context,
-/// separate from playback. Two modes share one decode core: `snapshot` (frame-accurate,
-/// full-res) and `thumbnail` (keyframe-snapped, low-res, fast). Lazy: context opens on
+/// separate from playback. Three modes share one decode core: `snapshot` (frame-accurate,
+/// full-res), `preview` (frame-accurate, downscaled) and `thumbnail` (keyframe-snapped, fast). Lazy: context opens on
 /// first use; blocking FFmpeg work runs on a dedicated serial queue, not the cooperative pool.
 /// Create one per URL; for the playing item prefer `AetherEngine.makeFrameExtractor()`.
 public actor FrameExtractor {
     private let context: FrameDecodeContext
     private let cache: FrameCache
     private let decodeQueue: DispatchQueue
-    /// #93 startup: session-coupled extractors yield elective thumbnail decodes while the
+    /// #93 startup: session-coupled extractors yield elective thumbnail/preview decodes while the
     /// playback pipeline is starved (see `shouldYield`). nil = never yield (standalone use).
     private let yieldWhile: (@Sendable () -> Bool)?
 
@@ -52,7 +52,9 @@ public actor FrameExtractor {
     // Internal diagnostics let the @testable concurrency regression prove that
     // overlapping callers joined one close while its queue operation was held.
     private(set) var coalescedContextCloseCountForTesting = 0
+    private(set) var boundedLocalStillCallCountForTesting = 0
     var isClosingContextForTesting: Bool { isClosingAuxiliaryContext }
+    var isContextOpenForTesting: Bool { context.isOpen }
 
     private let idleInterval: Duration = .seconds(10)
     private var idleTask: Task<Void, Never>?
@@ -64,7 +66,7 @@ public actor FrameExtractor {
     }
 
     /// Only used with a one-segment DataIOReader. No URL or provider fallback.
-    /// Refined results bypass the old 0.1 s snapshot bucket entirely.
+    /// Refined results bypass the rendered-frame cache so they carry the actual decoded PTS.
     func residentPreview(rawTarget: Double, refined: Bool, maxWidth: Int,
                                 isCancelled: @escaping @Sendable () -> Bool) async -> ScrubFrame? {
         guard !isShutDown, !isClosingAuxiliaryContext, rawTarget.isFinite,
@@ -131,9 +133,10 @@ public actor FrameExtractor {
     /// AE#792: an extractor over the session's own source, whose requests follow
     /// `updateRequestHeaders(_:)` like the session's other readers.
     init(url: URL, requestHeaderStore: RequestHeaderStore, selectTitleID: Int?,
-         yieldWhile: (@Sendable () -> Bool)?) {
+         discImageHint: Bool = false, yieldWhile: (@Sendable () -> Bool)?) {
         self.init(context: FrameDecodeContext(url: url, httpHeaders: requestHeaderStore.current,
                                               selectTitleID: selectTitleID,
+                                              discImageHint: discImageHint,
                                               requestHeaderStore: requestHeaderStore),
                   yieldWhile: yieldWhile)
     }
@@ -159,7 +162,7 @@ public actor FrameExtractor {
                   yieldWhile: nil, beforeContextCloseForTesting: beforeContextClose)
     }
 
-    /// Yield decision for elective (thumbnail) extraction. The disposable decode's demuxer pulls
+    /// Yield decision for elective thumbnail and preview extraction. The disposable decode pulls
     /// megabytes over the same link the segment producer needs; during startup and recovery that
     /// contention tipped the first segment past CoreMedia's ~4 s media timeout and killed the
     /// AVPlayer loader (-15628, #93 startup). Yield while a producer restart is in flight or the
@@ -180,6 +183,12 @@ public actor FrameExtractor {
     public func thumbnail(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {
         await produce(at: seconds, mode: .thumbnail, targetWidth: maxWidth, maxSize: nil,
                       isElective: true)
+    }
+
+    /// Produce a frame-accurate, downscaled still for interactive scrubbing.
+    /// Like thumbnails, uncached previews yield while the playback pipeline is starved.
+    public func preview(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {
+        await produce(at: seconds, mode: .preview, targetWidth: maxWidth, maxSize: nil)
     }
 
     public func snapshot(at seconds: Double, maxSize: CGSize? = nil) async -> CGImage? {
@@ -206,6 +215,49 @@ public actor FrameExtractor {
         guard generation == admissionGeneration, !Task.isCancelled else { return nil }
         scheduleIdleClose()
         return image
+    }
+
+    /// A still for a scrub preview over a local file, with the contract of `scrubPreviewFrame`: the
+    /// caller's `isCancelled` is polled through the decode, the decode stops at the same 750 ms /
+    /// 900 packet bound a resident one does, and the time of the frame actually decoded comes back
+    /// (nil when the source stamps none) so the caller can label the picture rather than the request.
+    /// Uncached, because a cache hit would not carry that time. `refined` decodes to the target;
+    /// otherwise the first frame after the seek is returned, at `maxWidth`.
+    func boundedLocalStill(at seconds: Double, refined: Bool, maxWidth: Int,
+                           isCancelled: @escaping @Sendable () -> Bool) async -> (image: CGImage, decodedSeconds: Double?)? {
+        boundedLocalStillCallCountForTesting += 1
+        guard !isShutDown, !isClosingAuxiliaryContext, seconds.isFinite, seconds >= 0,
+              maxWidth > 0, !Task.isCancelled, !isCancelled() else { return nil }
+        currentToken?.cancel()
+        boundedCancellation?.cancel()
+        let token = CancelToken()
+        currentToken = token
+        let generation = admissionGeneration
+        let context = self.context
+        let mode: FrameMode = refined ? .snapshot : .thumbnail
+        let size = CGSize(width: maxWidth, height: maxWidth)
+        let result = await withTaskCancellationHandler {
+            await runOnQueue { () -> (image: CGImage, decodedSeconds: Double?)? in
+                if token.isCancelled || isCancelled() { return nil }
+                do { try context.ensureOpen() } catch {
+                    EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
+                    return nil
+                }
+                var decoded: Double?
+                guard let image = context.decodeFrame(
+                    at: seconds, mode: mode, targetWidth: maxWidth, maxSize: refined ? size : nil,
+                    isCancelled: { token.isCancelled || isCancelled() },
+                    reportDecodedTime: { decoded = $0 }, bounded: true),
+                    !token.isCancelled, !isCancelled() else { return nil }
+                return (image, decoded)
+            }
+        } onCancel: {
+            token.cancel()
+        }
+        guard generation == admissionGeneration, !isShutDown, !isClosingAuxiliaryContext,
+              !Task.isCancelled, !isCancelled(), !token.isCancelled else { return nil }
+        scheduleIdleClose()
+        return result
     }
 
     /// Disposable source-backed preview with one budget spanning open, stream
@@ -313,7 +365,7 @@ public actor FrameExtractor {
 
     /// Permanently tear down the decode context and clear the cache. Awaits teardown on
     /// the decode queue, so on return the FFmpeg demuxer/codec/sws are fully released.
-    /// After shutdown() the extractor is dead: thumbnail/snapshot/prewarm return nil/no-op
+    /// After shutdown() the extractor is dead: thumbnail/preview/snapshot/prewarm return nil/no-op
     /// and do NOT reopen; create a new FrameExtractor to extract again.
     public func shutdown() async {
         idleTask?.cancel()
@@ -379,14 +431,13 @@ public actor FrameExtractor {
     ) async -> CGImage? {
         // Audit BIT-105: a 0/0 scrub fraction or `CMTime.indefinite.seconds` is a host bug, not a position.
         guard !isShutDown, !isClosingAuxiliaryContext, !Task.isCancelled, seconds.isFinite, seconds >= 0 else { return nil }
-        if let hit = cache.get(mode: mode, seconds: seconds) {
+        if let hit = cache.get(mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize) {
             scheduleIdleClose()
             return hit
         }
-        // Elective thumbnail requests yield to a starved playback pipeline. Deliberate snapshots
-        // stay ungated; preciseThumbnail opts into this gate because it serves scrub previews.
-        if isElective, yieldWhile?() == true {
-            EngineLog.emit("[FrameExtractor] elective thumbnail yielded: playback pipeline starved",
+        // Elective thumbnails and precise scrub previews yield while playback is starved; cached hits are free.
+        if (isElective || mode.isElective), yieldWhile?() == true {
+            EngineLog.emit("[FrameExtractor] \(mode) yielded: playback pipeline starved",
                            category: .swPlayback, level: .verbose)
             return nil
         }
@@ -433,7 +484,7 @@ public actor FrameExtractor {
         }
         guard generation == admissionGeneration, !token.isCancelled, !Task.isCancelled else { return nil }
         if let image = result.image {
-            cache.set(image, mode: mode, seconds: seconds)
+            cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize)
         }
         scheduleIdleClose()
         return result.image

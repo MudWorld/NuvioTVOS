@@ -38,9 +38,15 @@ enum SoftwareSpatialAudioFailureRecoveryGate {
     }
 }
 
+enum SoftwareRingPacketFeedOutcome: Equatable {
+    case stale
+    case completed(producedAudio: Bool)
+}
+
 /// Software-decode playback host (FFmpeg/dav1d pipeline): AV1 on Apple TV (no HW AV1 on tvOS), VP9.
 /// AVSampleBufferRenderSynchronizer is the master clock; display layer attached for A/V sync.
-/// Intentionally skips EAC3+JOC and DV HDMI handshake (AV1 sources rarely carry Atmos or DV).
+/// Atmos: E-AC-3 JOC goes to the renderer compressed; TrueHD Atmos and DTS:X render to APAC when
+/// `ObjectAudioRendering` asks for it (see `SoftwareAtmosRoute`). Everything else decodes to PCM.
 @MainActor
 final class SoftwarePlaybackHost {
     /// Codecs whose presentation reordering has an established bound get the read-ahead's
@@ -228,9 +234,6 @@ final class SoftwarePlaybackHost {
     /// Opt-in to full dual-layer Dolby Vision (Profile 7 FEL) decoding and Metal GPU composition over single-layer fallback.
     var preferDualLayerDolbyVision: Bool = false
 
-    /// Spatial output is considered only on the active dual-layer VOD software route.
-    var objectAudioRendering: ObjectAudioRendering = .off
-
     /// Forwarded Dolby Vision profile number (e.g. 7, 8) if detected from bitstream or container
     var configuredDVProfile: Int?
 
@@ -263,6 +266,9 @@ final class SoftwarePlaybackHost {
     /// with the session zero it resolved. Hooked by `AetherEngine` to republish `mediaChapters` from the
     /// clock's real zero.
     nonisolated(unsafe) var onClockSessionZero: (@Sendable (Double) -> Void)?
+
+    /// #800: every hold of the clock by the preroll and its end, forwarded from `AudioOutput`, off-main.
+    nonisolated(unsafe) var onClockHoldTransition: (@Sendable (AudioOutput.PrerollTransition) -> Void)?
 
     /// AE#658: forwarded from the video decoder, off-main.
     nonisolated(unsafe) var onDecodedVideoFormat: (@Sendable (DecodedVideoFormat) -> Void)?
@@ -314,10 +320,17 @@ final class SoftwarePlaybackHost {
     // MARK: - Internals
 
     private let renderer: SampleBufferRenderer
-    /// Swapped per codec at load(): SoftwareVideoDecoder for AV1/VP9, HardwareVideoDecoder for HEVC. Protocol keeps the demux loop codec-agnostic.
+    /// Swapped per codec at load(): SoftwareVideoDecoder for AV1 and unsupported hardware formats, HardwareVideoDecoder for HEVC/VP9. Protocol keeps the demux loop codec-agnostic.
     private var videoDecoder: any VideoDecodingPipeline
-    private var audioDecoder: AudioDecoder?
-    private var audioProcessingSettings = AudioProcessingSettings()
+    private var audioDecoder: (any SoftwareAudioProducing)?
+    var audioProcessingSettings = AudioProcessingSettings()
+    /// How this session's audio reaches the renderer (`SoftwareAtmosRoute`), for the logs and the tests.
+    private(set) var audioRoute: SoftwareAtmosRoute = .pcm
+    /// The route carries Dolby Atmos (`SoftwareAtmosRoute.carriesDolbyAtmos`), for `AtmosOutputActivator`.
+    private(set) var audioRouteCarriesDolbyAtmos = false
+    /// The host's object-audio setting, set before `load`. Anything but `.off` lets Atmos tracks reach
+    /// the renderer as Atmos instead of as the PCM decode of their core.
+    var objectAudioRendering: ObjectAudioRendering = .off
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
@@ -421,12 +434,25 @@ final class SoftwarePlaybackHost {
     /// `audioDelivery`. Set once the audio decoder has been given its chance.
     private(set) var audioDelivery: AudioDelivery = .none
 
-    var isUsingSoftwareSpatialAudio: Bool { audioDecoder?.isUsingSoftwareSpatialAudio == true }
-    var hasSoftwareSpatialAudioRoute: Bool { audioDecoder?.hasSoftwareSpatialAudioRoute == true }
-    var spatialAudioPipelineDescription: String? { audioDecoder?.spatialAudioPipelineName }
+    var isUsingSoftwareSpatialAudio: Bool {
+        if case .apac = audioRoute { return hasSoftwareSpatialAudioRoute }
+        return false
+    }
+    var hasSoftwareSpatialAudioRoute: Bool {
+        audioDecoder != nil && audioRoute != .pcm
+            && (failedAudioOutputEpoch == nil || failedAudioOutputEpoch != audioOutput?.epoch)
+    }
+    var spatialAudioPipelineDescription: String? {
+        guard hasSoftwareSpatialAudioRoute else { return nil }
+        switch audioRoute {
+        case .pcm: return nil
+        case .compressedEAC3JOC: return "E-AC-3 JOC → renderer (compressed)"
+        case .apac(let layout): return "APAC \(layout.rawValue)"
+        }
+    }
     var objectAudioActivity: ObjectAudioActivity? { audioDecoder?.objectAudioActivity }
     var shouldActivateSoftwareAtmosOutput: Bool {
-        isUsingSoftwareSpatialAudio && isPlaying && clockArmed && !seekInFlight
+        audioRouteCarriesDolbyAtmos && hasSoftwareSpatialAudioRoute && isPlaying && clockArmed && !seekInFlight
             && audioOutput?.prerollPending != true && audioOutput?.renderer.status != .failed
             && !demuxDiag.snapshot.rebuffering && !stopRequested && failure == nil
     }
@@ -434,6 +460,7 @@ final class SoftwarePlaybackHost {
     var onSpatialAudioFailure: (@MainActor (SoftwareSpatialAudioFailureToken, String) -> Void)?
     var onAtmosOutputStateChange: (@MainActor () -> Void)?
     private var spatialFailureEpochGate = SoftwareSpatialAudioFailureEpochGate()
+    private var failedAudioOutputEpoch: UInt64?
     private var lastAtmosOutputState: (eligible: Bool, playing: Bool)?
 
     private var videoTimeBaseSeconds: Double = 0
@@ -991,12 +1018,13 @@ final class SoftwarePlaybackHost {
     private let reposition: Reposition
 
     init(videoGravity: AVLayerVideoGravity = .resizeAspect,
+         renderer: SampleBufferRenderer? = nil,
          reposition: @escaping Reposition = { dem, target, budget, queue, superseded in
              await dem.seekBounded(to: target, timeout: budget, on: queue,
                                    isSuperseded: superseded)
          }) {
         self.reposition = reposition
-        self.renderer = SampleBufferRenderer(videoGravity: videoGravity)
+        self.renderer = renderer ?? SampleBufferRenderer(videoGravity: videoGravity)
         // Default to the software decoder; load() swaps it for the
         // VT-backed one when the source's video codec is HEVC.
         self.videoDecoder = SoftwareVideoDecoder()
@@ -1005,7 +1033,7 @@ final class SoftwarePlaybackHost {
 
     func setAudioProcessing(_ settings: AudioProcessingSettings) {
         audioProcessingSettings = settings
-        audioDecoder?.setAudioProcessing(settings)
+        (audioDecoder as? AudioDecoder)?.setAudioProcessing(settings)
     }
 
     /// #353: the renderer settles the picture size on the decode thread, where it builds the format
@@ -1034,53 +1062,48 @@ final class SoftwarePlaybackHost {
     /// AE#641: an unresolved index is not a source without audio. On VOD nothing falls back past
     /// `av_find_best_stream`, which passes over an audio stream whose parameters the probe left empty,
     /// so the source's own streams decide which of the two silences this is.
+    ///
+    /// The route decides the rest, in the loopback route's terms: the PCM decode is `.decoded`, compressed
+    /// E-AC-3 JOC reaches the renderer as authored (`.streamCopy`), and TrueHD Atmos / DTS:X rendered into
+    /// a bed and re-encoded as APAC is `.bridged`, which is how the loopback route reports the same APAC.
     nonisolated static func audioDelivery(resolvedAudioIndex: Int32, decoderOpened: Bool,
-                                          sourceCarriesAudio: Bool) -> AudioDelivery {
+                                          sourceCarriesAudio: Bool,
+                                          route: SoftwareAtmosRoute = .pcm) -> AudioDelivery {
         guard resolvedAudioIndex >= 0 else { return sourceCarriesAudio ? .droppedNoPipeline : .noAudioInSource }
-        return decoderOpened ? .decoded : .droppedNoPipeline
+        guard decoderOpened else { return .droppedNoPipeline }
+        switch route {
+        case .pcm: return .decoded
+        case .compressedEAC3JOC: return .streamCopy
+        case .apac: return .bridged
+        }
     }
 
-    nonisolated static func shouldMirrorAudioTap(mediaSubtype: FourCharCode) -> Bool {
-        mediaSubtype == kAudioFormatLinearPCM
-    }
-
-    nonisolated static func softwareSpatialAudioLayout(
-        decodesDualLayer: Bool,
-        isLive: Bool,
-        rendering: ObjectAudioRendering,
-        codecID: AVCodecID,
-        profile: Int32,
-        sampleRate: Int32,
-        supportsAPAC: Bool
-    ) -> SpatialSpeakerLayout? {
-        guard decodesDualLayer, !isLive, supportsAPAC, codecID == AV_CODEC_ID_TRUEHD else { return nil }
-        return HLSVideoEngine.spatialRenderingLayout(
-            rendering: rendering,
-            codecID: codecID,
-            profile: profile,
-            sampleRate: sampleRate
-        )
+    /// Whether this session plays audio at all, on whichever route.
+    var deliversAudio: Bool {
+        audioDelivery == .decoded || audioDelivery == .bridged || audioDelivery == .streamCopy
     }
 
     private func publishSpatialAudioOutputStateIfChanged() {
-        let state = (eligible: isUsingSoftwareSpatialAudio, playing: shouldActivateSoftwareAtmosOutput)
+        let state = (eligible: audioRouteCarriesDolbyAtmos && hasSoftwareSpatialAudioRoute,
+                     playing: shouldActivateSoftwareAtmosOutput)
         guard lastAtmosOutputState?.eligible != state.eligible || lastAtmosOutputState?.playing != state.playing else { return }
         lastAtmosOutputState = state
         onAtmosOutputStateChange?()
     }
 
     private func reportSpatialAudioFailure(_ message: String, token: SoftwareSpatialAudioFailureToken) {
-        guard !stopRequested, hasSoftwareSpatialAudioRoute,
+        guard !stopRequested, audioRoute != .pcm,
               token.seekGeneration == seekGeneration,
               token.audioEpoch == audioOutput?.epoch else { return }
         guard spatialFailureEpochGate.claim(epoch: token.audioEpoch) else { return }
-        audioDecoder?.stopSpatialAudioAfterFailure(message)
+        audioDecoder?.stopAfterFailure(message)
+        failedAudioOutputEpoch = token.audioEpoch
         publishSpatialAudioOutputStateIfChanged()
         onSpatialAudioFailure?(token, message)
     }
 
     func acceptsSpatialAudioFailure(_ token: SoftwareSpatialAudioFailureToken) -> Bool {
-        !stopRequested && hasSoftwareSpatialAudioRoute
+        !stopRequested && audioRoute != .pcm
             && token.seekGeneration == seekGeneration
             && token.audioEpoch == audioOutput?.epoch
     }
@@ -1205,6 +1228,9 @@ final class SoftwarePlaybackHost {
         canHardwareDecode: Bool,
         dvProfile: Int?
     ) -> any VideoDecodingPipeline {
+        if codecID == AV_CODEC_ID_VP9 && canHardwareDecode {
+            return HardwareVideoDecoder()
+        }
         if codecID == AV_CODEC_ID_HEVC && canHardwareDecode {
             if Self.shouldUseDualLayerDecoder(
                 dvProfile: dvProfile,
@@ -1255,6 +1281,10 @@ final class SoftwarePlaybackHost {
         self.videoStreamIndex = dem.videoStreamIndex
         let vtb = vStream.pointee.time_base
         self.videoTimeBaseSeconds = vtb.den > 0 ? Double(vtb.num) / Double(vtb.den) : 0
+        if let codecpar = vStream.pointee.codecpar {
+            videoYieldsStills = FrameDecodeContext.yieldsStill(
+                dolbyVisionNoBaseLayer: FrameDecodeContext.isDVNoBaseLayer(codecpar: codecpar))
+        }
         // #315: armed once there is a video stream to display. A fresh host means a fresh layer, so
         // there is no carried-in picture to guard against here (the native path's problem).
         armReadyForDisplayObserver()
@@ -1316,15 +1346,17 @@ final class SoftwarePlaybackHost {
             guard !stopRequested else { return }
         }
 
-        // HEVC -> VTDecompressionSession (HW) when VideoToolbox PROVABLY HW-decodes this exact format;
+        // VP9 tries a hardware session with a software fallback at open. HEVC uses VideoToolbox
+        // only when the probe proves that this exact format opens a hardware session;
         // everything else -> libavcodec. Replace wholesale to prevent state bleed. #2: HardwareVideoDecoder
         // requires a HW decoder and has no software fallback, so an HEVC Rext stream on hardware without a
         // HW decoder must go to libavcodec. AE#461: so must every format the probe cannot classify (in-band
         // parameter sets, Annex-B extradata), which the routing gate reads as "keep native" but which
         // HardwareVideoDecoder, building from the hvcC alone, can never open.
         if let codecpar = vStream.pointee.codecpar,
-           codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
-           VTCapabilityProbe.hardwareDecodeVerdict(codecpar: codecpar).opensHardwareDecoder {
+           codecpar.pointee.codec_id == AV_CODEC_ID_VP9
+            || (codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
+                && VTCapabilityProbe.hardwareDecodeVerdict(codecpar: codecpar).opensHardwareDecoder) {
             videoDecoder.close()
             let dvProfile = configuredDVProfile ?? AetherEngine.dvProfile(stream: vStream)
             let chosen = selectVideoDecoder(
@@ -1358,10 +1390,20 @@ final class SoftwarePlaybackHost {
                 )
             } else {
                 EngineLog.emit(
-                    "[SWHost] selected HardwareVideoDecoder (VT HEVC) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
+                    "[SWHost] selected HardwareVideoDecoder (VT) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
                     category: .swPlayback
                 )
             }
+        } else if HardwareVideoDecoder.decodesAV1DolbyVision(stream: vStream) {
+            // AV1 Dolby Vision 10.1: AVFoundation drops the RPU, so the Dolby Vision is only reachable
+            // from a host that decodes the frame and attaches it (AV1DolbyVisionRPU).
+            videoDecoder.close()
+            videoDecoder = HardwareVideoDecoder()
+            EngineLog.emit(
+                "[SWHost] selected HardwareVideoDecoder (VT AV1, Dolby Vision 10.1 RPU attached) for codec_id="
+                + "\(vStream.pointee.codecpar?.pointee.codec_id.rawValue ?? 0)",
+                category: .swPlayback
+            )
         } else if !(videoDecoder is SoftwareVideoDecoder) {
             videoDecoder.close()
             let sw = SoftwareVideoDecoder()
@@ -1407,7 +1449,7 @@ final class SoftwarePlaybackHost {
         // Applied here (not init) so it also covers a decoder replaced above.
         (videoDecoder as? SoftwareVideoDecoder)?.deinterlaceConfig = deinterlaceConfig
 
-        try videoDecoder.open(stream: vStream) { [weak self] pixelBuffer, pts, hdr10PlusData in
+        let onFrame: DecodedFrameHandler = { [weak self] pixelBuffer, pts, hdr10PlusData in
             guard let self else { return }
             // AE#491: a frame decoded from a pre-seek packet is not late, it is from somewhere else.
             guard self.decodeGeneration == self.seekGeneration else { return }
@@ -1432,6 +1474,27 @@ final class SoftwarePlaybackHost {
                     category: .swPlayback
                 )
             }
+        }
+
+        if vStream.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_VP9 {
+            let opened = try VideoDecoderOpener.openPreferredOrFallback(
+                preferred: videoDecoder,
+                makeFallback: {
+                    let decoder = SoftwareVideoDecoder()
+                    decoder.deinterlaceConfig = self.deinterlaceConfig
+                    return decoder
+                },
+                stream: vStream,
+                onFrame: onFrame)
+            videoDecoder = opened.decoder
+            renderer.setReorderDepth(SampleBufferRenderer.reorderDepth(
+                forHardwareDecoder: videoDecoder is HardwareVideoDecoder))
+            if let reason = opened.preferredFailureDescription {
+                EngineLog.emit("[SWHost] VP9 hardware open failed; using libavcodec: \(reason)",
+                               category: .swPlayback)
+            }
+        } else {
+            try videoDecoder.open(stream: vStream, onFrame: onFrame)
         }
 
         videoDecoder.onFirstHDR10PlusDetected = { [weak self] in
@@ -1468,34 +1531,24 @@ final class SoftwarePlaybackHost {
                     category: .swPlayback
                 )
             }
-            let aDec = AudioDecoder()
             do {
                 // AE#462 harness (TEST-ONLY): same forced drop the loopback cascade honors.
                 if AetherEngine.forceAudioPipelineFailureForTesting {
                     throw NSError(domain: "AetherEngineTestHook", code: -462, userInfo: [
                         NSLocalizedDescriptionKey: "audio pipeline forced to fail (TEST-ONLY)"])
                 }
-                let supportsAPAC: Bool
-                if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-                    supportsAPAC = true
-                } else {
-                    supportsAPAC = false
-                }
-                let spatialLayout = Self.softwareSpatialAudioLayout(
-                    decodesDualLayer: decodesDualLayer,
-                    isLive: isLive,
-                    rendering: objectAudioRendering,
-                    codecID: acp.pointee.codec_id,
-                    profile: acp.pointee.profile,
-                    sampleRate: acp.pointee.sample_rate,
-                    supportsAPAC: supportsAPAC
-                )
-                try aDec.open(stream: aStream, spatialAudioLayout: spatialLayout)
-                aDec.setAudioProcessing(audioProcessingSettings)
-                self.audioDecoder = aDec
+                let made = try await makeAudioProducer(demuxer: dem, streamIndex: resolvedAudioIdx, isLive: isLive)
+                // A stop() can land on the suspension above, as on the ones below.
+                guard !stopRequested else { made.producer.close(); return }
+                self.audioDecoder = made.producer
+                self.audioRoute = made.route
+                self.audioRouteCarriesDolbyAtmos = made.route.carriesDolbyAtmos(sourceCodec: acp.pointee.codec_id)
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
                 self.audioTimeBaseSeconds = atb.den > 0 ? Double(atb.num) / Double(atb.den) : 0
+            } catch is CancellationError {
+                // stop() landed while the audio route was being chosen; the demuxer is closing.
+                return
             } catch {
                 EngineLog.emit("[SWHost] audio open failed (\(error)); video-only", category: .swPlayback)
                 self.audioStreamIndex = -1
@@ -1507,7 +1560,8 @@ final class SoftwarePlaybackHost {
         // source without audio.
         self.audioDelivery = Self.audioDelivery(resolvedAudioIndex: resolvedAudioIdx,
                                                 decoderOpened: self.audioDecoder != nil,
-                                                sourceCarriesAudio: dem.firstAudioStreamIndexByType >= 0)
+                                                sourceCarriesAudio: dem.firstAudioStreamIndexByType >= 0,
+                                                route: self.audioRoute)
         // #112 rework: capture embedded subtitle stream indices + time bases for the demux
         // loop's subtitle tap dispatch.
         var subIndices: Set<Int32> = []
@@ -1549,6 +1603,12 @@ final class SoftwarePlaybackHost {
             guard self?.backgroundAudioOnly != true else { return nil }
             return prerollRenderer.prerollSatisfied(clock: clock, live: prerollLive)
         }
+        // A decoder still working up to the target holds the clock past the plain timeout (#800).
+        let prerollDecoder = videoDecoder
+        self.audioOutput?.videoPrerollProgress = { prerollDecoder.framesDecoded }
+        self.audioOutput?.onPrerollTransition = { [weak self] transition in
+            self?.onClockHoldTransition?(transition)
+        }
         // AE#395: the route this session plays into, the counterpart of the native host's line. Without
         // it a silent software session on a long-latency route and an audible one on HDMI log the same.
         if let route = AudioRouteDescription.current() {
@@ -1581,8 +1641,8 @@ final class SoftwarePlaybackHost {
             // remote source that has to scan for its landing would otherwise block the main thread here.
             let outcome = await reposition(dem, sourceStart, Self.seekBudgetSeconds, seekQueue,
                                            { [weak self] in self?.stopRequested ?? true })
-            // Besides the in-band record completion above, this is load()'s only suspension point, so it
-            // is the other place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
+            // Like the others (the audio route choice, the cache setup, the primer wait), this
+            // suspension is a place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
             guard !stopRequested, !Task.isCancelled, outcome != .superseded else {
                 throw CancellationError()
@@ -1649,14 +1709,30 @@ final class SoftwarePlaybackHost {
             readAhead?.start()
         }
 
+        // The Atmos decoder registration started when the route was chosen and has run alongside the
+        // resume seek and the cache setup; only what is left of its window is waited out here, and
+        // only on the compressed-JOC route (`AtmosDecoderPrimer`). The first enqueue is after load().
+        await Self.awaitAtmosPrimer(for: audioRoute, wait: atmosPrimerWait)
+        guard !stopRequested else { return }
+
         startTimeUpdates()
         isReady = true
+    }
+
+    /// How the host waits for the Atmos decoder registration. Replaced by tests.
+    var atmosPrimerWait: @MainActor () async -> Void = { await AtmosDecoderPrimer.shared.ensurePrimed() }
+
+    /// Waits for the registration on the route that needs it and never on any other.
+    static func awaitAtmosPrimer(for route: SoftwareAtmosRoute, wait: @MainActor () async -> Void) async {
+        guard route == .compressedEAC3JOC else { return }
+        await wait()
     }
 
     // MARK: - Transport
 
     func play() {
         guard !stopRequested, failure == nil else { return }
+        renderer.recoverAfterSuspensionIfNeeded()
         // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
         // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
         // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
@@ -1687,7 +1763,7 @@ final class SoftwarePlaybackHost {
             break
         }
         if !demuxLoopStarted, let aOut = audioOutput {
-            aOut.attachVideoRenderer(renderer.videoRenderer)
+            aOut.attachVideoLayer(renderer.displayLayer)
         }
         if !demuxLoopStarted {
             demuxLoopStarted = true
@@ -2266,6 +2342,11 @@ final class SoftwarePlaybackHost {
     /// cache could not be built.
     var servesPacketCacheStills: Bool { !isLive && vodPacketReadAhead != nil }
 
+    /// Whether this session's video can become a still in this build. False for a Dolby Vision
+    /// Profile 5 / 10.0 stream without the `DolbyVisionStillReshaping` trait, the same verdict
+    /// `FrameDecodeContext` gives every still decode of it; set at `load`.
+    private(set) var videoYieldsStills = true
+
     /// AE#605: the VOD twin of `liveScrubStill`, decoded out of the retained packet cache.
     ///
     /// Same queue, same newest-wins ticket and same extractor as the live still, and the same session
@@ -2331,12 +2412,13 @@ final class SoftwarePlaybackHost {
         }
     }
 
-    /// Reconstruct AVPacket from ring entry, convert PTS from seconds back to stream time_base, and route to decoders. Returns true when audio buffers were enqueued (used for feeder clock arming).
+    /// Reconstruct AVPacket from ring entry, convert PTS from seconds back to stream time_base, and route to decoders.
+    /// A stale producer/output epoch is distinct from valid buffering with no audio yet: callers must not advance the cursor for it.
     @discardableResult
     nonisolated static func feedRingPacket(
         _ pkt: PacketRingBuffer.Packet,
         videoDecoder: any VideoDecodingPipeline,
-        audioDecoder: AudioDecoder?,
+        audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
         videoStreamIndex: Int32,
         audioStreamIndex: Int32,
@@ -2344,16 +2426,19 @@ final class SoftwarePlaybackHost {
         audioTimeBaseSeconds: Double,
         audioTapSink: (@Sendable (CMSampleBuffer) -> Void)?,
         audioEpoch: UInt64,
+        audioFeedEpoch: UInt64,
+        capturedSeekGeneration: UInt64,
+        currentSeekGeneration: @Sendable () -> UInt64,
         noteDecodeGeneration: @Sendable () -> Void
-    ) -> Bool {
+    ) -> SoftwareRingPacketFeedOutcome {
         let tbSec = pkt.isVideo ? videoTimeBaseSeconds : audioTimeBaseSeconds
-        guard tbSec > 0, !pkt.bytes.isEmpty else { return false }
+        guard tbSec > 0, !pkt.bytes.isEmpty else { return .completed(producedAudio: false) }
 
-        guard let p = trackedPacketAlloc() else { return false }
+        guard let p = trackedPacketAlloc() else { return .completed(producedAudio: false) }
         var avPkt: UnsafeMutablePointer<AVPacket>? = p
         defer { trackedPacketFree(&avPkt) }
 
-        if av_new_packet(p, Int32(pkt.bytes.count)) < 0 { return false }
+        if av_new_packet(p, Int32(pkt.bytes.count)) < 0 { return .completed(producedAudio: false) }
         pkt.bytes.withUnsafeBytes { raw in
             if let base = raw.baseAddress, let dst = p.pointee.data {
                 memcpy(dst, base, pkt.bytes.count)
@@ -2369,23 +2454,35 @@ final class SoftwarePlaybackHost {
             // AE#492: no epoch. This replays from the DVR ring after a reseed, so there is no batch
             // of packets decided on before a flush for one to invalidate.
             videoDecoder.decode(packet: p, epoch: nil)
-            return false
+            return .completed(producedAudio: false)
         } else if let aDec = audioDecoder, let aOut = audioOutput {
+            guard currentSeekGeneration() == capturedSeekGeneration,
+                  aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else { return .stale }
+            let buffers = aDec.decode(packet: p, epoch: audioFeedEpoch)
+            guard currentSeekGeneration() == capturedSeekGeneration,
+                  aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else { return .stale }
             var enqueued = false
-            for buf in aDec.decode(packet: p) {
+            for buffer in buffers {
                 // DEC-106 on the DVR path: `audioEpoch` was read before the ring read, so a rewind's flush
                 // retires what this packet decodes to. A pre-seek buffer kept at the head of the fresh queue
-                // carries a higher stamp than the new clock and mutes audio for the rewind distance.
-                guard aOut.enqueue(sampleBuffer: buf, ifEpoch: audioEpoch) else { return enqueued }
-                    if let format = CMSampleBufferGetFormatDescription(buf),
-                       Self.shouldMirrorAudioTap(mediaSubtype: CMFormatDescriptionGetMediaSubType(format)) {
-                        audioTapSink?(buf)   // #95: mirrored behind the accept
-                    }
+                // carries a higher stamp than the new clock and mutes the audio for the rewind distance.
+                guard aOut.enqueue(sampleBuffer: buffer, ifEpoch: audioEpoch) else { return .stale }
                 enqueued = true
             }
-            return enqueued
+            guard aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else { return .stale }
+            if let audioTapSink {
+                let tapBuffers = aDec.tapBuffers(for: p, produced: buffers, epoch: audioFeedEpoch)
+                guard currentSeekGeneration() == capturedSeekGeneration,
+                      aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else { return .stale }
+                for tapBuffer in tapBuffers {
+                    audioTapSink(tapBuffer)   // #95: producer supplies PCM where renderer input is compressed
+                }
+            }
+            guard currentSeekGeneration() == capturedSeekGeneration,
+                  aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else { return .stale }
+            return .completed(producedAudio: enqueued)
         }
-        return false
+        return .completed(producedAudio: false)
     }
 
     func stop() {
@@ -2420,7 +2517,7 @@ final class SoftwarePlaybackHost {
 
         if let aOut = audioOutput {
             aOut.stop()
-            aOut.detachVideoRenderer(renderer.videoRenderer)
+            aOut.detachVideoLayer(renderer.displayLayer)
         }
         audioOutput = nil
         audioDecoder?.close()
@@ -2924,7 +3021,7 @@ final class SoftwarePlaybackHost {
     /// Ring cursor -> decoders -> renderer with back-pressure. Pause = timeshift (reader keeps filling); DVR seek = cursor move.
     nonisolated private static func runLiveFeederLoop(
         videoDecoder: any VideoDecodingPipeline,
-        audioDecoder: AudioDecoder?,
+        audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
         videoStreamIndex: Int32,
         audioStreamIndex: Int32,
@@ -2968,12 +3065,17 @@ final class SoftwarePlaybackHost {
         var rebuffering = false
         var lastLowLeadLog = DispatchTime(uptimeNanoseconds: 0)
         var feederGeneration = seekGeneration()
-        func pumpAudio(epoch audioEpoch: UInt64) {
-            guard let aDec = audioDecoder, let aOut = audioOutput, audioStreamIndex >= 0 else { return }
+        func pumpAudio(epoch audioEpoch: UInt64, feedEpoch audioFeedEpoch: UInt64) -> Bool {
+            guard let aDec = audioDecoder, let aOut = audioOutput, audioStreamIndex >= 0 else { return false }
+            var rejectedStaleEpoch = false
             var seq = audioLookahead.align(to: readCursor())
             func pumpIteration() -> Bool {
                 guard readCursor() >= ring.seqBounds.first,
                       seekGeneration() == feederGeneration else { return false }
+                guard aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else {
+                    rejectedStaleEpoch = true
+                    return false
+                }
                 let armed = clockArmed()
                 guard AudioLookaheadPolicy.decide(
                     clockArmed: armed,
@@ -2986,11 +3088,15 @@ final class SoftwarePlaybackHost {
                 // never read off the disk (the feeder reads each of them once, for decode).
                 guard ring.isVideo(atSeq: seq) == false, let pkt = ring.packet(atSeq: seq) else {
                     // Video, or evicted/unreadable under the pump: skip, same as the combined loop.
+                    guard aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else {
+                        rejectedStaleEpoch = true
+                        return false
+                    }
                     guard audioLookahead.advance(from: seq, fedPTS: nil) else { return false }
                     seq += 1
                     return true
                 }
-                let producedAudio = feedRingPacket(
+                let outcome = feedRingPacket(
                     pkt,
                     videoDecoder: videoDecoder,
                     audioDecoder: aDec,
@@ -3001,8 +3107,19 @@ final class SoftwarePlaybackHost {
                     audioTimeBaseSeconds: audioTimeBaseSeconds,
                     audioTapSink: audioTapSink(),
                     audioEpoch: audioEpoch,
+                    audioFeedEpoch: audioFeedEpoch,
+                    capturedSeekGeneration: feederGeneration,
+                    currentSeekGeneration: seekGeneration,
                     noteDecodeGeneration: noteDecodeGeneration
                 )
+                guard case .completed(let producedAudio) = outcome else {
+                    rejectedStaleEpoch = true
+                    return false
+                }
+                guard aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else {
+                    rejectedStaleEpoch = true
+                    return false
+                }
                 if !armed {
                     preArmPacketsFed += 1
                     if producedAudio {
@@ -3012,6 +3129,10 @@ final class SoftwarePlaybackHost {
                         aOut.seekClock(to: armTime, rate: currentRate())
                         markClockArmed()
                     }
+                }
+                guard aOut.epoch == audioEpoch, aDec.feedEpoch == audioFeedEpoch else {
+                    rejectedStaleEpoch = true
+                    return false
                 }
                 guard audioLookahead.advance(from: seq, fedPTS: pkt.pts) else { return false }
                 seq += 1
@@ -3024,6 +3145,7 @@ final class SoftwarePlaybackHost {
                 }
                 if !keepGoing { break }
             }
+            guard !rejectedStaleEpoch else { return true }
             // Live-edge underrun handling (#107): a source delivering below real time would
             // otherwise leave the free-running clock permanently ahead of the stream, and
             // every later sample lands in the clock's past (continuous chopping that never
@@ -3080,6 +3202,7 @@ final class SoftwarePlaybackHost {
                     }
                 }
             }
+            return false
         }
 
         func feederIteration() -> Bool {
@@ -3087,6 +3210,7 @@ final class SoftwarePlaybackHost {
             // moves the cursor, so an epoch read ahead of the playing check is retired by any flush that
             // lands after the cursor this iteration reads (audit DEC-106).
             let audioEpoch = audioOutput?.epoch ?? 0
+            let audioFeedEpoch = audioDecoder?.feedEpoch ?? 0
             if !isPlaying() {
                 condition.lock()
                 while !isPlaying() && !stopRequested() {
@@ -3107,6 +3231,10 @@ final class SoftwarePlaybackHost {
                 liveJoinPending = false
                 liveJoinAlignSince = nil
             }
+            // A seek can finish between the epoch snapshots above and the playing/generation gate.
+            // Retry this feeder iteration with epochs from the new ring position.
+            guard (audioOutput?.epoch ?? 0) == audioEpoch,
+                  (audioDecoder?.feedEpoch ?? 0) == audioFeedEpoch else { return true }
             if liveJoinPending {
                 switch liveJoinPlacement() {
                 case nil:
@@ -3200,7 +3328,7 @@ final class SoftwarePlaybackHost {
                 return true
             }
             // Audio is pumped only after an evicted cursor has been recovered onto the new clock.
-            pumpAudio(epoch: audioEpoch)
+            if pumpAudio(epoch: audioEpoch, feedEpoch: audioFeedEpoch) { return true }
             guard isPlaying(), seekGeneration() == generation, readCursor() == cursor,
                   cursor >= ring.seqBounds.first else { return true }
             // Audio the pump already delivered: consume the slot without reading it back, the
@@ -3244,6 +3372,7 @@ final class SoftwarePlaybackHost {
                 // Back-pressure against renderer queue; also bail on pause without consuming.
                 // The wait can outlast the audio lead, so keep pumping audio while parked.
                 var waitTicks = 0
+                var rejectedStaleAudioEpoch = false
                 // The FEL look-ahead gate (`mayEnqueueVideoFrame`) holds a packet until its timestamp is
                 // inside the clock's window; a seek, including a backward DVR seek, moves the cursor and
                 // releases it here rather than waiting for its old timestamp to come round.
@@ -3255,7 +3384,10 @@ final class SoftwarePlaybackHost {
                     autoreleasepool {
                         Thread.sleep(forTimeInterval: 0.005)
                         waitTicks += 1
-                        if waitTicks % 20 == 0 { pumpAudio(epoch: audioEpoch) }
+                        if waitTicks % 20 == 0,
+                           pumpAudio(epoch: audioEpoch, feedEpoch: audioFeedEpoch) {
+                            rejectedStaleAudioEpoch = true
+                        }
                         // #337: the pump is what can still arm the clock from here, so its spent
                         // pre-arm budget is what turns this park terminal (an audio track that
                         // never decodes a buffer). The renderer cannot drain at a stopped clock,
@@ -3277,6 +3409,7 @@ final class SoftwarePlaybackHost {
                             markClockArmed()
                         }
                     }
+                    if rejectedStaleAudioEpoch { return true }
                 }
                 if stopRequested() { return false }
                 if !isPlaying() || seekGeneration() != generation || readCursor() != cursor
@@ -3287,7 +3420,7 @@ final class SoftwarePlaybackHost {
                 return true
             }
 
-            let producedAudio = feedRingPacket(
+            let feedOutcome = feedRingPacket(
                 pkt,
                 videoDecoder: videoDecoder,
                 audioDecoder: audioDecoder,
@@ -3298,8 +3431,20 @@ final class SoftwarePlaybackHost {
                 audioTimeBaseSeconds: audioTimeBaseSeconds,
                 audioTapSink: audioTapSink(),
                 audioEpoch: audioEpoch,
+                audioFeedEpoch: audioFeedEpoch,
+                capturedSeekGeneration: generation,
+                currentSeekGeneration: seekGeneration,
                 noteDecodeGeneration: noteDecodeGeneration
             )
+            let producedAudio: Bool
+            switch feedOutcome {
+            case .stale:
+                return true
+            case .completed(let didEnqueueAudio):
+                producedAudio = didEnqueueAudio
+            }
+            guard (audioOutput?.epoch ?? 0) == audioEpoch,
+                  (audioDecoder?.feedEpoch ?? 0) == audioFeedEpoch else { return true }
 
             // Arm clock once on first packet PTS (anchoring at .zero caused delay). Audio: first decoded buffers; video-only: first video packet (no clock without audio = frozen frame).
             if !clockArmed(), let aOut = audioOutput {
@@ -3312,6 +3457,8 @@ final class SoftwarePlaybackHost {
                 }
             }
 
+            guard (audioOutput?.epoch ?? 0) == audioEpoch,
+                  (audioDecoder?.feedEpoch ?? 0) == audioFeedEpoch else { return true }
             advanceCursor(cursor)
             return true
         }
@@ -3355,7 +3502,7 @@ final class SoftwarePlaybackHost {
         readAhead: SoftwarePacketReadAhead?,
         videoDecoder: any VideoDecodingPipeline,
         videoStreamIndex: Int32,
-        audioDecoder: AudioDecoder?,
+        audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
         audioStreamIndex: Int32,
         renderer: SampleBufferRenderer,
@@ -3413,8 +3560,10 @@ final class SoftwarePlaybackHost {
         // Clock-arming fallback bookkeeping: a declared audio track whose
         // decoder never produces buffers (corrupt stream) must not leave
         // the session unarmed forever. See the video-branch arming below.
+        // The bound is the producer's own: the APAC route's first buffer is ~100 packets in.
         var audioPacketsSeen = 0
         var audioBuffersProduced = false
+        let audioFirstBufferPacketBudget = audioDecoder?.firstBufferPacketBudget ?? 0
         // AE#844: a live join reads the source from wherever it stands, mid-GOP as a rule, and
         // would arm the clock on audio the picture only catches up with at the next keyframe.
         // Audio up to that keyframe is dropped while the clock is unarmed
@@ -3723,6 +3872,9 @@ diagAudioPtsSec = .nan
             var epochBeforeRead = videoDecoder.feedEpoch
             // Audit DEC-106: the audio side of the same rule, compared under the output's lock by `enqueue`.
             let audioEpochBeforeRead = audioOutput?.epoch ?? 0
+            // And the producer's own: a seek's flush that lands between the generation check below and
+            // the feed would let a pre-seek packet re-anchor the APAC bridge for the whole post-seek run.
+            let audioFeedEpochBeforeRead = audioDecoder?.feedEpoch ?? 0
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
                 if let readAhead {
@@ -3760,19 +3912,24 @@ diagAudioPtsSec = .nan
                 return !stopRequested()
             }
             guard let packet else {
-                if let aDec = audioDecoder, aDec.isUsingSoftwareSpatialAudio, let aOut = audioOutput {
-                    let tail = aDec.drain()
-                    if let failure = aDec.takeSpatialAudioFailure() {
-                        if seekGeneration() == genBeforeRead, aOut.epoch == audioEpochBeforeRead {
-                            let token = SoftwareSpatialAudioFailureToken(
-                                seekGeneration: genBeforeRead,
-                                audioEpoch: audioEpochBeforeRead
-                            )
-                            if terminalGeneration.record(genBeforeRead) {
-                                onSpatialAudioFailure(failure, token)
-                            }
-                            return true
+                // Play the parked tail out before the flush: nothing more will arrive, the queues
+                // must drain to end-of-media. The wait lifts a rebuffer hold on its own - held,
+                // the clock would never take the tail and end-of-media would never be reached.
+                // What the audio producer still holds (the APAC encoder's last packets) goes in
+                // first, so the drain below plays it too.
+                if let aDec = audioDecoder, let aOut = audioOutput {
+                    let tail = aDec.endOfStream(epoch: audioFeedEpochBeforeRead)
+                    if let failure = aDec.takeRuntimeFailure() {
+                        let token = SoftwareSpatialAudioFailureToken(
+                            seekGeneration: genBeforeRead,
+                            audioEpoch: audioEpochBeforeRead
+                        )
+                        let current = seekGeneration() == token.seekGeneration
+                            && aOut.epoch == token.audioEpoch
+                        if current, terminalGeneration.record(token.seekGeneration) {
+                            onSpatialAudioFailure(failure, token)
                         }
+                        if current { return true }
                     }
                     for buffer in tail {
                         guard aOut.enqueue(sampleBuffer: buffer, ifEpoch: audioEpochBeforeRead) else {
@@ -3780,9 +3937,6 @@ diagAudioPtsSec = .nan
                         }
                     }
                 }
-                // Play the parked tail out before the flush: nothing more will arrive, the queues
-                // must drain to end-of-media. The wait lifts a rebuffer hold on its own - held,
-                // the clock would never take the tail and end-of-media would never be reached.
                 releaseRebufferHold("end of media, nothing left to rebuffer from")
                 waitForRenderer(.drainAll)
                 guard admitsRead(genBeforeRead) else { return !stopRequested() }
@@ -3954,10 +4108,8 @@ diagAudioPtsSec = .nan
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
                     // requires a DECLARED audio track, not a producing one). The stream that
                     // produces NO packets at all is #337's case and exits at the read gate.
-                    let audioFallbackPacketBudget = audioDecoder?.isUsingSoftwareSpatialAudio == true
-                        ? AudioBridge.trueHDSilentFeedPacketThreshold : 50
                     if !clockArmed(), let aOut = audioOutput,
-                       audioPacketsSeen >= audioFallbackPacketBudget, !audioBuffersProduced {
+                       audioPacketsSeen >= audioFirstBufferPacketBudget, !audioBuffersProduced {
                         armFromVideoPacket(packet, aOut)
                     }
                     drainParkedVideoNonblocking()
@@ -4021,11 +4173,9 @@ diagAudioPtsSec = .nan
                 }
                 setDecodeGeneration(genBeforeRead)
                 videoDecoder.decode(packet: packet, epoch: epochBeforeRead)
-                // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
-                let audioFallbackPacketBudget = audioDecoder?.isUsingSoftwareSpatialAudio == true
-                    ? AudioBridge.trueHDSilentFeedPacketThreshold : 50
+                // Video-only / undecodable audio fallback: arm clock off first video packet (no buffer within the producer's first-buffer budget = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
-                   audioDecoder == nil || (audioPacketsSeen >= audioFallbackPacketBudget && !audioBuffersProduced) {
+                   audioDecoder == nil || (audioPacketsSeen >= audioFirstBufferPacketBudget && !audioBuffersProduced) {
                     armFromVideoPacket(packet, aOut)
                 }
             } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
@@ -4064,15 +4214,15 @@ diagAudioPtsSec = .nan
                     return true
                 }
                 audioPacketsSeen += 1
-                let buffers = aDec.decode(packet: packet)
-                if let failure = aDec.takeSpatialAudioFailure() {
+                let buffers = aDec.decode(packet: packet, epoch: audioFeedEpochBeforeRead)
+                if let failure = aDec.takeRuntimeFailure() {
                     let token = SoftwareSpatialAudioFailureToken(
                         seekGeneration: genBeforeRead,
                         audioEpoch: audioEpochBeforeRead
                     )
-                    let failureIsCurrent = seekGeneration() == token.seekGeneration
+                    let current = seekGeneration() == token.seekGeneration
                         && aOut.epoch == token.audioEpoch
-                    if failureIsCurrent, terminalGeneration.record(token.seekGeneration) {
+                    if current, terminalGeneration.record(token.seekGeneration) {
                         onSpatialAudioFailure(failure, token)
                     }
                     av_packet_unref(packet)
@@ -4093,12 +4243,24 @@ diagAudioPtsSec = .nan
                         av_packet_free_safe(packet)
                         return true
                     }
-                    if let format = CMSampleBufferGetFormatDescription(buf),
-                       Self.shouldMirrorAudioTap(mediaSubtype: CMFormatDescriptionGetMediaSubType(format)) {
-                        tapSink?(buf)   // #95: mirrored behind the accept, so a refused buffer is not transcribed
+                }
+                // #95: mirrored behind the accept, so a refused buffer is not transcribed. The tap
+                // transcribes PCM, so a producer that hands the renderer compressed audio decodes it here.
+                if let tapSink {
+                    let tapBuffers = aDec.tapBuffers(
+                        for: packet, produced: buffers, epoch: audioFeedEpochBeforeRead)
+                    guard !stopRequested(), seekGeneration() == genBeforeRead,
+                          aOut.epoch == audioEpochBeforeRead,
+                          aDec.feedEpoch == audioFeedEpochBeforeRead else {
+                        av_packet_unref(packet)
+                        av_packet_free_safe(packet)
+                        return true
+                    }
+                    for buf in tapBuffers {
+                        tapSink(buf)
                     }
                 }
-if !buffers.isEmpty {
+                if !buffers.isEmpty {
                     diag?.noteAudioProgress(generation: genBeforeRead)
                 }
                 if let last = buffers.last {

@@ -288,11 +288,12 @@ public enum SessionReloadRefusal: String, Sendable, Equatable, CustomStringConve
 /// deciding which half it belongs in.
 enum SessionOptionCorrection {
 
-    /// The fields that NAME the session rather than tune it. Each opens the source on a different
-    /// pipeline, and the engine writes the last two itself, so a host write races its determination.
+    /// The fields that NAME the session rather than tune it: source pipeline and diagnostic identity.
     static let loadIdentityFields: [String] = [
+        "sourceDiagnosticsContext",
         "isLive",
         "audioOnly",
+        "discImageHint",
         "nativeRemoteHLS",
         "sequentialOrigin",
         "heldSourceConnection",
@@ -327,8 +328,13 @@ enum SessionOptionCorrection {
     /// torn down, so it does not ride on reflection.
     static func refusedFields(from current: LoadOptions, to proposed: LoadOptions) -> [String] {
         var refused: [String] = []
+        // Internal reopens retain the load's request identity; a new identity needs a new load.
+        if proposed.sourceDiagnosticsContext != current.sourceDiagnosticsContext {
+            refused.append("sourceDiagnosticsContext")
+        }
         if proposed.isLive != current.isLive { refused.append("isLive") }
         if proposed.audioOnly != current.audioOnly { refused.append("audioOnly") }
+        if proposed.discImageHint != current.discImageHint { refused.append("discImageHint") }
         if proposed.nativeRemoteHLS != current.nativeRemoteHLS { refused.append("nativeRemoteHLS") }
         if proposed.sequentialOrigin != current.sequentialOrigin { refused.append("sequentialOrigin") }
         // #377: the transport is chosen when the source is opened, so a correction here would be
@@ -437,7 +443,8 @@ enum SessionOptionCorrection {
     /// right for a tuning lever and wrong for an identity one, so the choice has to be made
     /// deliberately. Update this list and, if the field names the session, `loadIdentityFields`.
     static let knownFields: [String] = [
-        "omitCriteriaColorExtensions", "suppressDisplayCriteria", "displayCriteriaOwner", "httpHeaders", "nativeVideoFrameDiagnostics", "nativeVideoFrameRecovery", "hostRetriesExhaustedLiveReplay",
+        "sourceDiagnosticsContext",
+        "omitCriteriaColorExtensions", "suppressDisplayCriteria", "displayCriteriaOwner", "httpHeaders", "discImageHint", "nativeVideoFrameDiagnostics", "nativeVideoFrameRecovery", "hostRetriesExhaustedLiveReplay",
         "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "dolbyVisionHandling", "preferDualLayerDolbyVision", "matchContentEnabled",
         "panelIsInHDRMode", "attemptsHDRMasterOnUnprovenPanel", "panelPresentsDolbyVision",
         "audioBridgeMode", "objectAudioRendering", "stereoPresentation", "isLive", "audioOnly",

@@ -30,6 +30,22 @@ struct Issue535RefusalNeedsEligibilityTests {
         #expect(!MasterFallbackDecision.shouldLatchPanelRefusal(code: -11868, servedMasterIsHDR: false, displayEligibleForHDRNow: true, displaySwitchInProgress: false))
     }
 
+    /// AE#849: on iOS and macOS the routing reads the display's eligibility, not the latch, and an eligible
+    /// built-in panel takes an HDR master however it is presenting, so the refusal is about the master.
+    @Test("A refusal on a panel that engages HDR on demand never latches")
+    func onDemandPanelRefusalNeverLatches() {
+        #expect(!MasterFallbackDecision.shouldLatchPanelRefusal(code: -11868, servedMasterIsHDR: true, displayEligibleForHDRNow: true, displaySwitchInProgress: false, panelEngagesHDROnDemand: true))
+        #expect(!MasterFallbackDecision.shouldLatchPanelRefusal(code: -11848, servedMasterIsHDR: true, displayEligibleForHDRNow: true, displaySwitchInProgress: false, panelEngagesHDROnDemand: true))
+    }
+
+    /// AE#887: the host's assertion short-circuits the route, so a latch would change nothing but the proof.
+    @Test("A refusal while the host asserts an HDR panel never latches")
+    func hostAssertedRefusalNeverLatches() {
+        #expect(!MasterFallbackDecision.shouldLatchPanelRefusal(code: -11868, servedMasterIsHDR: true, displayEligibleForHDRNow: true, displaySwitchInProgress: false, hostAssertsPanelHDR: true))
+        #expect(!MasterFallbackDecision.shouldLatchPanelRefusal(code: -11848, servedMasterIsHDR: true, displayEligibleForHDRNow: true, displaySwitchInProgress: false, hostAssertsPanelHDR: true))
+        #expect(AetherEngine.sessionRoutesAsHDRPanel(panelPresentsHDR: true, attemptWhenUnproven: false, displayEligibleForHDR: true, panelRefusedHDRMaster: true))
+    }
+
     /// -1002 is a manifest filtered at parse time (#130), a statement about the playlist, never the display.
     @Test("The parse-time rejection never latches, eligible or not")
     func parseRejectionNeverLatches() {
@@ -54,7 +70,7 @@ struct Issue535RefusalNeedsEligibilityTests {
             .appendingPathComponent("Sources/AetherEngine/AetherEngine.swift")
         let text = try #require(try? String(contentsOf: source, encoding: .utf8))
         let fn = try #require(text.range(of: "func fallBackToMediaPlaylist("))
-        let body = String(text[fn.lowerBound...].prefix(2500))
+        let body = String(text[fn.lowerBound...].prefix(4000))
         let gate = try #require(body.range(of: "shouldLatchPanelRefusal("))
         let set = try #require(body.range(of: "Self.panelRefusedHDRMaster = true"))
         #expect(gate.lowerBound < set.lowerBound)

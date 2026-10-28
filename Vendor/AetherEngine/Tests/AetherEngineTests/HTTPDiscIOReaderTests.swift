@@ -67,6 +67,27 @@ struct HTTPDiscIOReaderTests {
                                 requestTimeout: 5, sessionConfiguration: config)
     }
 
+    private func readAt(_ reader: HTTPDiscIOReader, offset: Int64, count: Int) -> [UInt8]? {
+        guard reader.seek(offset: offset, whence: SEEK_SET) == offset else { return nil }
+        var out = [UInt8](repeating: 0, count: count)
+        let n = out.withUnsafeMutableBufferPointer { reader.read($0.baseAddress, size: Int32(count)) }
+        return n == count ? out : nil
+    }
+
+    private func nonperiodicBytes(count: Int) -> [UInt8] {
+        var state: UInt32 = 0x6D2B_79F5
+        return (0..<count).map { _ in
+            state ^= state << 13
+            state ^= state >> 17
+            state ^= state << 5
+            return UInt8(truncatingIfNeeded: state >> 11)
+        }
+    }
+
+    private func dataRequestCount(for url: String) -> Int {
+        MockRangeURLProtocol.rangeRequests(for: url).filter { $0 != "bytes=0-0" }.count
+    }
+
     @Test("AVSEEK_SIZE returns the total size from the range probe")
     func sizeProbe() {
         let r = makeReader([UInt8](0..<200))
@@ -89,6 +110,173 @@ struct HTTPDiscIOReaderTests {
         let n2 = out2.withUnsafeMutableBufferPointer { r.read($0.baseAddress, size: 100) }
         #expect(n2 == 100)
         #expect(Array(out2[0..<100]) == Array(src[8192..<8292]))
+    }
+
+    @Test("Alternating small reads reuse two prior UDF-like windows")
+    func alternatingSmallReadsReuseWindows() throws {
+        let url = "http://disc.test/test.iso"
+        let src = nonperiodicBytes(count: 7 * 1024 * 1024)
+        let r = try #require(makeReader(src, base: 64 * 1024, maxChunk: 64 * 1024))
+        let regionA = 600 * 1024
+        let regionB = 6 * 1024 * 1024
+
+        for i in 0..<24 {
+            let region = i.isMultiple(of: 2) ? regionA : regionB
+            let offset = region + (i / 2) * 2048
+            let actual = try #require(readAt(r, offset: Int64(offset), count: 2048))
+            #expect(actual == Array(src[offset..<(offset + 2048)]))
+        }
+
+        #expect(dataRequestCount(for: url) == 2)
+        #expect(r.sourceBytesFetched == 2 * 64 * 1024)
+    }
+
+    @Test("Three-window LRU promotes an old window and evicts the least recently used")
+    func smallWindowLRUPromotionAndEviction() throws {
+        let url = "http://disc.test/test.iso"
+        let src = nonperiodicBytes(count: 2 * 1024 * 1024)
+        let r = try #require(makeReader(src, base: 64 * 1024, maxChunk: 64 * 1024))
+        let windows = [100, 300, 500, 700, 900].map { $0 * 1024 }
+        for offset in windows.prefix(4) {
+            let actual = try #require(readAt(r, offset: Int64(offset), count: 2048))
+            #expect(actual == Array(src[offset..<(offset + 2048)]))
+        }
+
+        // A is the oldest of the three parked windows. Promote it before E arrives; B should then
+        // be evicted, while A remains reusable after another network refill.
+        let promoted = windows[0]
+        let actualA = try #require(readAt(r, offset: Int64(promoted), count: 2048))
+        #expect(actualA == Array(src[promoted..<(promoted + 2048)]))
+        let actualE = try #require(readAt(r, offset: Int64(windows[4]), count: 2048))
+        #expect(actualE == Array(src[windows[4]..<(windows[4] + 2048)]))
+        #expect(dataRequestCount(for: url) == 5)
+
+        let rereadA = try #require(readAt(r, offset: Int64(promoted + 4096), count: 2048))
+        #expect(rereadA == Array(src[(promoted + 4096)..<(promoted + 6144)]))
+        #expect(dataRequestCount(for: url) == 5)
+
+        let evictedB = windows[1]
+        let rereadB = try #require(readAt(r, offset: Int64(evictedB), count: 2048))
+        #expect(rereadB == Array(src[evictedB..<(evictedB + 2048)]))
+        #expect(dataRequestCount(for: url) == 6)
+    }
+
+    @Test("A promoted small window permits adaptive growth at its cached frontier")
+    func cachedFrontierContinuesAdaptiveReadAhead() throws {
+        let url = "http://disc.test/test.iso"
+        let src = nonperiodicBytes(count: 2 * 1024 * 1024)
+        let base = 64 * 1024
+        let r = try #require(makeReader(src, base: base, maxChunk: 256 * 1024))
+        let start = 100 * 1024
+        let other = 700 * 1024
+
+        _ = try #require(readAt(r, offset: Int64(start), count: 2048))
+        _ = try #require(readAt(r, offset: Int64(other), count: 2048))
+        let promoted = start + 2048
+        let prefix = try #require(readAt(r, offset: Int64(promoted), count: base - 2048))
+        #expect(prefix == Array(src[promoted..<(start + base)]))
+
+        let nextOffset = start + base
+        let next = try #require(readAt(r, offset: Int64(nextOffset), count: 2048))
+        #expect(next == Array(src[nextOffset..<(nextOffset + 2048)]))
+        let ranges = MockRangeURLProtocol.rangeRequests(for: url)
+        #expect(ranges.last == HTTPDiscIOReader.rangeHeader(offset: Int64(nextOffset), length: 2 * base))
+        #expect(r.sourceBytesFetched == Int64(2 * base + 2 * base))
+    }
+
+    @Test("Cancel still allows cached reads and rejects a cache miss without another request")
+    func cancellationAllowsCacheHitOnly() throws {
+        let url = "http://disc.test/test.iso"
+        let src = nonperiodicBytes(count: 2 * 1024 * 1024)
+        let r = try #require(makeReader(src, base: 64 * 1024, maxChunk: 64 * 1024))
+        let first = 100 * 1024
+        let second = 500 * 1024
+        _ = try #require(readAt(r, offset: Int64(first), count: 2048))
+        _ = try #require(readAt(r, offset: Int64(second), count: 2048))
+        r.cancel()
+
+        let cached = try #require(readAt(r, offset: Int64(first + 2048), count: 2048))
+        #expect(cached == Array(src[(first + 2048)..<(first + 4096)]))
+        #expect(dataRequestCount(for: url) == 2)
+
+        #expect(r.seek(offset: 900 * 1024, whence: SEEK_SET) == 900 * 1024)
+        var out = [UInt8](repeating: 0, count: 2048)
+        let miss = out.withUnsafeMutableBufferPointer { r.read($0.baseAddress, size: 2048) }
+        #expect(miss == -1)
+        #expect(dataRequestCount(for: url) == 2)
+    }
+
+    @Test("A cached window ending at a warm-tail boundary hands off to resident bytes")
+    func cachedWindowHandsOffToWarmTail() throws {
+        let url = URL(string: "http://disc.test/test.iso")!
+        let src = nonperiodicBytes(count: 3 * 1024 * 1024)
+        let base = 64 * 1024
+        let tailStart = 640 * 1024
+        let tail = Array(src[tailStart..<(tailStart + 16 * 1024)])
+        let prewarmed = PrewarmedSource(
+            head: ResidentSpan(start: 0, data: Data()),
+            tail: ResidentSpan(start: Int64(tailStart), data: Data(tail)),
+            contentLength: Int64(src.count), requestHeaders: [:], resolvedURL: nil)
+
+        MockRangeURLProtocol.reset()
+        MockRangeURLProtocol.bytesByURL[url.absoluteString] = Data(src)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockRangeURLProtocol.self]
+        let reader = try #require(HTTPDiscIOReader(
+            url: url, baseChunkSize: base, maxChunkSize: base,
+            sessionConfiguration: config, prewarmed: prewarmed))
+        defer { reader.close() }
+
+        let firstStart = tailStart - base
+        let otherStart = 1_500 * 1024
+        let first = try #require(readAt(reader, offset: Int64(firstStart), count: 2048))
+        #expect(first == Array(src[firstStart..<(firstStart + 2048)]))
+        let other = try #require(readAt(reader, offset: Int64(otherStart), count: 2048))
+        #expect(other == Array(src[otherStart..<(otherStart + 2048)]))
+
+        // The first fetched window ends exactly where the warmed tail begins. Promote it after
+        // displacing it with the other region, then consume continuously through the warm boundary.
+        let promotedStart = firstStart + 2048
+        #expect(reader.seek(offset: Int64(promotedStart), whence: SEEK_SET) == Int64(promotedStart))
+        let requested = base - 2048 + 4096
+        var actual: [UInt8] = []
+        let out = UnsafeMutablePointer<UInt8>.allocate(capacity: requested)
+        defer { out.deallocate() }
+        while actual.count < requested {
+            let n = reader.read(out, size: Int32(requested - actual.count))
+            guard n > 0 else { break }
+            actual.append(contentsOf: UnsafeBufferPointer(start: out, count: Int(n)))
+        }
+        let expected = Array(src[promotedStart..<(tailStart + 4096)])
+        #expect(actual == expected)
+
+        #expect(MockRangeURLProtocol.rangeRequests(for: url.absoluteString) == [
+            HTTPDiscIOReader.rangeHeader(offset: Int64(firstStart), length: base),
+            HTTPDiscIOReader.rangeHeader(offset: Int64(otherStart), length: base),
+        ])
+        #expect(reader.sourceBytesFetched == Int64(2 * base))
+    }
+
+    @Test("Adaptive windows larger than the base are not admitted to the LRU")
+    func largeWindowIsNotCached() throws {
+        let url = "http://disc.test/test.iso"
+        let src = nonperiodicBytes(count: 2 * 1024 * 1024)
+        let base = 64 * 1024
+        let r = try #require(makeReader(src, base: base, maxChunk: 256 * 1024))
+        let start = 100 * 1024
+        let secondStart = start + base
+        let thirdStart = secondStart + 2 * base
+
+        _ = try #require(readAt(r, offset: Int64(start), count: base))
+        _ = try #require(readAt(r, offset: Int64(secondStart), count: 2 * base))
+        _ = try #require(readAt(r, offset: Int64(thirdStart), count: 4 * base))
+        _ = try #require(readAt(r, offset: Int64(900 * 1024), count: 2048))
+        #expect(dataRequestCount(for: url) == 4)
+
+        let insideLargeWindow = start + 220 * 1024
+        let actual = try #require(readAt(r, offset: Int64(insideLargeWindow), count: 2048))
+        #expect(actual == Array(src[insideLargeWindow..<(insideLargeWindow + 2048)]))
+        #expect(dataRequestCount(for: url) == 5)
     }
 
     @Test("Reading at EOF returns 0; seek past end then read is empty")
@@ -221,10 +409,23 @@ final class MockRangeURLProtocol: URLProtocol, @unchecked Sendable {
     /// audit NET-9: any request at a non-zero offset gets a full 200 instead of a 206 (a
     /// Range-ignoring proxy or a cache-miss fallback), body starting at byte 0 of the source.
     nonisolated(unsafe) static var plain200AfterProbeFor: Set<String> = []
+    private static let rangeRequestLock = NSLock()
+    nonisolated(unsafe) private static var rangeRequestsByURL: [String: [String]] = [:]
 
     static func reset() {
         bytesByURL = [:]; disableRangeFor = []; failFirstForURL = [:]
         misrangedFor = []; plain200AfterProbeFor = []
+        rangeRequestLock.lock(); rangeRequestsByURL = [:]; rangeRequestLock.unlock()
+    }
+
+    static func rangeRequests(for url: String) -> [String] {
+        rangeRequestLock.lock(); defer { rangeRequestLock.unlock() }
+        return rangeRequestsByURL[url] ?? []
+    }
+
+    private static func recordRangeRequest(_ range: String, for url: String) {
+        rangeRequestLock.lock(); defer { rangeRequestLock.unlock() }
+        rangeRequestsByURL[url, default: []].append(range)
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -235,6 +436,9 @@ final class MockRangeURLProtocol: URLProtocol, @unchecked Sendable {
         guard let url = request.url, let data = Self.bytesByURL[url.absoluteString] else {
             client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
             return
+        }
+        if let range = request.value(forHTTPHeaderField: "Range") {
+            Self.recordRangeRequest(range, for: url.absoluteString)
         }
         if let remaining = Self.failFirstForURL[url.absoluteString], remaining > 0 {
             Self.failFirstForURL[url.absoluteString] = remaining - 1

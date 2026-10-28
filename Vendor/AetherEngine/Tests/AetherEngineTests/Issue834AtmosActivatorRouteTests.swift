@@ -24,51 +24,24 @@ struct Issue834AtmosActivatorRouteTests {
         #expect(!AtmosOutputActivator.routeTakesActivator(outputPortTypes: []))
     }
 
-    @Test("software follow requires a playing Atmos APAC track on HDMI")
-    func softwareFollowPolicy() {
-        #expect(AtmosOutputActivator.softwareFollowTakesActivator(
-            playsAtmosAPAC: true,
-            isPlaying: true,
-            outputPortTypes: ["HDMIOutput"]
-        ))
-        #expect(!AtmosOutputActivator.softwareFollowTakesActivator(
-            playsAtmosAPAC: false,
-            isPlaying: true,
-            outputPortTypes: ["HDMIOutput"]
-        ))
-        #expect(!AtmosOutputActivator.softwareFollowTakesActivator(
-            playsAtmosAPAC: true,
-            isPlaying: false,
-            outputPortTypes: ["HDMIOutput"]
-        ))
-        #expect(!AtmosOutputActivator.softwareFollowTakesActivator(
-            playsAtmosAPAC: true,
-            isPlaying: true,
-            outputPortTypes: ["HDMIOutput", "AirPlay"]
-        ))
+    @Test("the software host's transport as the activator reads it")
+    func softwareTransportTruthTable() {
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.playing) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.seeking) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.loading) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.paused) == false)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.idle) == nil)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.ended) == nil)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.error("failed")) == nil)
     }
 
-    @Test("software follow replaces native observations and repeated updates keep the mode")
-    @MainActor
-    func softwareFollowReplacesNativeFollowing() async {
-        var routeEvaluations = 0
-        let activator = AtmosOutputActivator {
-            routeEvaluations += 1
-            return ["AirPlay"]
-        }
-        defer { activator.detach() }
-
-        let nativeHost = AVPlayer()
-        activator.attach(to: nativeHost) { _ in true }
-        await Task.yield()
-
-        activator.followSoftware(playsAtmosAPAC: true, isPlaying: true)
-        activator.followSoftware(playsAtmosAPAC: true, isPlaying: true)
-        #expect(routeEvaluations == 2)
-
-        nativeHost.replaceCurrentItem(with: AVPlayerItem(url: URL(fileURLWithPath: "/tmp/atmos-follow-mode-test.mp4")))
-        await Task.yield()
-        #expect(routeEvaluations == 2)
+    // The session's own value, pinned where there is no session: the test below only builds for iOS
+    // and tvOS, so a macOS run passed with the constant spelled "HDMI" while every HDMI route on an
+    // Apple TV reported "HDMIOutput" and none took the activator.
+    @Test("the spelled-out port type is the one tvOS reports for HDMI")
+    func portTypeIsHDMIOutput() {
+        #expect(AtmosOutputActivator.hdmiPortType == "HDMIOutput")
+        #expect(!AtmosOutputActivator.routeTakesActivator(outputPortTypes: ["HDMI"]))
     }
 
     #if os(iOS) || os(tvOS)
