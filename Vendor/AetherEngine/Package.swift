@@ -131,5 +131,8 @@ let package = Package(
             dependencies: ["AetherEngineSMB"],
             path: "Tests/AetherEngineSMBTests"
         ),
-    ]
+    ],
+    // NuvioTVOS fork: Swift 5 mode so the Xcode 26 compiler on the Intel CI
+    // runner reports its stricter Sendable checks as warnings, not errors.
+    swiftLanguageModes: [.v5]
 )
