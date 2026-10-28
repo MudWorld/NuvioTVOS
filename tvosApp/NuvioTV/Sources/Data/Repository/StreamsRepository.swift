@@ -1062,7 +1062,9 @@ struct StreamAddonStreamDTO: Decodable {
             infoHash: parsed.infoHash,
             fileIdx: parsed.fileIdx,
             sources: (sources ?? []) + (resolve?.sources ?? []),
-            filename: cleaned(behaviorHints?.filename) ?? cleaned(resolve?.filename),
+            filename: cleaned(behaviorHints?.filename)
+                ?? cleaned(resolve?.filename)
+                ?? inferredDMMDiscFilename(addonName: addonName, url: url, title: title),
             videoSize: behaviorHints?.videoSize,
             videoHash: cleaned(behaviorHints?.videoHash),
             bingeGroup: cleaned(behaviorHints?.bingeGroup),
@@ -1079,6 +1081,42 @@ struct StreamAddonStreamDTO: Decodable {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func inferredDMMDiscFilename(addonName: String, url rawURL: String?, title: String?) -> String? {
+        guard addonName == "DMM Cast for Real-Debrid",
+              let rawURL,
+              let parsedURL = URL(string: rawURL),
+              let scheme = parsedURL.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = parsedURL.host, !host.isEmpty,
+              let path = URLComponents(url: parsedURL, resolvingAgainstBaseURL: false)?.percentEncodedPath else {
+            return nil
+        }
+        let pathParts = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard pathParts.count == 6,
+              pathParts[0].isEmpty,
+              pathParts[1] == "api",
+              pathParts[2] == "stremio",
+              !pathParts[3].isEmpty,
+              pathParts[4] == "play",
+              !pathParts[5].isEmpty else {
+            return nil
+        }
+
+        let titleLines = title?.split(whereSeparator: \.isNewline) ?? []
+        guard let firstLine = titleLines.first else { return nil }
+        var filename = String(firstLine)
+        if filename.hasSuffix("-"), titleLines.count > 1 {
+            filename.removeLast()
+            filename.append(contentsOf: titleLines[1])
+        }
+        guard let filename = cleaned(filename) else { return nil }
+        let lowercasedFilename = filename.lowercased()
+        guard [".iso", ".img", ".udf"].contains(where: { lowercasedFilename.hasSuffix($0) }) else {
+            return nil
+        }
+        return filename
     }
 
     private static let sizeFormatter: ByteCountFormatter = {

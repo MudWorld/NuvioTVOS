@@ -1078,6 +1078,141 @@ final class StreamsDiscoveryTests: XCTestCase {
         XCTAssertEqual(stream.filename, "Movie.2024.1080p.mkv")
     }
 
+    @MainActor
+    func testDMMOpaquePlayRouteInfersShortDiscFilenameForRouting() throws {
+        let opaqueURL = "https://selfhost.example/api/stremio/user-123/play/file-token?auth=opaque"
+        let json = """
+        {
+            "streams": [{
+                "name": "DMM Cast for Real-Debrid",
+                "title": "Movie.2024.1080p.BluRay.iso\\n12.34 GB",
+                "url": "\(opaqueURL)"
+            }]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let dto = try XCTUnwrap(response.streams?.first)
+        let stream = try XCTUnwrap(dto.toNuvioStream(addonName: "DMM Cast for Real-Debrid"))
+        XCTAssertEqual(stream.filename, "Movie.2024.1080p.BluRay.iso")
+        XCTAssertEqual(stream.url, opaqueURL)
+
+        let url = try XCTUnwrap(URL(string: opaqueURL))
+        let request = PlaybackLoadRequest(videoURL: url, filename: stream.filename)
+        let policy = PlaybackBackendPolicy.resolve(.init(
+            urlString: opaqueURL,
+            filename: stream.filename,
+            engineSetting: .mpv,
+            requiresMPVAudioControls: false,
+            assMode: .off
+        ))
+        XCTAssertEqual(policy.backend, .aether)
+        XCTAssertFalse(PlaybackSessionCoordinator.shouldUseHybridDiskCache(isEnabled: true, request: request))
+    }
+
+    func testDMMOpaquePlayRouteReconstructsLongWrappedDiscFilename() throws {
+        let expectedMidpointFilename = "The.Wonderful.World.Of.Dune.Part.Two.2024.2160p.UHD.BluRay.HEVC.DV.TrueHD.Atmos.Remux.iso"
+        let expectedExtensionEdgeFilename = "The.Wonderful.World.Of.Dune.Part.Two.2024.2160p.UHD.BluRay.HEVC.DV.TrueHD.Atmos.Remux.iso"
+        XCTAssertGreaterThan(expectedMidpointFilename.count, 60)
+        let json = """
+        {
+            "streams": [
+                {
+                    "name": "DMM Cast for Real-Debrid",
+                    "title": "The.Wonderful.World.Of.Dune.Part.Two.2024.21-\\n60p.UHD.BluRay.HEVC.DV.TrueHD.Atmos.Remux.iso\\nAudio: TrueHD Atmos\\nCredits: DMM",
+                    "url": "https://dmm.home.example/api/stremio/user-123/play/midpoint-token?auth=opaque"
+                },
+                {
+                    "name": "DMM Cast for Real-Debrid",
+                    "title": "The.Wonderful.World.Of.Dune.Part.Two.2024.2160p.UHD.BluRay.HEVC.DV.TrueHD.Atmos.Remux.i-\\nso\\nAudio: TrueHD Atmos\\nCredits: DMM",
+                    "url": "https://dmm.home.example/api/stremio/user-123/play/extension-edge-token?auth=opaque"
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let dtos = try XCTUnwrap(response.streams)
+        let midpointStream = try XCTUnwrap(dtos[0].toNuvioStream(addonName: "DMM Cast for Real-Debrid"))
+        let extensionEdgeStream = try XCTUnwrap(dtos[1].toNuvioStream(addonName: "DMM Cast for Real-Debrid"))
+        XCTAssertEqual(midpointStream.filename, expectedMidpointFilename)
+        XCTAssertEqual(extensionEdgeStream.filename, expectedExtensionEdgeFilename)
+    }
+
+    func testDMMExplicitBehaviorHintAndClientResolveFilenamesPrecedeTitleInference() throws {
+        let json = """
+        {
+            "streams": [
+                {
+                    "name": "DMM Cast for Real-Debrid",
+                    "title": "Inferred.behavior.iso",
+                    "url": "https://dmm.example/api/stremio/user/play/behavior-token",
+                    "behaviorHints": { "filename": "Behavior.filename.mkv" },
+                    "clientResolve": { "filename": "Resolve.filename.iso" }
+                },
+                {
+                    "name": "DMM Cast for Real-Debrid",
+                    "title": "Inferred.resolve.iso",
+                    "url": "https://dmm.example/api/stremio/user/play/resolve-token",
+                    "clientResolve": { "filename": "Resolve.filename.mkv" }
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let dtos = try XCTUnwrap(response.streams)
+        let behaviorHintStream = try XCTUnwrap(dtos[0].toNuvioStream(addonName: "DMM Cast for Real-Debrid"))
+        let resolveStream = try XCTUnwrap(dtos[1].toNuvioStream(addonName: "DMM Cast for Real-Debrid"))
+        XCTAssertEqual(behaviorHintStream.filename, "Behavior.filename.mkv")
+        XCTAssertEqual(resolveStream.filename, "Resolve.filename.mkv")
+    }
+
+    func testDMMFilenameInferenceRequiresDiscFirstLineExactAddonAndExactPlayPath() throws {
+        let json = """
+        {
+            "streams": [
+                {
+                    "title": "Movie.2024.1080p.WEB-DL.mkv\\nAudio: DTS-HD MA.iso\\nCredits: backup.iso",
+                    "url": "https://dmm.example/api/stremio/user/play/valid-token"
+                },
+                {
+                    "title": "Movie.iso",
+                    "url": "https://dmm.example/api/stremio/user/play"
+                },
+                {
+                    "title": "Movie.iso",
+                    "url": "https://dmm.example/api/stremio//play/empty-user"
+                },
+                {
+                    "title": "Movie.iso",
+                    "url": "https://dmm.example/api/stremio/user/play/"
+                },
+                {
+                    "title": "Movie.iso",
+                    "url": "https://dmm.example/api/stremio/user/play/extra/path"
+                },
+                {
+                    "title": "Movie.iso",
+                    "url": "https://dmm.example/api/stremio/user/stream/not-play"
+                },
+                {
+                    "title": "Movie.iso",
+                    "url": "https://dmm.example/api/stremio/user/play/other-addon"
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let dtos = try XCTUnwrap(response.streams)
+        let dmmFilenames = dtos.prefix(6).map {
+            $0.toNuvioStream(addonName: "DMM Cast for Real-Debrid")?.filename
+        }
+        XCTAssertEqual(dmmFilenames, [nil, nil, nil, nil, nil, nil])
+        XCTAssertNil(dtos[6].toNuvioStream(addonName: "Some Other Addon")?.filename)
+    }
+
     func testOpenSubtitlesHasherComputesDeterministicChecksum() throws {
         let tempDir = FileManager.default.temporaryDirectory
         let fileURL = tempDir.appendingPathComponent("test_hasher_\\(UUID().uuidString).bin")
