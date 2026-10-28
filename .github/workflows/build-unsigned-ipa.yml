@@ -1,0 +1,58 @@
+name: Build unsigned tvOS IPA
+
+# Builds the same unsigned IPA as scripts/build-ipa.sh on a GitHub-hosted
+# macOS runner, for sideloading (AltStore, SideStore, atvloadly, ...), and
+# publishes it as a pre-release so it can be downloaded without signing in.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [tvos-plugins]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          XCODE=$(ls -d /Applications/Xcode*.app | grep -v beta | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i appletv || true
+
+      - name: Install Tuist
+        uses: jdx/mise-action@v2
+
+      - name: Build unsigned IPA
+        run: bash scripts/build-ipa.sh
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NuvioTV-unsigned-ipa
+          path: build-ipa/NuvioTV-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: plugins-build-${{ github.run_number }}
+          name: NuvioTV with Plugins (build ${{ github.run_number }})
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          body: |
+            Unsigned tvOS IPA with plugin repository support, built from ${{ github.sha }}.
+            Sign and install it with your sideloading tool (for example atvloadly).
+          files: build-ipa/NuvioTV-unsigned.ipa

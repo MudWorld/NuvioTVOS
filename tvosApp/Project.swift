@@ -139,6 +139,7 @@ let appTarget: Target = .target(
         "NuvioTV/Images.xcassets",
         "NuvioTV/Resources/AppLanguageCatalog.json",
         "NuvioTV/Resources/AppIcon.png",
+        "NuvioTV/Resources/Plugins/PluginPolyfills.js",
         "NuvioTV/Resources/AudioLicenses/*.txt",
         "NuvioTV/Fonts/inter_variable.ttf",
         "NuvioTV/SplashScreen.storyboard",
@@ -169,6 +170,7 @@ let appTarget: Target = .target(
         .package(product: "MPVKit"),
         .package(product: "SwiftAssRenderer"),
         .package(product: "Realtime"),
+        .package(product: "SwiftSoup"),
     ],
     settings: .settings(
         base: [
@@ -294,6 +296,7 @@ let project = Project(
         .local(path: "../MPVKit"),
         .package(url: "https://github.com/mihai8804858/swift-ass-renderer.git", from: "1.3.1"),
         .package(url: "https://github.com/supabase/supabase-swift.git", .exact("2.55.4")),
+        .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.7.0"),
     ],
     settings: .settings(
         base: projectBaseSettings,

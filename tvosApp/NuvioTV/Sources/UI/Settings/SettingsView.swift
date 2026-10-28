@@ -4103,6 +4103,8 @@ private struct IntegrationSettingsView: View {
     @State private var showingP2PConsent = false
     @State private var showingAddonsSettings = false
     @State private var addonSummaryCount = 0
+    @State private var showingPluginsSettings = false
+    @ObservedObject private var pluginStore = PluginStore.shared
     @State private var addonSummarySyncedAddons: [SyncedAddon]? = nil
     @StateObject private var debridConnection = DebridAccountConnectionViewModel()
 
@@ -4195,6 +4197,15 @@ private struct IntegrationSettingsView: View {
                 isEntryAnchor: true
             ) {
                 showingAddonsSettings = true
+            }
+
+            SettingsFeatureSummaryCard(
+                featureName: L10n.string("tvos_settings_plugins", fallback: "Plugins"),
+                status: settingsCountSummary(pluginStore.repositories.count, singular: "repository added", plural: "repositories added"),
+                actionSubtitle: L10n.string("tvos_settings_plugins_open_subtitle", fallback: "Add plugin repositories with JavaScript stream scrapers"),
+                accentColor: accentColor
+            ) {
+                showingPluginsSettings = true
             }
 
             SettingsGroup(
@@ -4669,6 +4680,15 @@ private struct IntegrationSettingsView: View {
                 subtitle: L10n.string("tvos_settings_stremio_compatible_catalogs_streams_and__cd03738a", fallback: "Stremio-compatible catalogs, streams, and subtitles")
             ) {
                 AddonsSettingsSection(accentColor: accentColor, onSyncedAddonsChange: receiveSyncedAddonSummary)
+            }
+            .modifier(ClearPresentationBackgroundIfAvailable())
+        }
+        .fullScreenCover(isPresented: $showingPluginsSettings) {
+            SettingsFeatureSettingsSheet(
+                title: L10n.string("tvos_settings_plugins", fallback: "Plugins"),
+                subtitle: L10n.string("tvos_settings_plugins_sheet_subtitle", fallback: "Plugin repositories (manifest.json with scrapers) for extra stream sources")
+            ) {
+                PluginsSettingsSection(accentColor: accentColor)
             }
             .modifier(ClearPresentationBackgroundIfAvailable())
         }
@@ -16814,5 +16834,161 @@ private struct UsenetServerEditSheet: View {
             isEnabled: isEnabled
         )
         UsenetSettings.upsert(saved, password: password)
+    }
+}
+
+// MARK: - Plugins
+
+/// Settings → Integrations → Plugins: JS scraper repositories in the
+/// Android/iOS plugin format (manifest.json with a `scrapers` list).
+private struct PluginsSettingsSection: View {
+    let accentColor: Color
+
+    @ObservedObject private var store = PluginStore.shared
+    @State private var repositoryURLInput = ""
+    @State private var statusMessage: String?
+    @State private var isAdding = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            SettingsGroup(
+                title: L10n.string("tvos_settings_plugins", fallback: "Plugins"),
+                subtitle: L10n.string(
+                    "tvos_settings_plugins_group_subtitle",
+                    fallback: "Plugin streams appear next to add-on streams on the details page"
+                )
+            ) {
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_plugins_enabled", fallback: "Enable Plugins"),
+                    subtitle: L10n.string("tvos_settings_plugins_enabled_subtitle", fallback: "Run enabled scrapers when searching for streams"),
+                    isOn: Binding(get: { store.pluginsEnabled }, set: { store.pluginsEnabled = $0 }),
+                    accentColor: accentColor
+                )
+                .settingsEntryAnchor()
+
+                SettingsTextFieldRow(
+                    title: L10n.string("tvos_settings_plugin_repository_url", fallback: "Repository URL"),
+                    subtitle: isAdding
+                        ? L10n.string("tvos_settings_plugin_repository_adding", fallback: "Adding repository…")
+                        : L10n.string("tvos_settings_plugin_repository_hint", fallback: "Paste a plugin repository manifest link"),
+                    placeholder: "https://.../manifest.json",
+                    text: $repositoryURLInput,
+                    fieldWidth: 560,
+                    onCommit: addRepository
+                )
+
+                if let statusMessage {
+                    SettingsInfoRow(title: L10n.string("tvos_settings_plugin_status", fallback: "Status"), value: statusMessage, isDiagnostic: true)
+                }
+
+                if PluginStreamService.tmdbApiKey == nil {
+                    SettingsInfoRow(
+                        title: L10n.string("tvos_settings_plugin_tmdb_missing", fallback: "TMDB API key missing"),
+                        value: L10n.string(
+                            "tvos_settings_plugin_tmdb_missing_detail",
+                            fallback: "Most plugins need a TMDB API key. Add yours under Integrations → TMDB."
+                        ),
+                        isDiagnostic: true
+                    )
+                }
+
+                if !store.repositories.isEmpty {
+                    SettingsActionRow(
+                        title: L10n.string("tvos_settings_plugins_refresh_all", fallback: "Refresh All"),
+                        subtitle: L10n.string("tvos_settings_plugins_refresh_all_subtitle", fallback: "Download the latest manifests and scraper code"),
+                        value: store.refreshingURLs.isEmpty ? "" : L10n.string("tvos_settings_plugins_refreshing", fallback: "Refreshing…"),
+                        accentColor: accentColor
+                    ) {
+                        Task { await store.refreshAll() }
+                    }
+                }
+            }
+
+            ForEach(store.repositories) { repository in
+                PluginRepositoryGroup(repository: repository, accentColor: accentColor)
+            }
+        }
+    }
+
+    private func addRepository() {
+        let input = repositoryURLInput
+        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isAdding else { return }
+        isAdding = true
+        statusMessage = nil
+        Task { @MainActor in
+            defer { isAdding = false }
+            do {
+                let repository = try await store.addRepository(rawURL: input)
+                repositoryURLInput = ""
+                statusMessage = L10n.format(
+                    "tvos_settings_plugin_repository_added",
+                    fallback: "Added %@ with %@ scrapers",
+                    repository.name,
+                    String(repository.scraperCount)
+                )
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct PluginRepositoryGroup: View {
+    let repository: PluginRepositoryItem
+    let accentColor: Color
+
+    @ObservedObject private var store = PluginStore.shared
+
+    private var subtitle: String {
+        var parts: [String] = []
+        if let version = repository.version, !version.isEmpty { parts.append("v\(version)") }
+        parts.append("\(repository.scraperCount) scrapers")
+        if store.refreshingURLs.contains(repository.manifestURL) {
+            parts.append(L10n.string("tvos_settings_plugins_refreshing", fallback: "Refreshing…"))
+        } else if let error = repository.errorMessage {
+            parts.append(error)
+        }
+        return parts.joined(separator: " • ") + "\n" + repository.manifestURL
+    }
+
+    var body: some View {
+        SettingsGroup(title: repository.name, subtitle: subtitle) {
+            HStack(spacing: 14) {
+                SettingsActionRow(
+                    title: L10n.string("tvos_settings_plugins_refresh", fallback: "Refresh"),
+                    subtitle: repository.description ?? "",
+                    value: "",
+                    accentColor: accentColor
+                ) {
+                    Task { await store.refresh(repository) }
+                }
+                AddonReorderButton(systemImage: "trash", disabled: false) {
+                    store.removeRepository(repository)
+                }
+            }
+
+            ForEach(store.scrapers(in: repository)) { scraper in
+                SettingsToggleRow(
+                    title: scraper.name,
+                    subtitle: scraperSubtitle(scraper),
+                    isOn: Binding(
+                        get: { scraper.enabled },
+                        set: { store.setScraper(scraper, enabled: $0) }
+                    ),
+                    accentColor: accentColor,
+                    enabled: scraper.manifestEnabled
+                )
+            }
+        }
+    }
+
+    private func scraperSubtitle(_ scraper: PluginScraper) -> String {
+        var parts: [String] = []
+        if !scraper.version.isEmpty { parts.append("v\(scraper.version)") }
+        let types = scraper.supportedTypes.map { PluginScraper.normalizedType($0) == "tv" ? "Series" : "Movies" }
+        parts.append(Array(Set(types)).sorted().joined(separator: ", "))
+        if !scraper.contentLanguage.isEmpty { parts.append(scraper.contentLanguage.joined(separator: ", ").uppercased()) }
+        if !scraper.description.isEmpty { parts.append(scraper.description) }
+        return parts.joined(separator: " • ")
     }
 }

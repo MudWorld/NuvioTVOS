@@ -276,8 +276,12 @@ final class StreamsRepository: ObservableObject {
         )
 
         let enabledURLs = addonManifestURLs
+        // JS scraper plugins (Settings → Plugins) run beside the add-ons.
+        let pluginTargets = PluginStreamService.targets(type: type)
+        let pluginTmdbApiKey = PluginStreamService.tmdbApiKey
+        let pluginSeasonEpisode = Self.seasonEpisode(fromVideoId: videoId)
 
-        guard !enabledURLs.isEmpty else {
+        guard !enabledURLs.isEmpty || !pluginTargets.isEmpty else {
             state = StreamsDiscoveryState(
                 requestKey: requestKey,
                 revision: state.revision &+ 1,
@@ -310,7 +314,7 @@ final class StreamsRepository: ObservableObject {
             )
         }
 
-        guard !targets.isEmpty else {
+        guard !targets.isEmpty || !pluginTargets.isEmpty else {
             state = StreamsDiscoveryState(
                 requestKey: requestKey,
                 revision: state.revision &+ 1,
@@ -323,7 +327,7 @@ final class StreamsRepository: ObservableObject {
         }
 
         // Create every group as loading *before* any request so chips appear immediately.
-        let initialGroups = ownedGroups + targets.map {
+        var initialGroups = ownedGroups + targets.map {
             AddonStreamGroup(
                 addonId: $0.addonId,
                 displayName: $0.displayName,
@@ -332,6 +336,16 @@ final class StreamsRepository: ObservableObject {
                 error: nil
             )
         }
+        let pluginGroups: [AddonStreamGroup] = pluginTargets.map { target in
+            AddonStreamGroup(
+                addonId: target.groupId,
+                displayName: target.scraper.name,
+                streams: [],
+                isLoading: true,
+                error: nil
+            )
+        }
+        initialGroups += pluginGroups
         state = StreamsDiscoveryState(
             requestKey: requestKey,
             revision: state.revision &+ 1,
@@ -345,6 +359,19 @@ final class StreamsRepository: ObservableObject {
             for target in targets {
                 group.addTask {
                     await Self.fetchAddonGroup(target: target, type: type, videoId: videoId)
+                }
+            }
+            for pluginTarget in pluginTargets {
+                group.addTask {
+                    let pluginGroup = await PluginStreamService.fetchGroup(
+                        target: pluginTarget,
+                        type: type,
+                        videoId: videoId,
+                        season: pluginSeasonEpisode.season,
+                        episode: pluginSeasonEpisode.episode,
+                        tmdbApiKey: pluginTmdbApiKey
+                    )
+                    return GroupUpdate(addonId: pluginTarget.groupId, group: pluginGroup)
                 }
             }
 
