@@ -42,8 +42,12 @@ struct LoginView: View {
             HStack(alignment: .center, spacing: 64) {
                 leftPane
                     .frame(maxWidth: .infinity, alignment: .leading)
-                rightPane
-                    .frame(width: 760)
+                WatchPartyLoginPanel {
+                    auth.skipLogin()
+                    triggerContinue()
+                }
+                .loginGlassPanel()
+                .frame(width: 760)
             }
             .padding(.horizontal, 120)
             .padding(.vertical, 80)
@@ -53,7 +57,6 @@ struct LoginView: View {
                 triggerContinue()
                 return
             }
-            selectSupportedMethod(startQR: true)
         }
         .onDisappear { auth.stopQrLogin() }
         .onChange(of: method) { _, newMethod in

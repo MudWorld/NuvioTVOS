@@ -1693,6 +1693,46 @@ private struct SettingsCategoryPillBackground: ViewModifier {
     }
 }
 
+private struct WatchPartyAccountGroup: View {
+    let accentColor: Color
+    @ObservedObject private var account = WatchPartyAccount.shared
+    @State private var invite: String?
+    @State private var showingLogin = false
+
+    var body: some View {
+        SettingsGroup(title: "WatchParty-Konto", subtitle: "Synchronisiert alle 10 Minuten, beim Pausieren oder Schließen eines Videos und beim Verlassen der App") {
+            if let session = account.session {
+                SettingsInfoRow(title: "Angemeldet als", value: session.username)
+                SettingsInfoRow(
+                    title: "Status",
+                    value: account.isSyncing ? "Synchronisiere …"
+                        : account.pendingRelaunch ? "Neue Daten da – App neu öffnen"
+                        : account.lastError ?? (account.lastSync == nil ? "Automatisch" : "Alles synchronisiert")
+                )
+                SettingsActionRow(title: "Jetzt synchronisieren", subtitle: "Änderungen hochladen und neue Daten holen", value: "Sync", accentColor: accentColor) {
+                    Task { await account.syncNow() }
+                }
+                if session.isAdmin {
+                    SettingsActionRow(title: "Einladungscode erstellen", subtitle: invite.map { "Code (14 Tage, einmalig): \($0)" } ?? "Für Familie und Freunde", value: "Erstellen", accentColor: accentColor) {
+                        Task { invite = try? await account.createInvite() }
+                    }
+                }
+                SettingsActionRow(title: "Abmelden", subtitle: "Deine Daten bleiben im Konto", value: "Abmelden", accentColor: accentColor) {
+                    Task { await account.signOut() }
+                }
+            } else {
+                SettingsActionRow(title: "Anmelden oder Konto erstellen", subtitle: "Profile, Addons, Sammlungen und Fortschritt auf allen Geräten", value: "Öffnen", accentColor: accentColor) {
+                    showingLogin = true
+                }
+                .fullScreenCover(isPresented: $showingLogin) {
+                    WatchPartyLoginPanel { showingLogin = false }
+                        .background(Color.black.opacity(0.92).ignoresSafeArea())
+                }
+            }
+        }
+    }
+}
+
 private struct AccountSettingsView: View {
     let accentColor: Color
     let activeProfile: Profile?
@@ -1732,6 +1772,7 @@ private struct AccountSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
+            WatchPartyAccountGroup(accentColor: accentColor)
             SettingsGroup(
                 title: L10n.string("settings_profiles", fallback: "Profiles"),
                 subtitle: L10n.string(

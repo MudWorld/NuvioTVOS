@@ -18,6 +18,8 @@ import AetherEngine
 @main
 struct NuvioTVApp: App {
     init() {
+        WatchPartyAccount.prepareOnLaunch()
+        Task { @MainActor in WatchPartyAccount.shared.start() }
         let totalRam = ProcessInfo.processInfo.physicalMemory
         let isLegacyDevice = totalRam <= 2_500_000_000 // <= 2.5 GB (Apple TV HD)
         let memCapacity = isLegacyDevice ? (12 * 1024 * 1024) : (32 * 1024 * 1024)
@@ -786,6 +788,7 @@ struct ContentView: View {
                 watchPartyOwner.suspendForInactivity()
                 backgroundedAt = Date()
                 syncManager.flushPendingPushes()
+                Task { try? await WatchPartyAccount.shared.pushChanges(force: false) }
             case .active:
                 if backgroundedAt != nil {
                     releaseUpdateService.beginForegroundSession()
