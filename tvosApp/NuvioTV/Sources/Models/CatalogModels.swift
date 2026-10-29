@@ -3468,7 +3468,7 @@ enum ContinueWatchingStore {
     @discardableResult
     private static func persist(_ items: [ContinueWatchingItem]) -> Bool {
         Task { @MainActor in WatchPartyAccount.shared.requestSync() }
-        TVHomeDebugTrace.measure("cw.persist items=\(items.count)") {
+        return TVHomeDebugTrace.measure("cw.persist items=\(items.count)") {
             let persistStarted = TVHomeDebugTrace.now()
             let storedItems = Array(items.prefix(maxItems))
             let key = storageKey
