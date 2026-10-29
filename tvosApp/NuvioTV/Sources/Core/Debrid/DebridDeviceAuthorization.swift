@@ -266,7 +266,7 @@ struct DebridDeviceAuthorizationService {
 
     private func startTorbox() async throws -> DebridDeviceAuthorization {
         var components = URLComponents(string: "https://api.torbox.app/v1/api/user/auth/device/start")!
-        components.queryItems = [URLQueryItem(name: "app", value: "Nuvio")]
+        components.queryItems = [URLQueryItem(name: "app", value: "WatchParty")]
         guard let url = components.url else { throw DebridDeviceAuthorizationError.message("Invalid Torbox sign-in URL.") }
 
         let (data, response) = try await data(for: URLRequest(url: url))

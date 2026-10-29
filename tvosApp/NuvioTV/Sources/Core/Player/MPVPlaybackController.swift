@@ -60,7 +60,7 @@ struct MPVPlaybackLifecycleRestorePlan: Equatable {
 }
 
 enum MPVPlaybackLifecyclePolicy {
-    static let restoreFailureMessage = "Playback could not resume after returning to Nuvio."
+    static let restoreFailureMessage = "Playback could not resume after returning to WatchParty."
 
     static func canIssueRestore(pending: Bool, applicationIsActive: Bool, displayIsSafe: Bool) -> Bool {
         pending && applicationIsActive && displayIsSafe

@@ -42,7 +42,7 @@ struct ReauthSheet: View {
                         .font(.system(size: 30, weight: .semibold))
                         .foregroundColor(Color(red: 1.0, green: 0.72, blue: 0.2))
 
-                    Text(L10n.string("reauth_title", fallback: "Reconnect Nuvio Account"))
+                    Text(L10n.string("reauth_title", fallback: "Reconnect WatchParty Account"))
                         .font(.system(size: 38, weight: .bold))
                         .foregroundColor(.white)
                 }

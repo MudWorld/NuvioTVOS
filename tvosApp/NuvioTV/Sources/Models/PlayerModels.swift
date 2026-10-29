@@ -174,7 +174,7 @@ enum QualityOption: Identifiable, Equatable {
 /// engine. `.builtIn` plays in-app; the rest build a deep link that opens an
 /// installed tvOS app with the stream URL (and optional subtitle URLs).
 enum ExternalPlayer: String, CaseIterable, Identifiable {
-    case builtIn = "Nuvio (Built-in)"
+    case builtIn = "WatchParty (Built-in)"
     case infuse = "Infuse"
     case vlc = "VLC"
     case outplayer = "Outplayer"

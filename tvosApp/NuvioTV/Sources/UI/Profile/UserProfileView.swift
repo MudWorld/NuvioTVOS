@@ -66,7 +66,7 @@ public struct UserProfileView: View {
 
                             Text(L10n.string(
                                 "profile_account_sync_compatibility_message",
-                                fallback: "Update all Nuvio clients to their latest versions, then select Retry. Older clients cannot sync account data."
+                                fallback: "Update all WatchParty clients to their latest versions, then select Retry. Older clients cannot sync account data."
                             ))
                                 .font(.custom("Inter-Regular", size: 16))
                                 .foregroundColor(.white.opacity(0.72))

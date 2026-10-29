@@ -1707,7 +1707,7 @@ private struct AccountSettingsView: View {
     let onSignOut: (() -> Void)?
     let onPresentPin: (ProfilePinSheetMode) -> Void
 
-    @AppStorage(SettingsKey.profileName) private var profileName = "Nuvio User"
+    @AppStorage(SettingsKey.profileName) private var profileName = "WatchParty User"
     @AppStorage(SettingsKey.profileAutoSelectLast, store: .standard) private var autoSelectLastProfile = true
     @AppStorage(SettingsKey.profileRequireSelectionAfterBackground, store: .standard)
     private var requireProfileSelectionAfterBackground = false
@@ -1791,7 +1791,7 @@ private struct AccountSettingsView: View {
                     title: L10n.string("profile_choose_avatar", fallback: "Choose Avatar"),
                     subtitle: L10n.string(
                         "tvos_profile_avatar_subtitle",
-                        fallback: "Choose the avatar shown across Nuvio"
+                        fallback: "Choose the avatar shown across WatchParty"
                     ),
                     value: L10n.string("profile_edit_label", fallback: "Edit"),
                     accentColor: accentColor
@@ -1834,7 +1834,7 @@ private struct AccountSettingsView: View {
                     ),
                     subtitle: L10n.string(
                         "profile_select_on_return_subtitle",
-                        fallback: "Ask who's watching whenever Nuvio returns from the background"
+                        fallback: "Ask who's watching whenever WatchParty returns from the background"
                     ),
                     isOn: $requireProfileSelectionAfterBackground,
                     accentColor: accentColor
@@ -1932,7 +1932,7 @@ private struct AccountSettingsView: View {
                         title: L10n.string("tvos_account_sign_out", fallback: "Sign Out"),
                         subtitle: L10n.string(
                             "tvos_account_sign_out_subtitle",
-                            fallback: "Remove this Nuvio account from this Apple TV"
+                            fallback: "Remove this WatchParty account from this Apple TV"
                         ),
                         value: L10n.string("action_disconnect", fallback: "Disconnect"),
                         accentColor: Color(red: 1.0, green: 0.43, blue: 0.43)
@@ -1946,7 +1946,7 @@ private struct AccountSettingsView: View {
                         title: L10n.string("tvos_account_sign_in", fallback: "Sign In"),
                         subtitle: L10n.string(
                             "tvos_account_sign_in_subtitle",
-                            fallback: "Connect a Nuvio account to sync profiles, add-ons, and progress"
+                            fallback: "Connect a WatchParty account to sync profiles, add-ons, and progress"
                         ),
                         value: L10n.string("action_connect", fallback: "Connect"),
                         accentColor: accentColor
@@ -1979,7 +1979,7 @@ private struct AccountSettingsView: View {
     }
 
     private var displayProfileName: String {
-        if !isAuthenticated, activeProfile == nil { return L10n.string("tvos_settings_nuvio_guest", fallback: "Nuvio Guest") }
+        if !isAuthenticated, activeProfile == nil { return L10n.string("tvos_settings_nuvio_guest", fallback: "WatchParty Guest") }
         return ProfileDisplayName.resolve(profile: activeProfile, settingsName: profileName)
     }
 
@@ -4238,7 +4238,7 @@ private struct IntegrationSettingsView: View {
                 )
 
                 SettingsToggleRow(
-                    title: L10n.string("tvos_settings_nuvio_sync_scrobble", fallback: "Nuvio Sync"),
+                    title: L10n.string("tvos_settings_nuvio_sync_scrobble", fallback: "WatchParty Sync"),
                     subtitle: L10n.string(
                         "tvos_settings_nuvio_sync_scrobble_subtitle",
                         fallback: "Also save playback progress and watched episodes when another source is selected."
@@ -5884,7 +5884,7 @@ private struct DebridDeviceAuthorizationSheet: View {
                     .frame(height: 380)
                 statusText
             } else if let authorization = viewModel.authorization {
-                Text(L10n.string("debrid_device_auth_instructions", fallback: "Scan the QR and enter this code to approve Nuvio."))
+                Text(L10n.string("debrid_device_auth_instructions", fallback: "Scan the QR and enter this code to approve WatchParty."))
                     .font(.system(size: 25, weight: .medium))
                     .foregroundColor(.white.opacity(0.68))
                     .multilineTextAlignment(.center)
@@ -6149,7 +6149,7 @@ private struct TraktConnectedSettingsSheet: View {
 
                         SettingsGroup(
                             title: L10n.string("tvos_settings_trakt_features", fallback: "Trakt Features"),
-                            subtitle: L10n.string("tvos_settings_trakt_features_subtitle", fallback: "Choose how Trakt is used throughout Nuvio")
+                            subtitle: L10n.string("tvos_settings_trakt_features_subtitle", fallback: "Choose how Trakt is used throughout WatchParty")
                         ) {
                             SettingsToggleRow(
                                 title: L10n.string("tvos_settings_trakt_scrobble", fallback: "Scrobble Playback"),
@@ -6218,7 +6218,7 @@ private struct TraktConnectedSettingsSheet: View {
 
                         SettingsGroup(
                             title: L10n.string("account_login", fallback: "Account Login"),
-                            subtitle: L10n.string("tvos_settings_trakt_account_login_subtitle", fallback: "Manage the Trakt connection for this Nuvio profile")
+                            subtitle: L10n.string("tvos_settings_trakt_account_login_subtitle", fallback: "Manage the Trakt connection for this WatchParty profile")
                         ) {
                             SettingsActionRow(
                                 title: L10n.string("debrid_disconnect", fallback: "Disconnect"),
@@ -6890,7 +6890,7 @@ private struct MdbListConnectedSettingsSheet: View {
 
                             SettingsChoiceRow(
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
-                                subtitle: L10n.string("tvos_settings_mdblist_library_source_subtitle", fallback: "Use MDBList collection and watchlist as your Nuvio library"),
+                                subtitle: L10n.string("tvos_settings_mdblist_library_source_subtitle", fallback: "Use MDBList collection and watchlist as your WatchParty library"),
                                 selection: librarySourceSelection,
                                 options: RemoteTrackingState.availableLibrarySources().map(\.label),
                                 accentColor: accentColor
@@ -6907,7 +6907,7 @@ private struct MdbListConnectedSettingsSheet: View {
 
                         SettingsGroup(
                             title: L10n.string("account_login", fallback: "Account Login"),
-                            subtitle: L10n.string("tvos_settings_mdblist_account_login_subtitle", fallback: "Manage the MDBList connection for this Nuvio profile")
+                            subtitle: L10n.string("tvos_settings_mdblist_account_login_subtitle", fallback: "Manage the MDBList connection for this WatchParty profile")
                         ) {
                             SettingsActionRow(
                                 title: L10n.string("debrid_disconnect", fallback: "Disconnect"),
@@ -7196,7 +7196,7 @@ private struct SimklConnectedSettingsSheet: View {
 
                         SettingsGroup(
                             title: L10n.string("tvos_settings_simkl_features", fallback: "Simkl Features"),
-                            subtitle: L10n.string("tvos_settings_simkl_features_subtitle", fallback: "Choose how Simkl is used throughout Nuvio")
+                            subtitle: L10n.string("tvos_settings_simkl_features_subtitle", fallback: "Choose how Simkl is used throughout WatchParty")
                         ) {
                             SettingsToggleRow(
                                 title: L10n.string("tvos_settings_simkl_scrobble", fallback: "Scrobble Playback"),
@@ -7213,7 +7213,7 @@ private struct SimklConnectedSettingsSheet: View {
 
                             SettingsChoiceRow(
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
-                                subtitle: L10n.string("tvos_settings_simkl_library_source_subtitle", fallback: "Use Simkl Plan to Watch as your Nuvio library"),
+                                subtitle: L10n.string("tvos_settings_simkl_library_source_subtitle", fallback: "Use Simkl Plan to Watch as your WatchParty library"),
                                 selection: librarySourceSelection,
                                 options: RemoteTrackingState.availableLibrarySources().map(\.label),
                                 accentColor: accentColor
@@ -7264,7 +7264,7 @@ private struct SimklConnectedSettingsSheet: View {
                         ) {
                             SettingsActionRow(
                                 title: L10n.string("tvos_settings_simkl_transfer_to_simkl", fallback: "Transfer to Simkl"),
-                                subtitle: L10n.string("tvos_settings_simkl_transfer_source_subtitle", fallback: "Choose Nuvio Sync or a connected Trakt account as the source"),
+                                subtitle: L10n.string("tvos_settings_simkl_transfer_source_subtitle", fallback: "Choose WatchParty Sync or a connected Trakt account as the source"),
                                 value: viewModel.isTransferringHistory
                                     ? "\(viewModel.historyTransferProgress ?? 1)%"
                                     : L10n.string("tvos_settings_choose_source", fallback: "Choose Source"),
@@ -7306,7 +7306,7 @@ private struct SimklConnectedSettingsSheet: View {
                         ) {
                             SettingsActionRow(
                                 title: L10n.string("tvos_settings_simkl_transfer_to_plan_to_watch", fallback: "Transfer to Simkl Plan to Watch"),
-                                subtitle: L10n.string("tvos_settings_simkl_transfer_library_source_subtitle", fallback: "Choose Nuvio Library or a connected Trakt account as the source"),
+                                subtitle: L10n.string("tvos_settings_simkl_transfer_library_source_subtitle", fallback: "Choose WatchParty Library or a connected Trakt account as the source"),
                                 value: viewModel.isTransferringLibrary
                                     ? "\(viewModel.libraryTransferProgress ?? 1)%"
                                     : L10n.string("tvos_settings_choose_source", fallback: "Choose Source"),
@@ -7348,7 +7348,7 @@ private struct SimklConnectedSettingsSheet: View {
                         ) {
                             SettingsActionRow(
                                 title: L10n.string("tvos_settings_simkl_transfer_progress_to_simkl", fallback: "Transfer Progress to Simkl"),
-                                subtitle: L10n.string("tvos_settings_simkl_transfer_source_subtitle", fallback: "Choose Nuvio Sync or a connected Trakt account as the source"),
+                                subtitle: L10n.string("tvos_settings_simkl_transfer_source_subtitle", fallback: "Choose WatchParty Sync or a connected Trakt account as the source"),
                                 value: viewModel.isTransferringProgress
                                     ? "\(viewModel.progressTransferProgress ?? 1)%"
                                     : L10n.string("tvos_settings_choose_source", fallback: "Choose Source"),
@@ -7386,7 +7386,7 @@ private struct SimklConnectedSettingsSheet: View {
 
                         SettingsGroup(
                             title: L10n.string("account_login", fallback: "Account Login"),
-                            subtitle: L10n.string("tvos_settings_simkl_account_login_subtitle", fallback: "Manage the Simkl connection for this Nuvio profile")
+                            subtitle: L10n.string("tvos_settings_simkl_account_login_subtitle", fallback: "Manage the Simkl connection for this WatchParty profile")
                         ) {
                             if viewModel.isLegacyV1, let onReconnect {
                                 SettingsActionRow(
@@ -7470,7 +7470,7 @@ private struct SimklConnectedSettingsSheet: View {
             isPresented: $showingHistoryTransferSources,
             titleVisibility: .visible
         ) {
-            Button("From Nuvio Sync") {
+            Button("From WatchParty Sync") {
                 viewModel.transferWatchHistory(from: .nuvioSync)
             }
             if viewModel.isTraktTransferAvailable {
@@ -7487,7 +7487,7 @@ private struct SimklConnectedSettingsSheet: View {
             isPresented: $showingLibraryTransferSources,
             titleVisibility: .visible
         ) {
-            Button("From Nuvio Library") {
+            Button("From WatchParty Library") {
                 viewModel.transferLibrary(from: .nuvioLibrary)
             }
             if viewModel.isTraktTransferAvailable {
@@ -7504,7 +7504,7 @@ private struct SimklConnectedSettingsSheet: View {
             isPresented: $showingProgressTransferSources,
             titleVisibility: .visible
         ) {
-            Button("From Nuvio Sync") {
+            Button("From WatchParty Sync") {
                 viewModel.transferProgress(from: .nuvioSync)
             }
             if viewModel.isTraktTransferAvailable {
@@ -8108,7 +8108,7 @@ private struct WeTrakrConnectedSettingsSheet: View {
 
                         SettingsGroup(
                             title: L10n.string("tvos_settings_wetrakr_features", fallback: "WeTrakr Features"),
-                            subtitle: L10n.string("tvos_settings_wetrakr_features_subtitle", fallback: "Choose how WeTrakr is used throughout Nuvio")
+                            subtitle: L10n.string("tvos_settings_wetrakr_features_subtitle", fallback: "Choose how WeTrakr is used throughout WatchParty")
                         ) {
                             SettingsToggleRow(
                                 title: L10n.string("tvos_settings_wetrakr_scrobble", fallback: "Scrobble Playback"),
@@ -8125,7 +8125,7 @@ private struct WeTrakrConnectedSettingsSheet: View {
 
                             SettingsChoiceRow(
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
-                                subtitle: L10n.string("tvos_settings_wetrakr_library_source_subtitle", fallback: "Use WeTrakr tracking lists as your Nuvio library"),
+                                subtitle: L10n.string("tvos_settings_wetrakr_library_source_subtitle", fallback: "Use WeTrakr tracking lists as your WatchParty library"),
                                 selection: librarySourceSelection,
                                 options: RemoteTrackingState.availableLibrarySources().map(\.label),
                                 accentColor: accentColor
@@ -8142,7 +8142,7 @@ private struct WeTrakrConnectedSettingsSheet: View {
 
                         SettingsGroup(
                             title: L10n.string("account_login", fallback: "Account Login"),
-                            subtitle: L10n.string("tvos_settings_wetrakr_account_login_subtitle", fallback: "Manage the WeTrakr connection for this Nuvio profile")
+                            subtitle: L10n.string("tvos_settings_wetrakr_account_login_subtitle", fallback: "Manage the WeTrakr connection for this WatchParty profile")
                         ) {
                             SettingsActionRow(
                                 title: L10n.string("debrid_disconnect", fallback: "Disconnect"),
@@ -9957,7 +9957,7 @@ private struct AboutSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup(title: L10n.string("tvos_settings_nuviotv", fallback: "NuvioTV"), subtitle: L10n.string("tvos_settings_build_and_runtime_information", fallback: "Build and runtime information")) {
+            SettingsGroup(title: L10n.string("tvos_settings_nuviotv", fallback: "WatchParty"), subtitle: L10n.string("tvos_settings_build_and_runtime_information", fallback: "Build and runtime information")) {
                 SettingsInfoRow(title: L10n.string("tvos_settings_app_version", fallback: "App Version"), value: appVersion)
                 SettingsInfoRow(
                     title: L10n.string("release_update_latest_version", fallback: "Latest Version"),
@@ -9981,7 +9981,7 @@ private struct AboutSettingsView: View {
                 }
                 SettingsToggleRow(
                     title: L10n.string("release_update_check_toggle", fallback: "Check for Updates"),
-                    subtitle: L10n.string("release_update_check_toggle_subtitle", fallback: "Check GitHub for a newer NuvioTV release"),
+                    subtitle: L10n.string("release_update_check_toggle_subtitle", fallback: "Check GitHub for a newer WatchParty release"),
                     isOn: Binding(
                         get: { releaseUpdateService.isEnabled },
                         set: {
@@ -10027,42 +10027,6 @@ private struct AboutSettingsView: View {
                 SettingsInfoRow(title: L10n.string("tvos_settings_catalog_protocol", fallback: "Catalog Protocol"), value: L10n.string("tvos_settings_stremio_compatible", fallback: "Stremio compatible"))
             }
 
-            SettingsGroup(
-                title: L10n.string("announcements_title", fallback: "Announcements"),
-                subtitle: L10n.string("announcements_settings_subtitle", fallback: "Messages from the NuvioTV maintainers")
-            ) {
-                SettingsInfoRow(
-                    title: L10n.string("announcements_status", fallback: "Message Status"),
-                    value: announcementService.status
-                )
-                SettingsToggleRow(
-                    title: L10n.string("announcements_check_toggle", fallback: "Check for Announcements"),
-                    subtitle: L10n.string("announcements_check_toggle_subtitle", fallback: "Check for notices from the NuvioTV maintainers"),
-                    isOn: Binding(
-                        get: { announcementService.isEnabled },
-                        set: {
-                            announcementService.setEnabled($0)
-                            if $0 {
-                                Task { await announcementService.checkIfNeeded() }
-                            }
-                        }
-                    ),
-                    accentColor: accentColor
-                )
-                if let announcement = announcementService.firstActiveAnnouncement {
-                    SettingsActionRow(
-                        title: L10n.string("announcement_read_message", fallback: "Read Message"),
-                        subtitle: announcement.title,
-                        value: L10n.string("tvos_settings_view", fallback: "View"),
-                        accentColor: accentColor
-                    ) {
-                        selectedAnnouncement = announcement
-                    }
-                }
-            }
-            .sheet(item: $selectedAnnouncement) { announcement in
-                AppNoticeDetailsSheet(notice: .announcement(announcement))
-            }
 
             SettingsGroup(
                 title: L10n.string("about_licenses_attributions", fallback: "Open Source"),
@@ -10142,7 +10106,7 @@ private struct SideloadUpdatesSheet: View {
 
                         Text(L10n.string(
                             "sideload_updates_description",
-                            fallback: "Install new NuvioTV versions with atvloadly, the self-hosted signer on your network. NuvioTV has to be linked to a source there (More → Track updates)."
+                            fallback: "Install new WatchParty versions with atvloadly, the self-hosted signer on your network. WatchParty has to be linked to a source there (More → Track updates)."
                         ))
                         .font(.system(size: 20, weight: .medium))
                         .foregroundColor(.white.opacity(0.62))
@@ -10178,7 +10142,7 @@ private struct SideloadUpdatesSheet: View {
                                 title: L10n.string("atvloadly_auto_install", fallback: "Install Updates Automatically"),
                                 subtitle: L10n.string(
                                     "atvloadly_auto_install_subtitle",
-                                    fallback: "Off by default. Installs a new version from the Home screen after a 10-second countdown, never during playback. NuvioTV closes while it updates."
+                                    fallback: "Off by default. Installs a new version from the Home screen after a 10-second countdown, never during playback. WatchParty closes while it updates."
                                 ),
                                 isOn: Binding(
                                     get: { atvloadlyService.installsAutomatically },
@@ -10189,7 +10153,7 @@ private struct SideloadUpdatesSheet: View {
                             if atvloadlyService.entries.count > 1 {
                                 SettingsActionRow(
                                     title: L10n.string("atvloadly_device", fallback: "Apple TV"),
-                                    subtitle: L10n.string("atvloadly_device_subtitle", fallback: "atvloadly has NuvioTV for several Apple TVs"),
+                                    subtitle: L10n.string("atvloadly_device_subtitle", fallback: "atvloadly has WatchParty for several Apple TVs"),
                                     value: atvloadlyService.selectedEntry?.deviceLabel
                                         ?? L10n.string("atvloadly_device_choose", fallback: "Choose"),
                                     accentColor: accentColor
@@ -10253,8 +10217,8 @@ private struct LicensesAttributionsSheet: View {
     private let appEntries: [LicenseEntry] = [
         LicenseEntry(
             id: "nuvio",
-            title: L10n.string("tvos_settings_nuviotv", fallback: "NuvioTV"),
-            body: "Native Apple TV app for browsing Stremio-compatible catalogs and playing streams.",
+            title: "Basiert auf Nuvio",
+            body: "WatchParty basiert auf NuvioTV (GPL-3.0). Quellcode: github.com/MudWorld/NuvioTVOS",
             license: "GPL-3.0"
         )
     ]
@@ -15128,7 +15092,7 @@ private struct ImportCollectionsSheet: View {
                     .font(.system(size: 40, weight: .bold))
                     .foregroundColor(.white)
 
-                Text(L10n.string("tvos_settings_import_a_nuvio_collections_json_export_s_e61b6e41", fallback: "Import a Nuvio collections JSON export (same format as Android). Use a prior Apple TV export, or host the JSON and fetch by URL."))
+                Text(L10n.string("tvos_settings_import_a_nuvio_collections_json_export_s_e61b6e41", fallback: "Import a WatchParty collections JSON export (same format as Android). Use a prior Apple TV export, or host the JSON and fetch by URL."))
                     .font(.system(size: 22, weight: .regular))
                     .foregroundColor(.white.opacity(0.6))
                     .fixedSize(horizontal: false, vertical: true)
@@ -16677,7 +16641,7 @@ private struct UsenetConnectionsGuide: View {
         [
             L10n.string(
                 "usenet_connections_guide_plan",
-                fallback: "Never more than your plan allows: the server turns the rest away and Nuvio keeps to the ones it accepted."
+                fallback: "Never more than your plan allows: the server turns the rest away and WatchParty keeps to the ones it accepted."
             ),
             L10n.string(
                 "usenet_connections_guide_line",

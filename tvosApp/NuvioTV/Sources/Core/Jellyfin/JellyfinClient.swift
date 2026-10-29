@@ -75,7 +75,7 @@ struct JellyfinClient {
     // MARK: - Headers
 
     private static func authorizationHeader(token: String? = nil) -> String {
-        var header = "MediaBrowser Client=\"Nuvio\", Device=\"Apple TV\", DeviceId=\"\(deviceId)\", Version=\"1.0.0\""
+        var header = "MediaBrowser Client=\"WatchParty\", Device=\"Apple TV\", DeviceId=\"\(deviceId)\", Version=\"1.0.0\""
         if let token, !token.isEmpty {
             header += ", Token=\"\(token)\""
         }

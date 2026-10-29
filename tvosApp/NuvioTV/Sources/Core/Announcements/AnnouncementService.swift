@@ -72,7 +72,7 @@ final class AnnouncementService: ObservableObject {
         self.defaults = defaults
         self.session = session
         self.now = now
-        isEnabled = (defaults.object(forKey: Self.enabledKey) as? Bool) ?? true
+        isEnabled = false // WatchParty: no upstream announcement feed
 
         if let cached = Self.validatedCachedFeed(in: defaults) {
             allAnnouncements = cached
@@ -177,7 +177,7 @@ final class AnnouncementService: ObservableObject {
         var request = URLRequest(url: Self.feedEndpoint)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("NuvioTV", forHTTPHeaderField: "User-Agent")
+        request.setValue("WatchParty", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await session.data(for: request)

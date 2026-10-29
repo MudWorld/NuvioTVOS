@@ -16,6 +16,6 @@ struct AddonItem: Identifiable, Equatable {
     static let defaults: [AddonItem] = [
         AddonItem(id: "cinemeta", name: "Cinemeta", description: "The official addon for movie and series catalogs", version: "3.0.14", logoSystemName: "arrow.triangle.2.circlepath", isOfficial: true, isInstalled: true),
         AddonItem(id: "opensubtitles-v3", name: "OpenSubtitles v3", description: "OpenSubtitles v3 Addon for Stremio", version: "1.0.0", logoSystemName: "captions.bubble.fill", isOfficial: true, isInstalled: true),
-        AddonItem(id: "youtube", name: "YouTube", description: "Watch official trailers and free YouTube channels directly inside Nuvio.", version: "2.1.0", logoSystemName: "video.fill", isOfficial: false, isInstalled: true)
+        AddonItem(id: "youtube", name: "YouTube", description: "Watch official trailers and free YouTube channels directly inside WatchParty.", version: "2.1.0", logoSystemName: "video.fill", isOfficial: false, isInstalled: true)
     ]
 }

@@ -54,7 +54,7 @@ struct ReleaseUpdateMetadata: Codable, Equatable, Identifiable {
               components.password == nil,
               components.query == nil,
               components.fragment == nil,
-              components.path == "/bobsupra/NuvioTVOS/releases/tag/\(tagName)" else {
+              components.path == "/MudWorld/NuvioTVOS/releases/tag/\(tagName)" else {
             return nil
         }
         self.tagName = tagName
@@ -68,7 +68,7 @@ final class ReleaseUpdateService: ObservableObject {
     static let lastAttemptKey = "releaseUpdatesLastAttempt"
     static let cachedReleaseKey = "releaseUpdatesCachedRelease"
     static let skippedTagKey = "releaseUpdatesSkippedTag"
-    static let latestReleaseEndpoint = URL(string: "https://api.github.com/repos/bobsupra/NuvioTVOS/releases/latest")!
+    static let latestReleaseEndpoint = URL(string: "https://api.github.com/repos/MudWorld/NuvioTVOS/releases/latest")!
 
     private struct GitHubRelease: Decodable {
         let tagName: String
@@ -203,7 +203,7 @@ final class ReleaseUpdateService: ObservableObject {
         request.httpMethod = "GET"
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("2026-03-10", forHTTPHeaderField: "X-GitHub-Api-Version")
-        request.setValue("NuvioTV", forHTTPHeaderField: "User-Agent")
+        request.setValue("WatchParty", forHTTPHeaderField: "User-Agent")
 
         var validatedRelease: ReleaseUpdateMetadata?
         do {

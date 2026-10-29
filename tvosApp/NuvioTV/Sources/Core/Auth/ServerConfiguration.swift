@@ -96,7 +96,7 @@ enum ServerDiscoveryPolicy {
         components?.path = path.isEmpty ? "" : "/" + path
         guard let normalized = components?.url else { throw ServerDiscoveryError.invalidURL("Invalid backend URL.") }
         let result = normalized.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard normalizedHost(url) != "api.nuvio.tv" else { throw ServerDiscoveryError.invalidURL("Use Official Server for the Nuvio backend.") }
+        guard normalizedHost(url) != "api.nuvio.tv" else { throw ServerDiscoveryError.invalidURL("Use Official Server for the WatchParty backend.") }
         return URL(string: result)!
     }
 
@@ -119,7 +119,7 @@ enum ServerDiscoveryPolicy {
         do { object = try JSONDecoder().decode(DiscoveryDocument.self, from: data) }
         catch { throw ServerDiscoveryError.invalidDocument("The server returned an invalid discovery document.") }
         guard object.version == 1, object.service.lowercased() == "nuvio", object.selfHosted else {
-            throw ServerDiscoveryError.invalidDocument("This is not a supported self-hosted Nuvio server.")
+            throw ServerDiscoveryError.invalidDocument("This is not a supported self-hosted WatchParty server.")
         }
         let backend = try normalizeInput(object.backendURL)
         guard backend.host?.lowercased() != "api.nuvio.tv" else { throw ServerDiscoveryError.invalidDocument("The official backend cannot be selected as self-hosted.") }
@@ -145,7 +145,7 @@ enum ServerDiscoveryPolicy {
         if url.scheme?.lowercased() == "http" { result.append("HTTP is not encrypted; use HTTPS when possible.") }
         let host = url.host?.lowercased() ?? ""
         let isPrivate = host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasPrefix("10.") || host.hasPrefix("192.168.") || host.hasPrefix("172.16.")
-        if !isPrivate && !host.hasSuffix(".nuvio.tv") { result.append("This host is public and has not been verified by Nuvio.") }
+        if !isPrivate && !host.hasSuffix(".nuvio.tv") { result.append("This host is public and has not been verified by WatchParty.") }
         return result
     }
 

@@ -229,7 +229,7 @@ final class AuthManager: ObservableObject {
                 if let self, self.isCurrent(operation),
                    let authError = error as? AuthError, Self.isCredentialRejection(authError) {
                     self.sessionNeedsReauthentication = true
-                    print("Nuvio session cannot be renewed (\(authError.message)). Sign in again to resume sync.")
+                    print("WatchParty session cannot be renewed (\(authError.message)). Sign in again to resume sync.")
                 }
                 return nil
             }
@@ -264,7 +264,7 @@ final class AuthManager: ObservableObject {
             // Do not strand a successful login on Home just because secure
             // persistence is unavailable in this simulator/install. The live
             // in-memory session remains valid for all sync requests.
-            print("Nuvio session is active, but secure persistence failed.")
+            print("WatchParty session is active, but secure persistence failed.")
         }
         authState = .fullAccount(userId: session.userId, email: session.email ?? "")
     }

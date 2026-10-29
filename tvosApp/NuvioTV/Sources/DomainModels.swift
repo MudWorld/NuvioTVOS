@@ -371,7 +371,7 @@ public class ProfileManager {
 
     private static func sanitizedProfileName(_ name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = trimmed.isEmpty ? "Nuvio User" : trimmed
+        let value = trimmed.isEmpty ? "WatchParty User" : trimmed
         return String(value.prefix(maxProfileNameCharacters))
     }
 
@@ -626,32 +626,32 @@ public class ProfileViewModel: ObservableObject {
         var candidates: [URL] = []
 
         if let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            candidates.append(caches.appendingPathComponent("Nuvio", isDirectory: true))
+            candidates.append(caches.appendingPathComponent("NuvioTV", isDirectory: true))
         }
 
         if let applicationSupport = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first {
-            candidates.append(applicationSupport.appendingPathComponent("Nuvio", isDirectory: true))
+            candidates.append(applicationSupport.appendingPathComponent("NuvioTV", isDirectory: true))
         }
 
         let homeLibrary = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
             .appendingPathComponent("Library", isDirectory: true)
-        candidates.append(homeLibrary.appendingPathComponent("Caches", isDirectory: true).appendingPathComponent("Nuvio", isDirectory: true))
+        candidates.append(homeLibrary.appendingPathComponent("Caches", isDirectory: true).appendingPathComponent("NuvioTV", isDirectory: true))
         candidates.append(
             homeLibrary
                 .appendingPathComponent("Application Support", isDirectory: true)
-                .appendingPathComponent("Nuvio", isDirectory: true)
+                .appendingPathComponent("NuvioTV", isDirectory: true)
         )
-        candidates.append(homeLibrary.appendingPathComponent("Nuvio", isDirectory: true))
+        candidates.append(homeLibrary.appendingPathComponent("NuvioTV", isDirectory: true))
 
         let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
         if let documentsURL {
-            candidates.append(documentsURL.appendingPathComponent("Nuvio", isDirectory: true))
+            candidates.append(documentsURL.appendingPathComponent("NuvioTV", isDirectory: true))
         }
 
-        let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("Nuvio", isDirectory: true)
+        let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("NuvioTV", isDirectory: true)
         candidates.append(tmpURL)
 
         var attemptedPaths = Set<String>()
@@ -708,7 +708,7 @@ public class ProfileViewModel: ObservableObject {
                 profiles = [
                     Profile(
                         id: "guest",
-                        name: "Nuvio Guest",
+                        name: "WatchParty Guest",
                         isPinProtected: false,
                         isAdmin: true,
                         avatarId: ""
@@ -726,7 +726,7 @@ public class ProfileViewModel: ObservableObject {
                 try manager.replaceProfiles([
                     Profile(
                         id: "guest",
-                        name: "Nuvio Guest",
+                        name: "WatchParty Guest",
                         isPinProtected: false,
                         isAdmin: true,
                         avatarId: ""
@@ -1049,7 +1049,7 @@ public class ProfileViewModel: ObservableObject {
         contextWillChange.send(())
         let guest = Profile(
             id: "guest",
-            name: "Nuvio Guest",
+            name: "WatchParty Guest",
             isPinProtected: false,
             isAdmin: true,
             avatarId: ""

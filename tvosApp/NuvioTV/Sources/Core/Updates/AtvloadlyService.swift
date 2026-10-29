@@ -547,7 +547,7 @@ final class AtvloadlyService: ObservableObject {
         case .countdown(let tag, let seconds) where tag == release.tagName:
             return L10n.format(
                 "atvloadly_notice_countdown",
-                fallback: "Installing with atvloadly in %d s. NuvioTV will close; reopen it in about a minute.",
+                fallback: "Installing with atvloadly in %d s. WatchParty will close; reopen it in about a minute.",
                 seconds
             )
         case .installing(let version):
@@ -598,10 +598,10 @@ final class AtvloadlyService: ObservableObject {
     private var entryProblem: String? {
         guard case .connected(let entries) = connection else { return nil }
         if entries.isEmpty {
-            return L10n.string("atvloadly_status_not_found", fallback: "NuvioTV isn't installed through this atvloadly.")
+            return L10n.string("atvloadly_status_not_found", fallback: "WatchParty isn't installed through this atvloadly.")
         }
         guard let entry = selectedEntry else {
-            return L10n.string("atvloadly_status_choose_device", fallback: "atvloadly has NuvioTV for several Apple TVs. Choose this one below.")
+            return L10n.string("atvloadly_status_choose_device", fallback: "atvloadly has WatchParty for several Apple TVs. Choose this one below.")
         }
         return entry.isTracked ? nil : Self.notTrackedMessage
     }
@@ -615,7 +615,7 @@ final class AtvloadlyService: ObservableObject {
     private static func installingMessage(_ version: String) -> String {
         L10n.format(
             "atvloadly_notice_installing",
-            fallback: "atvloadly is installing NuvioTV %@. NuvioTV will close; reopen it in about a minute.",
+            fallback: "atvloadly is installing WatchParty %@. WatchParty will close; reopen it in about a minute.",
             version
         )
     }
@@ -623,7 +623,7 @@ final class AtvloadlyService: ObservableObject {
     static var notTrackedMessage: String {
         L10n.string(
             "atvloadly_status_not_tracked",
-            fallback: "NuvioTV isn't linked to a source in atvloadly. Open More → Track updates there."
+            fallback: "WatchParty isn't linked to a source in atvloadly. Open More → Track updates there."
         )
     }
 
@@ -650,7 +650,7 @@ final class AtvloadlyService: ObservableObject {
             // answered, or after it was declined.
             return L10n.string(
                 "atvloadly_error_unreachable",
-                fallback: "Can't reach atvloadly. Check the address, that atvloadly is running, and that NuvioTV is allowed to use the local network in the Apple TV's privacy settings, then refresh."
+                fallback: "Can't reach atvloadly. Check the address, that atvloadly is running, and that WatchParty is allowed to use the local network in the Apple TV's privacy settings, then refresh."
             )
         case .badResponse:
             return L10n.string("atvloadly_error_response", fallback: "That address didn't answer like atvloadly.")

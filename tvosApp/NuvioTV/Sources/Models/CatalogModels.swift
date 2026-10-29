@@ -3685,7 +3685,7 @@ enum ContinueWatchingStore {
     /// and `ContinueWatchingBuilder` rebuilds this from it on the next Home load.
     private static var storageDirectoryURL: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Nuvio", isDirectory: true)
+            .appendingPathComponent("NuvioTV", isDirectory: true)
             .appendingPathComponent(storageDirectoryName, isDirectory: true)
     }
 
@@ -3698,7 +3698,7 @@ enum ContinueWatchingStore {
         if let applicationSupport = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             urls.append(
                 applicationSupport
-                    .appendingPathComponent("Nuvio", isDirectory: true)
+                    .appendingPathComponent("NuvioTV", isDirectory: true)
                     .appendingPathComponent(storageDirectoryName, isDirectory: true)
             )
         }
@@ -6162,7 +6162,7 @@ enum LargePayloadStore {
                 continue
             }
         }
-        print("Nuvio large payload write failed for \(key)")
+        print("WatchParty large payload write failed for \(key)")
         return false
     }
 
@@ -6248,7 +6248,7 @@ enum LargePayloadStore {
 
     private static var cachesBase: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Nuvio", isDirectory: true)
+            .appendingPathComponent("NuvioTV", isDirectory: true)
     }
 
     /// Base64 so a profile-scoped key with `/` or `.` can't escape the
@@ -10116,14 +10116,14 @@ enum WatchedStore {
             } catch {
                 let primaryReason = primaryError.map(diagnosticText(for:)) ?? "unknown error"
                 persistenceDiagnostic = "save failed: \(primaryReason); \(fallbackStorageLabel): \(diagnosticText(for: error))"
-                print("Nuvio watched storage write failed: \(persistenceDiagnostic)")
+                print("WatchParty watched storage write failed: \(persistenceDiagnostic)")
                 return false
             }
         }
 
         let reason = primaryError.map(diagnosticText(for:)) ?? "unknown error"
         persistenceDiagnostic = "save failed: \(reason); \(fallbackStorageLabel) unavailable"
-        print("Nuvio watched storage write failed: \(persistenceDiagnostic)")
+        print("WatchParty watched storage write failed: \(persistenceDiagnostic)")
         return false
     }
 
@@ -10155,7 +10155,7 @@ enum WatchedStore {
     private static var storageDirectoryURL: URL? {
         #if os(tvOS) && !targetEnvironment(simulator)
         return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Nuvio", isDirectory: true)
+            .appendingPathComponent("NuvioTV", isDirectory: true)
             .appendingPathComponent(storageDirectoryName, isDirectory: true)
         #else
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -10169,7 +10169,7 @@ enum WatchedStore {
             .appendingPathComponent(storageDirectoryName, isDirectory: true)
         #else
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Nuvio", isDirectory: true)
+            .appendingPathComponent("NuvioTV", isDirectory: true)
             .appendingPathComponent(storageDirectoryName, isDirectory: true)
         #endif
     }

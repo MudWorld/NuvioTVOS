@@ -136,7 +136,7 @@ struct PlaybackDiagnosticHistoryView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Text(session.id == PlaybackTimelineRecorder.sessionID ? "This app session" : "Previous app session")
                                 .font(.title2.bold())
-                            Text("Nuvio \(session.appVersion) (\(session.build)) · \(session.osVersion)")
+                            Text("WatchParty \(session.appVersion) (\(session.build)) · \(session.osVersion)")
                                 .font(.system(size: 20)).foregroundStyle(.secondary)
                             Text(session.startedAt.formatted(date: .abbreviated, time: .standard))
                             if session.droppedEvents > 0 {

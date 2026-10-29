@@ -62,7 +62,7 @@ enum TraktWatchProgressSource: String, CaseIterable, Codable {
         case .simkl: return "Simkl"
         case .mdblist: return "MDBList"
         case .wetrakr: return "WeTrakr"
-        case .nuvioSync: return "Nuvio Sync"
+        case .nuvioSync: return "WatchParty Sync"
         }
     }
 }
@@ -80,7 +80,7 @@ enum TraktLibrarySourceMode: String, CaseIterable {
         case .simkl: return "Simkl"
         case .mdblist: return "MDBList"
         case .wetrakr: return "WeTrakr"
-        case .local: return "Nuvio Library"
+        case .local: return "WatchParty Library"
         }
     }
 }

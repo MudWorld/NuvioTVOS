@@ -37,7 +37,7 @@ extension WatchPartyService {
             }
             return WatchPartyEnvironment(configuration: configuration, userID: userID, profileID: profile.id,
                                          identity: WatchPartyIdentity(deviceID: deviceID,
-                                                                      displayName: name.isEmpty ? "Nuvio" : String(name.prefix(40)),
+                                                                      displayName: name.isEmpty ? "WatchParty" : String(name.prefix(40)),
                                                                       avatarURL: avatar, avatarColor: color))
         }, makeRemote: { environment, context, validator in
             WatchPartyAPI(configuration: environment.configuration, context: context,

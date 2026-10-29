@@ -104,7 +104,7 @@ struct LoginView: View {
 
             Text(auth.isAuthenticated
                  ? L10n.string("auth_signed_in", fallback: "You're signed in")
-                 : L10n.string("auth_sign_in_nuvio", fallback: "Sign in to Nuvio"))
+                 : L10n.string("auth_sign_in_nuvio", fallback: "Sign in to WatchParty"))
                 .font(.system(size: 40, weight: .bold))
                 .foregroundColor(.white)
 
@@ -360,7 +360,7 @@ struct LoginView: View {
             LoginLinkButton(
                 title: isSignUp
                     ? L10n.string("auth_already_have_account", fallback: "Already have an account? Sign in")
-                    : L10n.string("auth_new_to_nuvio", fallback: "New to Nuvio? Create an account")
+                    : L10n.string("auth_new_to_nuvio", fallback: "New to WatchParty? Create an account")
             ) {
                 isSignUp.toggle()
                 auth.errorMessage = nil
