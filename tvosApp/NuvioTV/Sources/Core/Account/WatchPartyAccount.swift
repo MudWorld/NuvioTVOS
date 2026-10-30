@@ -70,6 +70,29 @@ final class WatchPartyAccount: ObservableObject {
     // MARK: - Launch
 
     /// Call first in `App.init()`: pulls newer sections (≤ 6 s) and writes them before stores load.
+    /// Secret shared by every device of this account (server section `remote.key`). The iPad
+    /// remote uses it to find and authenticate this TV; it is created on first use.
+    func remoteKey() async -> String? {
+        guard let token = Self.readToken() else { return nil }
+        if let cached = Self.readSecret("remotekey") { return cached }
+
+        func fetch() async -> String? {
+            guard let data = try? await Self.request("GET", "/v1/data/remote.key", json: nil, token: token),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let value = object["data"] as? String, value.count >= 32 else { return nil }
+            return value
+        }
+
+        var secret = await fetch()
+        if secret == nil {
+            let fresh = (0..<32).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
+            _ = try? await Self.request("PUT", "/v1/data/remote.key", json: ["data": fresh], token: token)
+            secret = await fetch()
+        }
+        if let secret { Self.writeSecret("remotekey", secret) }
+        return secret
+    }
+
     nonisolated static func prepareOnLaunch() {
         guard let token = readToken() else { return }
         let semaphore = DispatchSemaphore(value: 0)
@@ -129,6 +152,7 @@ final class WatchPartyAccount: ObservableObject {
             _ = try? await Self.request("POST", "/v1/logout", json: [:], token: token)
         }
         Self.deleteToken()
+        Self.deleteSecret("remotekey")
         UserDefaults.standard.removeObject(forKey: Self.stateKey)
         session = nil
     }
@@ -395,10 +419,32 @@ final class WatchPartyAccount: ObservableObject {
         SecItemDelete(keychainQuery() as CFDictionary)
     }
 
-    nonisolated private static func keychainQuery() -> [String: Any] {
+    nonisolated private static func keychainQuery(account: String = "token") -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: keychainService,
-         kSecAttrAccount as String: "token"]
+         kSecAttrAccount as String: account]
+    }
+
+    nonisolated private static func readSecret(_ account: String) -> String? {
+        var query = keychainQuery(account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    nonisolated private static func writeSecret(_ account: String, _ value: String) {
+        deleteSecret(account)
+        var query = keychainQuery(account: account)
+        query[kSecValueData as String] = Data(value.utf8)
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        SecItemAdd(query as CFDictionary, nil)
+    }
+
+    nonisolated private static func deleteSecret(_ account: String) {
+        SecItemDelete(keychainQuery(account: account) as CFDictionary)
     }
 
     nonisolated private static func sha256(_ text: String) -> String {

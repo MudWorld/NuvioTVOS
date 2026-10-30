@@ -19,7 +19,10 @@ import AetherEngine
 struct NuvioTVApp: App {
     init() {
         WatchPartyAccount.prepareOnLaunch()
-        Task { @MainActor in WatchPartyAccount.shared.start() }
+        Task { @MainActor in
+            WatchPartyAccount.shared.start()
+            RemoteControlService.shared.observeAccount()
+        }
         let totalRam = ProcessInfo.processInfo.physicalMemory
         let isLegacyDevice = totalRam <= 2_500_000_000 // <= 2.5 GB (Apple TV HD)
         let memCapacity = isLegacyDevice ? (12 * 1024 * 1024) : (32 * 1024 * 1024)
@@ -4234,6 +4237,13 @@ private struct TVMainTabView: View {
         }
         .onChange(of: liveTVStore.playlists.isEmpty) { _, isEmpty in
             if isEmpty, selectedTab == .liveTV { selectedTab = .home }
+        }
+        .onAppear {
+            // iPad remote: "play this channel on the TV".
+            RemoteControlService.shared.playLiveChannel = { channel in
+                guard let url = URL(string: channel.streamURL) else { return }
+                onPlayCloudFile(url, channel.playbackMeta)
+            }
         }
     }
 

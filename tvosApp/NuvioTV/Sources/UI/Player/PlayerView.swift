@@ -185,6 +185,10 @@ struct PlayerView: View {
 
     var body: some View {
         layersWithRemoteCommands
+            .onAppear { RemoteControlService.shared.player = viewModel }
+            .onDisappear {
+                if RemoteControlService.shared.player === viewModel { RemoteControlService.shared.player = nil }
+            }
     }
 
     var isStandalonePlaybackSession: Bool {
