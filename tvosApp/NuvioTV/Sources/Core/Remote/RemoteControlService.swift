@@ -58,7 +58,7 @@ final class RemoteControlService {
         let identifier = Self.accountIdentifier(secret)
         do {
             let listener = try NWListener(using: .tcp)
-            listener.service = NWListener.Service(name: "\(UIDevice.current.name) #\(identifier)", type: Self.serviceType)
+            listener.service = NWListener.Service(name: "\(String(UIDevice.current.name.prefix(30))) #\(identifier)", type: Self.serviceType)
             listener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor in self?.accept(connection) }
             }
@@ -238,8 +238,8 @@ final class RemoteControlService {
             "hasPlayer": true,
             "title": player.title,
             "subtitle": player.subtitle,
-            "position": player.time.current,
-            "duration": player.time.duration,
+            "position": Self.finite(player.time.current),
+            "duration": Self.finite(player.time.duration),
             "live": player.isLiveStream,
             "status": status,
         ]
@@ -254,12 +254,15 @@ final class RemoteControlService {
     }
 
     private func send(_ object: [String: Any], to client: Client) {
-        guard var data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        guard JSONSerialization.isValidJSONObject(object),
+              var data = try? JSONSerialization.data(withJSONObject: object) else { return }
         data.append(0x0A)
         client.connection.send(content: data, completion: .contentProcessed { _ in })
     }
 
     // MARK: - Helpers
+
+    private static func finite(_ value: Double) -> Double { value.isFinite ? value : 0 }
 
     private static func number(_ value: Any?) -> Double? {
         if let double = value as? Double { return double.isFinite ? double : nil }

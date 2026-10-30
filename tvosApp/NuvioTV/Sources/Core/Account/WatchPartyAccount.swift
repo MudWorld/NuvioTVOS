@@ -70,26 +70,33 @@ final class WatchPartyAccount: ObservableObject {
     // MARK: - Launch
 
     /// Call first in `App.init()`: pulls newer sections (≤ 6 s) and writes them before stores load.
-    /// Secret shared by every device of this account (server section `remote.key`). The iPad
-    /// remote uses it to find and authenticate this TV; it is created on first use.
     func remoteKey() async -> String? {
         guard let token = Self.readToken() else { return nil }
         if let cached = Self.readSecret("remotekey") { return cached }
 
-        func fetch() async -> String? {
-            guard let data = try? await Self.request("GET", "/v1/data/remote.key", json: nil, token: token),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let value = object["data"] as? String, value.count >= 32 else { return nil }
-            return value
+        enum Lookup { case found(String), missing, failed }
+
+        func fetch() async -> Lookup {
+            do {
+                let data = try await Self.request("GET", "/v1/data/remote.key", json: nil, token: token)
+                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let value = object["data"] as? String, value.count >= 32 else { return .failed }
+                return .found(value)
+            } catch let error as AccountError {
+                return error.code == "not_found" ? .missing : .failed
+            } catch {
+                return .failed
+            }
         }
 
-        var secret = await fetch()
-        if secret == nil {
+        var lookup = await fetch()
+        if case .missing = lookup {
             let fresh = (0..<32).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
             _ = try? await Self.request("PUT", "/v1/data/remote.key", json: ["data": fresh], token: token)
-            secret = await fetch()
+            lookup = await fetch()
         }
-        if let secret { Self.writeSecret("remotekey", secret) }
+        guard case .found(let secret) = lookup else { return nil }
+        Self.writeSecret("remotekey", secret)
         return secret
     }
 
