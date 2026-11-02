@@ -705,6 +705,7 @@ struct ContentView: View {
                 watchPartyOwner.attach(authManager: authManager, profiles: profileViewModel)
             }
             syncManager.attach(authManager: authManager, profileViewModel: profileViewModel)
+            WatchPartyAccount.shared.authManager = authManager
             ICloudSettingsSyncManager.shared.start()
             setupPictureInPicture()
             guard !resolvedInitialScreen else { return }

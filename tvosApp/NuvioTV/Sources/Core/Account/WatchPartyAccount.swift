@@ -8,6 +8,10 @@ import Security
 /// file in Application Support is uploaded as its own section (`tv.d.*`, `tv.f.*`).
 /// Newer sections are applied in `prepareOnLaunch()` before any store is read; data
 /// that arrives while the app runs is applied on the next launch.
+///
+/// Profiles and everything kept per profile (continue watching, watched, library, add-ons,
+/// collections) go through the app's own Nuvio sync, which the same server answers as a
+/// self-hosted backend. Signing in here also signs in that sync.
 @MainActor
 final class WatchPartyAccount: ObservableObject {
     static let shared = WatchPartyAccount()
@@ -34,6 +38,7 @@ final class WatchPartyAccount: ObservableObject {
             case "too_many_attempts": return "Zu viele Versuche. Bitte 15 Minuten warten."
             case "unauthorized": return "Sitzung abgelaufen. Bitte neu anmelden."
             case "network": return "Server nicht erreichbar. Prüfe die Internetverbindung."
+            case "sync_sign_in_failed": return "Anmeldung für den Profil-Sync fehlgeschlagen. Bitte versuch es noch einmal."
             default: return "Etwas ist schiefgelaufen. Bitte versuch es noch einmal."
             }
         }
@@ -44,13 +49,31 @@ final class WatchPartyAccount: ObservableObject {
     @Published private(set) var lastSync: Date?
     @Published private(set) var lastError: String?
     @Published private(set) var pendingRelaunch = false
+    /// Signed in before the Nuvio sync came along: sign in once more so profiles sync too.
+    @Published private(set) var needsSyncSignIn = UserDefaults.standard.bool(forKey: WatchPartyAccount.needsSyncSignInKey)
+
+    /// The app's sign-in for the Nuvio sync; set by the app when it creates it.
+    weak var authManager: AuthManager?
 
     nonisolated private static let server = URL(string: "https://sync.mudworld.space")!
     nonisolated private static let keychainService = "space.mudworld.watchparty.account"
     nonisolated private static let stateKey = "watchparty.account.state.v1"
+    nonisolated private static let needsSyncSignInKey = "watchparty.account.needsSyncSignIn"
+    /// Nuvio sync signs in with an e-mail; WatchParty accounts are user names.
+    nonisolated private static let accountEmailDomain = "watchparty.local"
+    /// Public anon key of the WatchParty server: every app request carries it, and it only
+    /// allows signing in with an account.
+    nonisolated private static let syncConfiguration = ServerConfiguration(
+        backendURL: "https://sync.mudworld.space",
+        publishableKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJudXZpby13YXRjaHBhcnR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6MjM5Nzk0NTYwMH0.GRt8FY_cs7h0KOysW54JQ4Wzuy4LEuLwPJlChCcQg9o",
+        capabilities: ServerCapabilities(emailPasswordAuth: true, tvLogin: false),
+        discoveryURL: nil
+    )
     nonisolated private static let maxFileBytes = 1_800_000
     nonisolated private static let excludedDefaultKeys: Set<String> = [
         stateKey,
+        needsSyncSignInKey,
+        "nuvio.auth.session",
         "nuvio.auth.installMarker",
         "nuvio.auth.skippedLogin",
         "nuvio.auth.serverConfiguration",
@@ -101,6 +124,13 @@ final class WatchPartyAccount: ObservableObject {
     }
 
     nonisolated static func prepareOnLaunch() {
+        useWatchPartyServer()
+        if readToken() != nil, loadState().nuvioSyncSignedIn != true {
+            // Signed in before the Nuvio sync came along. The password is not stored, so the
+            // account settings ask for it once more; local data stays.
+            deleteToken()
+            UserDefaults.standard.set(true, forKey: needsSyncSignInKey)
+        }
         guard let token = readToken() else { return }
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
@@ -108,6 +138,18 @@ final class WatchPartyAccount: ObservableObject {
             try? await pullNewer(token: token, apply: true)
         }
         _ = semaphore.wait(timeout: .now() + 6)
+    }
+
+    /// Points the app's Nuvio sync at the WatchParty server (read by AuthConfig). A session
+    /// from another server is dropped; it could never be refreshed here.
+    nonisolated private static func useWatchPartyServer() {
+        let store = ServerConfigurationStore()
+        guard store.configuration != syncConfiguration else { return }
+        store.save(syncConfiguration)
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                       kSecAttrService as String: "com.nuvio.app.tv.auth",
+                       kSecAttrAccount as String: "session"] as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: "nuvio.auth.session")
     }
 
     func start() {
@@ -131,19 +173,26 @@ final class WatchPartyAccount: ObservableObject {
     private func authenticate(path: String, body: [String: String]) async throws -> Outcome {
         var payload = body
         payload["device"] = "Apple TV"
+        let hadLocalSnapshot = !Self.loadState().versions.isEmpty
         let data = try await Self.request("POST", path, json: payload, token: nil)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let token = object["token"] as? String,
               let username = object["username"] as? String else { throw AccountError(code: "invalid_response") }
+        try await signInNuvioSync(username: username, password: body["password"] ?? "")
         Self.writeToken(token)
         var state = AccountState()
         state.username = username
         state.isAdmin = (object["isAdmin"] as? Bool) == true
+        state.nuvioSyncSignedIn = true
         Self.saveState(state)
+        UserDefaults.standard.removeObject(forKey: Self.needsSyncSignInKey)
+        needsSyncSignIn = false
         session = Session(username: username, isAdmin: state.isAdmin)
 
+        // Signing in again on this Apple TV keeps its own data; only a fresh Apple TV
+        // takes the snapshot of another one.
         let remote = try await Self.listSections(token: token).keys.filter { $0.hasPrefix("tv.") }
-        if remote.isEmpty {
+        if remote.isEmpty || hadLocalSnapshot {
             try await pushChanges(force: true)
             start()
             return .uploadedLocalData
@@ -153,11 +202,19 @@ final class WatchPartyAccount: ObservableObject {
         return .relaunchRequired
     }
 
+    /// Signs in the app's Nuvio sync with the same account; it then pulls the profiles.
+    private func signInNuvioSync(username: String, password: String) async throws {
+        guard let auth = authManager else { throw AccountError(code: "sync_sign_in_failed") }
+        await auth.signIn(email: "\(username.lowercased())@\(Self.accountEmailDomain)", password: password)
+        guard auth.isAuthenticated else { throw AccountError(code: "sync_sign_in_failed") }
+    }
+
     func signOut() async {
         if let token = Self.readToken() {
             try? await pushChanges(force: false)
             _ = try? await Self.request("POST", "/v1/logout", json: [:], token: token)
         }
+        authManager?.signOut()
         Self.deleteToken()
         Self.deleteSecret("remotekey")
         UserDefaults.standard.removeObject(forKey: Self.stateKey)
@@ -392,6 +449,8 @@ final class WatchPartyAccount: ObservableObject {
         var versions: [String: Int64] = [:]
         var hashes: [String: String] = [:]
         var stagedSections: Set<String> = []
+        /// Optional so states saved by older builds still decode.
+        var nuvioSyncSignedIn: Bool?
     }
 
     nonisolated private static func loadState() -> AccountState {

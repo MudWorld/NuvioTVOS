@@ -1721,6 +1721,9 @@ private struct WatchPartyAccountGroup: View {
                     Task { await account.signOut() }
                 }
             } else {
+                if account.needsSyncSignIn {
+                    SettingsInfoRow(title: "Neu", value: "Profile wie bei Netflix, abgeglichen mit PC, iPad und Fernseher. Bitte melde dich einmal neu an.")
+                }
                 SettingsActionRow(title: "Anmelden oder Konto erstellen", subtitle: "Profile, Addons, Sammlungen und Fortschritt auf allen Geräten", value: "Öffnen", accentColor: accentColor) {
                     showingLogin = true
                 }
