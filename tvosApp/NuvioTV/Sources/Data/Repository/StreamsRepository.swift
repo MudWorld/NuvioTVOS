@@ -415,7 +415,9 @@ final class StreamsRepository: ObservableObject {
         publish(groups: groups, requestKey: requestKey, forceLoading: forceLoading)
     }
 
-    private func publish(groups: [AddonStreamGroup], requestKey: String, forceLoading: Bool) {
+    private func publish(groups unfilteredGroups: [AddonStreamGroup], requestKey: String, forceLoading: Bool) {
+        // WatchParty: the stream list and smart playback only ever see streams in the chosen language
+        let groups = StreamLanguageClassifier.apply(unfilteredGroups, filter: StreamLanguageFilter.current)
         let groupLoading = groups.contains(where: \.isLoading)
         let anyLoading = forceLoading || groupLoading
         let emptyReason: StreamsEmptyStateReason? = {

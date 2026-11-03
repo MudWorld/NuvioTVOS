@@ -296,6 +296,7 @@ enum SettingsKey {
     static let reuseLastLinkCacheHours = "nuvio.tv.settings.playback.reuseLastLinkCacheHours"
     static let rememberLastSourceFocus = "nuvio.tv.settings.playback.rememberLastSourceFocus"
     static let smartStreamUseTopResult = "nuvio.tv.settings.playback.smartStreamUseTopResult"
+    static let streamLanguageFilter = "nuvio.tv.settings.playback.streamLanguageFilter"
     static let smartStreamQuality = "nuvio.tv.settings.playback.smartStreamQuality"
     static let smartSubtitleMatching = "nuvio.tv.settings.playback.smartSubtitleMatching"
     static let backgroundStreamPreFetch = "nuvio.tv.settings.playback.backgroundStreamPreFetch"
@@ -403,7 +404,7 @@ enum SettingsKey {
         cinemetaDisabled, deletedLocalAddons,
         smbServers, smbLibraryIndex, smbLocalRowEnabled,
         jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
-        playerEngine, trueHDSpatialAudio, preferDualLayerDolbyVision, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, rememberLastSourceFocus, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        playerEngine, trueHDSpatialAudio, preferDualLayerDolbyVision, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, rememberLastSourceFocus, smartStreamUseTopResult, streamLanguageFilter, smartStreamQuality, smartSubtitleMatching,
         backgroundStreamPreFetch,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, autoSkipIntro, autoSkipRecap, autoSkipOutro, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
@@ -8358,6 +8359,7 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.reuseLastLinkCacheHours) private var reuseLastLinkCacheHours = 24
     @AppStorage(SettingsKey.rememberLastSourceFocus) private var rememberLastSourceFocus = false
     @AppStorage(SettingsKey.smartStreamUseTopResult) private var smartStreamUseTopResult = false
+    @AppStorage(SettingsKey.streamLanguageFilter) private var streamLanguageFilter = StreamLanguageFilter.all.rawValue
     @AppStorage(SettingsKey.backgroundStreamPreFetch) private var backgroundStreamPreFetch = true
     @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
     @AppStorage(SettingsKey.smartSubtitleMatching) private var smartSubtitleMatching = true
@@ -8706,6 +8708,16 @@ private struct PlaybackSettingsView: View {
             }
 
             SettingsGroup(title: L10n.string("tvos_settings_smart_playback", fallback: "Smart Playback"), subtitle: L10n.string("tvos_settings_automatically_choose_streams_and_matchin_9ca69e9f", fallback: "Automatically choose streams and matching subtitles")) {
+                // WatchParty: hides streams in other languages from the list and from Auto Select Stream
+                SettingsOptionRow(
+                    title: "Stream-Sprache",
+                    subtitle: "Nur Streams in dieser Sprache anzeigen und automatisch wählen",
+                    selection: $streamLanguageFilter,
+                    options: StreamLanguageFilter.allCases.map(\.rawValue),
+                    accentColor: accentColor,
+                    optionLabel: { StreamLanguageFilter(rawValue: $0)?.label ?? $0 }
+                )
+
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_auto_select_stream", fallback: "Auto Select Stream"),
                     subtitle: L10n.string("tvos_settings_skip_the_stream_picker_and_choose_the_be_da51db1f", fallback: "Skip the stream picker and choose the best link. Hold Play on details to pick manually."),
