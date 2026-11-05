@@ -376,6 +376,13 @@ final class AuthManager: ObservableObject {
         }
     }
 
+    /// Signs in with a session the WatchParty server issued for an approved TV code.
+    func signIn(tokenResponse data: Data) async {
+        await runEmail { service in
+            try await service.session(fromTokenResponse: data)
+        }
+    }
+
     func signUp(email: String, password: String) async {
         await runEmail { service in
             try await service.signUpWithEmail(email: email, password: password)

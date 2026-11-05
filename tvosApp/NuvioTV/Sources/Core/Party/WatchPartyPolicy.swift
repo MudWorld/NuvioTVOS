@@ -3,8 +3,8 @@ import Foundation
 /// Global feature configuration for Watch Party capabilities.
 enum WatchPartyConfiguration {
     /// Enables Watch Party capabilities across tvOS tabs, details, and player.
-    /// Off in WatchParty: its server (sync.mudworld.space) has no realtime channel for it.
-    static let isEnabled = false
+    /// On in WatchParty: sync.mudworld.space runs the watch_party_* RPCs and the realtime channel.
+    static let isEnabled = true
 }
 
 // Sync semantics adapted from NuvioMedia/NuvioTV (GPL-3.0),

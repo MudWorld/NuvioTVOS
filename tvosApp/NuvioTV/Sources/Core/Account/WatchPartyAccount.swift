@@ -39,6 +39,7 @@ final class WatchPartyAccount: ObservableObject {
             case "unauthorized": return "Sitzung abgelaufen. Bitte neu anmelden."
             case "network": return "Server nicht erreichbar. Prüfe die Internetverbindung."
             case "sync_sign_in_failed": return "Anmeldung für den Profil-Sync fehlgeschlagen. Bitte versuch es noch einmal."
+            case "code_expired": return "Der Code ist abgelaufen. Es wird ein neuer angezeigt."
             default: return "Etwas ist schiefgelaufen. Bitte versuch es noch einmal."
             }
         }
@@ -179,10 +180,74 @@ final class WatchPartyAccount: ObservableObject {
               let token = object["token"] as? String,
               let username = object["username"] as? String else { throw AccountError(code: "invalid_response") }
         try await signInNuvioSync(username: username, password: body["password"] ?? "")
+        return try await finishSignIn(token: token, username: username,
+                                      isAdmin: (object["isAdmin"] as? Bool) == true,
+                                      hadLocalSnapshot: hadLocalSnapshot)
+    }
+
+    // MARK: - Sign-in by code
+
+    /// A code this Apple TV shows; a phone, iPad or PC that is signed in approves it.
+    struct CodeLogin: Equatable {
+        let code: String
+        let display: String
+        let secret: String
+        let url: String
+        let expiresAt: Date
+        let interval: TimeInterval
+        /// An iPad or iPhone of this household was signed in recently, so the code is the easy way.
+        let suggestCode: Bool
+    }
+
+    func startCodeLogin() async throws -> CodeLogin {
+        let data = try await Self.request("POST", "/v1/tv-login/start",
+                                          json: ["device": "Apple TV", "platform": "appletv"], token: nil)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let code = object["code"] as? String,
+              let secret = object["secret"] as? String else { throw AccountError(code: "invalid_response") }
+        let lifetime = (object["expiresIn"] as? NSNumber)?.doubleValue ?? 600
+        return CodeLogin(code: code, display: object["display"] as? String ?? code, secret: secret,
+                         url: object["url"] as? String ?? "", expiresAt: Date().addingTimeInterval(lifetime),
+                         interval: max(2, (object["interval"] as? NSNumber)?.doubleValue ?? 3),
+                         suggestCode: (object["suggestCode"] as? Bool) == true)
+    }
+
+    /// nil while nobody has approved the code yet; throws "code_expired" once it is gone.
+    func pollCodeLogin(_ login: CodeLogin) async throws -> Outcome? {
+        let data = try await Self.request("POST", "/v1/tv-login/poll",
+                                          json: ["code": login.code, "secret": login.secret], token: nil)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AccountError(code: "invalid_response")
+        }
+        switch object["status"] as? String {
+        case "pending":
+            return nil
+        case "approved":
+            guard let login = object["login"] as? [String: Any],
+                  let token = login["token"] as? String,
+                  let username = login["username"] as? String,
+                  let sync = object["sync"] as? [String: Any] else { throw AccountError(code: "invalid_response") }
+            let hadLocalSnapshot = !Self.loadState().versions.isEmpty
+            guard let auth = authManager else { throw AccountError(code: "sync_sign_in_failed") }
+            await auth.signIn(tokenResponse: try JSONSerialization.data(withJSONObject: sync))
+            guard auth.isAuthenticated else { throw AccountError(code: "sync_sign_in_failed") }
+            return try await finishSignIn(token: token, username: username,
+                                          isAdmin: (login["isAdmin"] as? Bool) == true,
+                                          hadLocalSnapshot: hadLocalSnapshot)
+        default:
+            throw AccountError(code: "code_expired")
+        }
+    }
+
+    /// The WatchParty device token, for the server's own endpoints (reports, error reports).
+    nonisolated static func deviceToken() -> String? { readToken() }
+
+    private func finishSignIn(token: String, username: String, isAdmin: Bool,
+                              hadLocalSnapshot: Bool) async throws -> Outcome {
         Self.writeToken(token)
         var state = AccountState()
         state.username = username
-        state.isAdmin = (object["isAdmin"] as? Bool) == true
+        state.isAdmin = isAdmin
         state.nuvioSyncSignedIn = true
         Self.saveState(state)
         UserDefaults.standard.removeObject(forKey: Self.needsSyncSignInKey)

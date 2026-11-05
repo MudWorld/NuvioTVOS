@@ -8483,6 +8483,18 @@ private struct TvStreamPickerOverlay: View {
         )
     }
 
+    /// "Link geht nicht": tells the WatchParty server, whose Sunday check looks at these first.
+    private func reportBroken(_ stream: NuvioStream) {
+        let meta = self.meta
+        let episode = self.episode
+        Task { @MainActor in
+            let sent = await WatchPartyExtras.reportBrokenStream(stream, meta: meta, episode: episode)
+            unavailableAlertMessage = sent
+                ? "Danke, der Link ist gemeldet. Er wird bei der nächsten Wartung geprüft."
+                : "Die Meldung konnte nicht gesendet werden. Bist du angemeldet und online?"
+        }
+    }
+
     private func select(_ stream: NuvioStream, player: ExternalPlayer?) {
         guard let reason = stream.unavailabilityReason else {
             let hasDebrid = DebridResolver(store: ProfileSettings.current).isEnabled
@@ -8767,7 +8779,8 @@ private struct TvStreamPickerOverlay: View {
                                         ?? TvStreamCardPresentation(pending: badgeSettings),
                                     externalFocus: $focusedItem,
                                     action: { select(stream, player: nil) },
-                                    onSelectPlayer: { player in select(stream, player: player) }
+                                    onSelectPlayer: { player in select(stream, player: player) },
+                                    onReport: { reportBroken(stream) }
                                 )
                                 .id(stream.id)
                                 .onAppear {
@@ -9190,6 +9203,7 @@ private struct TvStreamCard: View {
     let externalFocus: FocusState<String?>.Binding
     let action: () -> Void
     var onSelectPlayer: ((ExternalPlayer) -> Void)? = nil
+    var onReport: (() -> Void)? = nil
 
     /// Local focus drives appearance only for this card, so focus moves do not
     /// push `isFocused` through the parent ForEach for every sibling.
@@ -9204,8 +9218,10 @@ private struct TvStreamCard: View {
         presentation: TvStreamCardPresentation,
         externalFocus: FocusState<String?>.Binding,
         action: @escaping () -> Void,
-        onSelectPlayer: ((ExternalPlayer) -> Void)? = nil
+        onSelectPlayer: ((ExternalPlayer) -> Void)? = nil,
+        onReport: (() -> Void)? = nil
     ) {
+        self.onReport = onReport
         self.stream = stream
         self.importedBadges = presentation.importedBadges
         self.fileSizeLabel = presentation.fileSizeLabel
@@ -9318,6 +9334,13 @@ private struct TvStreamCard: View {
                     } label: {
                         Label(player.rawValue, systemImage: player.systemImage)
                     }
+                }
+            }
+            if let onReport {
+                Button {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { onReport() }
+                } label: {
+                    Label("Link geht nicht", systemImage: "flag")
                 }
             }
         }

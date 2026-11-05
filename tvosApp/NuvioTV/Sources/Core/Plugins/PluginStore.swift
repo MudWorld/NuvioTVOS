@@ -58,7 +58,10 @@ final class PluginStore: ObservableObject {
 
     func enabledScrapers(forType type: String) -> [PluginScraper] {
         guard pluginsEnabled else { return [] }
-        return scrapers.filter { $0.enabled && $0.manifestEnabled && $0.supportsType(type) }
+        return scrapers.filter {
+            $0.enabled && $0.manifestEnabled && $0.supportsType(type) &&
+                !WatchPartyExtras.isProviderDown(scraperId: $0.scraperId, repositoryURL: $0.repositoryURL)
+        }
     }
 
     func scrapers(in repository: PluginRepositoryItem) -> [PluginScraper] {

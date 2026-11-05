@@ -217,6 +217,11 @@ struct AuthService {
         )
     }
 
+    /// A GoTrue token response handed over by the WatchParty server after a sign-in by code.
+    func session(fromTokenResponse data: Data) async throws -> AuthSession {
+        try authSession(from: decoder.decode(NuvioTokenResponse.self, from: data))
+    }
+
     // MARK: - Helpers
 
     private func authSession(from token: NuvioTokenResponse) throws -> AuthSession {

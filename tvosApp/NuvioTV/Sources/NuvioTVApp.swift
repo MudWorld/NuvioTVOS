@@ -19,6 +19,7 @@ import AetherEngine
 struct NuvioTVApp: App {
     init() {
         WatchPartyAccount.prepareOnLaunch()
+        WatchPartyExtras.start()
         Task { @MainActor in
             WatchPartyAccount.shared.start()
             RemoteControlService.shared.observeAccount()
@@ -789,12 +790,15 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .background:
+                WatchPartyExtras.markRunning(false)
                 watchPartyOwner.suspendForInactivity()
                 backgroundedAt = Date()
                 syncManager.flushPendingPushes()
                 Task { try? await WatchPartyAccount.shared.pushChanges(force: false) }
             case .active:
+                WatchPartyExtras.markRunning(true)
                 if backgroundedAt != nil {
+                    Task.detached(priority: .utility) { await WatchPartyExtras.refreshProviderStatus() }
                     releaseUpdateService.beginForegroundSession()
                     announcementService.beginForegroundSession()
                 }

@@ -9795,6 +9795,8 @@ private struct AdvancedSettingsView: View {
 
     @AppStorage(PlaybackTimelineRecorder.enabledKey) private var timelineEnabled = false
     @State private var showingPlaybackHistory = false
+    @AppStorage(WatchPartyExtras.diagnosticsEnabledKey) private var watchPartyDiagnosticsEnabled = false
+    @State private var watchPartyReportStatus: String?
     @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
     @AppStorage(SettingsKey.playbackDiagnostics) private var playbackDiagnostics = false
     @AppStorage(SettingsKey.playbackDebug) private var playbackDebug = false
@@ -9854,6 +9856,28 @@ private struct AdvancedSettingsView: View {
                     action: { showingPlaybackHistory = true }
                 )
                 #endif
+
+                SettingsToggleRow(
+                    title: "Fehlerberichte an meinen WatchParty-Server senden",
+                    subtitle: "Abstürze und letzte Wiedergabe-Fehler, ohne Stream-Links, Schlüssel und Passwörter.",
+                    isOn: $watchPartyDiagnosticsEnabled,
+                    accentColor: accentColor
+                )
+                if watchPartyDiagnosticsEnabled {
+                    SettingsActionRow(
+                        title: "Fehlerbericht jetzt senden",
+                        subtitle: watchPartyReportStatus ?? "Schickt die letzten Wiedergabe-Protokolle an deinen Server.",
+                        value: "Senden",
+                        accentColor: accentColor,
+                        action: {
+                            watchPartyReportStatus = "Wird gesendet …"
+                            Task { @MainActor in
+                                let sent = (try? await WatchPartyExtras.sendReport()) == true
+                                watchPartyReportStatus = sent ? "Bericht gesendet." : "Senden fehlgeschlagen. Bist du angemeldet?"
+                            }
+                        }
+                    )
+                }
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_playback_debug_overlay", fallback: "Playback Debug Overlay"),
@@ -17024,6 +17048,9 @@ private struct PluginRepositoryGroup: View {
 
     private func scraperSubtitle(_ scraper: PluginScraper) -> String {
         var parts: [String] = []
+        if WatchPartyExtras.isProviderDown(scraperId: scraper.scraperId, repositoryURL: scraper.repositoryURL) {
+            parts.append("Derzeit gestört, wird bei der Suche übersprungen")
+        }
         if !scraper.version.isEmpty { parts.append("v\(scraper.version)") }
         let types = scraper.supportedTypes.map { PluginScraper.normalizedType($0) == "tv" ? "Series" : "Movies" }
         parts.append(Array(Set(types)).sorted().joined(separator: ", "))
