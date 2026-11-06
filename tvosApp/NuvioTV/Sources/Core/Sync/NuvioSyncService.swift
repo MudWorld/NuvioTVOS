@@ -1332,6 +1332,34 @@ final class NuvioSyncManager: ObservableObject {
     nonisolated static let reauthenticationMessage =
         "Your WatchParty session expired. Sign in again to resume syncing."
 
+    private static let pluginRepositoriesAdoptedKey = "nuvio.plugins.adoptedFromAccount.v1"
+
+    /// Adds the account's plugin repositories when this Apple TV has none yet. Runs once:
+    /// a user who later removes every repository keeps it that way.
+    private func adoptAccountPluginRepositoriesIfEmpty(session: AuthSession) async {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.pluginRepositoriesAdoptedKey) else { return }
+        guard PluginStore.shared.repositories.isEmpty else {
+            defaults.set(true, forKey: Self.pluginRepositoriesAdoptedKey)
+            return
+        }
+        do {
+            let rows = try await client.pullPluginRepositories(session: session, remoteProfileId: 1)
+            let urls = rows.filter { $0.enabled && !$0.url.isEmpty }.sorted { $0.sortOrder < $1.sortOrder }.map(\.url)
+            guard !urls.isEmpty else { return }
+            var added = 0
+            for url in urls {
+                if (try? await PluginStore.shared.addRepository(rawURL: url)) != nil { added += 1 }
+            }
+            if added > 0 { defaults.set(true, forKey: Self.pluginRepositoriesAdoptedKey) }
+            print("WatchParty sync added \(added) plugin repositor(ies) from the account.")
+        } catch is CancellationError {
+            return
+        } catch {
+            print("WatchParty plugin repository sync failed: \(error.localizedDescription)")
+        }
+    }
+
     private func pullThenPush(generation: UInt) async {
         // Release the who's-watching sync gate on every exit path; the happy
         // path clears it only after profile-scoped Home inputs are persisted.
@@ -1466,6 +1494,10 @@ final class NuvioSyncManager: ObservableObject {
                 Self.addonSyncDiagnostic = "failed: \(error.localizedDescription)"
                 print("WatchParty add-on sync failed: \(error.localizedDescription)")
             }
+
+            // Plugin repositories live only on this Apple TV. A fresh Apple TV takes the
+            // account's repositories once (new accounts get them preset by the server).
+            await adoptAccountPluginRepositoriesIfEmpty(session: session)
 
             do {
                 let collectionsBlob = try await collectionsRequest
@@ -3045,6 +3077,15 @@ final class NuvioAPIClient {
     fileprivate func pullAddons(session: AuthSession, remoteProfileId: Int) async throws -> [RemoteAddon] {
         let rows: LossyRows<RemoteAddon> = try await rest(
             "addons?select=%2A&profile_id=eq.\(remoteProfileId)&order=sort_order",
+            session: session
+        )
+        return rows.elements
+    }
+
+    /// The account's plugin repositories (`plugins` rows; same columns as `addons`).
+    fileprivate func pullPluginRepositories(session: AuthSession, remoteProfileId: Int) async throws -> [RemoteAddon] {
+        let rows: LossyRows<RemoteAddon> = try await rest(
+            "plugins?select=%2A&profile_id=eq.\(remoteProfileId)&order=sort_order",
             session: session
         )
         return rows.elements
